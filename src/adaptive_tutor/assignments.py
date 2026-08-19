@@ -755,16 +755,31 @@ class AssignmentService:
 
     def public_files(self, assignment_id: str) -> dict[str, str]:
         row = self.database.fetch_one(
-            "SELECT bundle_json FROM assignments WHERE id=?", (assignment_id,)
+            "SELECT bundle_json, current_stage FROM assignments WHERE id=?", (assignment_id,)
         )
         if row is None:
             raise ConfigurationError(f"Unknown assignment: {assignment_id}")
         bundle = AssignmentBundle.model_validate_json(row["bundle_json"])
-        return {
+        public = {
             item.path: item.content
             for item in bundle.files
             if item.role not in {"reference", "evaluator"}
         }
+        public[".adaptive-tutor/assignment.json"] = json.dumps(
+            {
+                "schema_version": "1.0",
+                "id": assignment_id,
+                "slug": bundle.slug,
+                "concepts": bundle.concepts,
+                "exercise_type": bundle.exercise_type.value,
+                "difficulty": bundle.difficulty,
+                "expected_minutes": bundle.expected_minutes,
+                "current_stage": int(row["current_stage"]),
+            },
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
+        return public
 
     def next_hint(self, assignment_id: str, learner_id: str) -> tuple[int, str]:
         row = self.database.fetch_one(

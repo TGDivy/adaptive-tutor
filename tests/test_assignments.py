@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from adaptive_tutor.assignments import (
@@ -46,6 +48,18 @@ def test_assignment_persistence_hides_reference_material(
     public = service.public_files("A-0001")
     assert "README.md" in public
     assert all(not path.startswith(("reference/", "evaluator/")) for path in public)
+    metadata = json.loads(public[".adaptive-tutor/assignment.json"])
+    assert metadata == {
+        "schema_version": "1.0",
+        "id": "A-0001",
+        "slug": "bounded-work-queue",
+        "concepts": ["programming.invariants"],
+        "exercise_type": "implementation",
+        "difficulty": 4,
+        "expected_minutes": 45,
+        "current_stage": 1,
+    }
+    assert "hidden_evaluator" not in public[".adaptive-tutor/assignment.json"]
     assert service.active("learner") is not None
     with pytest.raises(ConfigurationError, match="already active"):
         service.create(request(), bundle, validation)
