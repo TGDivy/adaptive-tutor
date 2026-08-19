@@ -47,7 +47,12 @@ does not generate assignments or call a model.
 
 Generates a bounded bundle, validates information sufficiency and trusted
 reference behavior, records hidden and public roles separately, and publishes
-only safe files.
+only safe files. Before publication, it writes a signed, owner-only evaluator
+envelope bound to the assignment and branch. A trusted provisioner verifies and
+stages a short-lived commit-bound envelope and public verification key for one
+ephemeral runner. The evaluator workflow is dispatched from the protected
+default branch; the learner branch contains only the corresponding non-secret
+binding digest.
 
 ### Event store and worker
 

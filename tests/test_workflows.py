@@ -70,11 +70,18 @@ def test_workspace_evaluator_is_ephemeral_credential_free_and_uploads_contract()
         "env -i",
         "adaptive-tutor evaluate",
         "assignment-bundle.json",
+        "evaluator-signing.pub",
+        "stat -c '%a'",
+        "workflow_dispatch:",
+        "ref: ${{ inputs.commit_sha }}",
+        '--branch "${ASSIGNMENT_BRANCH}"',
+        '--commit-sha "${ASSIGNMENT_COMMIT}"',
         "adaptive-tutor-evidence.json",
         "name: adaptive-tutor-evidence",
         "retention-days: 14",
     ):
         assert required in content
     assert "pull_request_target" not in content
+    assert '\n  push:' not in content
     uses_lines = [line for line in content.splitlines() if "uses:" in line]
     assert uses_lines and all(PINNED_ACTION.search(line) for line in uses_lines)

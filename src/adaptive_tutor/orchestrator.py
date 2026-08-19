@@ -24,6 +24,7 @@ from .models import AssignmentBundle, AssignmentRequest, LearnerContext, Qualita
 from .scheduler import AdaptiveScheduler
 from .security import sha256_digest
 from .time import iso_now
+from .trusted_bundles import TrustedBundleStore
 
 _CONFIDENCE = re.compile(r"(?:^|\b)confidence\s*[:=]\s*(\d{1,3})(?:\b|$)", re.I)
 
@@ -44,6 +45,7 @@ class TutorOrchestrator:
         self.evaluations = evaluations
         self.queue = queue or JobQueue(database)
         self.assignments = AssignmentService(database)
+        self.trusted_bundles = TrustedBundleStore(settings.data_dir)
 
     def handlers(self) -> dict[str, Any]:
         return {
@@ -135,7 +137,17 @@ class TutorOrchestrator:
         scheduler: dict[str, Any] | None,
     ) -> dict[str, Any]:
         assignment_id = str(created["id"])
-        public_files = self.assignments.public_files(assignment_id)
+        branch = str(created["branch_name"])
+        envelope = self.trusted_bundles.seal(
+            assignment_id=assignment_id,
+            branch=branch,
+            bundle=bundle,
+        )
+        public_files = self.assignments.public_files(
+            assignment_id,
+            evaluator_binding=envelope.binding_digest,
+            evaluator_key_id=envelope.key_id,
+        )
         pull_body = (
             f"{bundle.summary}\n\n"
             f"Difficulty: **{bundle.difficulty}/10** · Expected time: "
@@ -145,7 +157,7 @@ class TutorOrchestrator:
             f"<!-- adaptive-tutor-assignment:{assignment_id} -->"
         )
         published = self.github.publish_assignment(
-            branch=str(created["branch_name"]),
+            branch=branch,
             title=f"{assignment_id}: {bundle.title}",
             body=pull_body,
             files=public_files,
@@ -154,9 +166,15 @@ class TutorOrchestrator:
         self.database.execute(
             """
             UPDATE assignments SET status='published', pull_number=?, head_sha=?,
-                updated_at=? WHERE id=?
+                publication_sha=?, updated_at=? WHERE id=?
             """,
-            (published["pull_number"], published["head_sha"], now, assignment_id),
+            (
+                published["pull_number"],
+                published["head_sha"],
+                published["head_sha"],
+                now,
+                assignment_id,
+            ),
         )
         result = {"existing": False, **created, **published}
         if scheduler is not None:
@@ -175,6 +193,8 @@ class TutorOrchestrator:
         commit_sha = str(payload.get("after", ""))
         if not re.fullmatch(r"[0-9a-f]{40,64}", commit_sha):
             raise SecurityError("Push event contains an invalid commit SHA")
+        if assignment.get("publication_sha") == commit_sha:
+            return
         message = str((payload.get("head_commit") or {}).get("message", ""))
         confidence_match = _CONFIDENCE.search(message)
         confidence = int(confidence_match.group(1)) if confidence_match else None
@@ -203,6 +223,28 @@ class TutorOrchestrator:
             """,
             (commit_sha, now, assignment["id"]),
         )
+        attempt = self.database.fetch_one(
+            """
+            SELECT id, evaluation_dispatched_at FROM attempts
+            WHERE assignment_id=? AND commit_sha=? AND stage_number=?
+            """,
+            (assignment["id"], commit_sha, assignment["current_stage"]),
+        )
+        if attempt is None:  # pragma: no cover - insert/read invariant
+            raise RuntimeError("Submission attempt was not recorded")
+        if attempt["evaluation_dispatched_at"] is None:
+            self.github.dispatch_evaluator(
+                assignment_id=str(assignment["id"]),
+                branch=branch,
+                commit_sha=commit_sha,
+            )
+            self.database.execute(
+                """
+                UPDATE attempts SET evaluation_dispatched_at=?
+                WHERE id=? AND evaluation_dispatched_at IS NULL
+                """,
+                (iso_now(), attempt["id"]),
+            )
 
     def reconcile_pull_request(self, payload: dict[str, Any]) -> None:
         pull = payload.get("pull_request") or {}
@@ -238,31 +280,22 @@ class TutorOrchestrator:
         workflow = payload.get("workflow_run") or {}
         if payload.get("action") != "completed":
             return
-        branch = str(workflow.get("head_branch", ""))
+        run_id = int(workflow["id"])
+        identity = self.github.verify_evaluator_run(run_id)
+        branch = identity["branch"]
+        commit_sha = identity["commit_sha"]
         assignment = self.database.fetch_one(
-            "SELECT * FROM assignments WHERE branch_name=?", (branch,)
+            "SELECT * FROM assignments WHERE id=? AND branch_name=?",
+            (identity["assignment_id"], branch),
         )
         if assignment is None:
-            return
-        commit_sha = str(workflow.get("head_sha", ""))
+            raise SecurityError("Actions run does not match a stored assignment")
         attempt = self.database.fetch_one(
             "SELECT * FROM attempts WHERE assignment_id=? AND commit_sha=?",
             (assignment["id"], commit_sha),
         )
         if attempt is None:
-            self.record_submission(
-                {
-                    "ref": f"refs/heads/{branch}",
-                    "after": commit_sha,
-                    "head_commit": {"message": ""},
-                }
-            )
-            attempt = self.database.fetch_one(
-                "SELECT * FROM attempts WHERE assignment_id=? AND commit_sha=?",
-                (assignment["id"], commit_sha),
-            )
-        if attempt is None:  # pragma: no cover - invariant
-            raise RuntimeError("Submission attempt was not recorded")
+            raise SecurityError("Actions run has no dispatched submission attempt")
         existing = self.database.fetch_one(
             """
             SELECT id, evaluation_json, review_external_id, review_posted_at
@@ -275,18 +308,19 @@ class TutorOrchestrator:
             raise ExternalServiceError(
                 f"Evaluation workflow ended as {workflow.get('conclusion')}", retryable=True
             )
-        self.github.verify_evaluator_run(
-            int(workflow["id"]),
-            branch=branch,
-            commit_sha=commit_sha,
-        )
         bundle = AssignmentBundle.model_validate_json(assignment["bundle_json"])
         if existing is None:
             evidence = EvidenceNormalizer.parse(
-                self.github.download_evidence(int(workflow["id"]))
+                self.github.download_evidence(run_id)
             )
             if evidence.assignment_id != assignment["id"] or evidence.commit_sha != commit_sha:
                 raise SecurityError("Actions evidence does not match the assignment and commit")
+            trusted_envelope = self.trusted_bundles.load(str(assignment["id"]))
+            if (
+                evidence.evaluator_binding != trusted_envelope.binding_digest
+                or evidence.evaluator_key_id != trusted_envelope.key_id
+            ):
+                raise SecurityError("Actions evidence does not match the trusted evaluator")
             automated_id = self.evaluations.persist_automated(str(attempt["id"]), evidence)
             submission = self._submission_files(bundle, commit_sha)
             prompt = self.database.fetch_one(

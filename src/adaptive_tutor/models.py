@@ -256,6 +256,8 @@ class AutomatedEvaluation(StrictModel):
     started_at: datetime
     completed_at: datetime
     runner: str
+    evaluator_binding: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    evaluator_key_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{16}$")
     artifact_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
     @property

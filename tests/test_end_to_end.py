@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ import pytest
 from adaptive_tutor.codex import FixtureCodexRunner
 from adaptive_tutor.config import GitHubSettings, TutorSettings
 from adaptive_tutor.db import Database
-from adaptive_tutor.errors import ExternalServiceError
+from adaptive_tutor.errors import ExternalServiceError, SecurityError
 from adaptive_tutor.evaluation import EvaluationService
 from adaptive_tutor.models import (
     AutomatedCheck,
@@ -19,6 +20,7 @@ from adaptive_tutor.models import (
     QualitativeEvaluation,
 )
 from adaptive_tutor.orchestrator import TutorOrchestrator
+from adaptive_tutor.trusted_bundles import TrustedBundleStore
 
 
 class ControlledGitHub:
@@ -29,8 +31,14 @@ class ControlledGitHub:
         self.publish_failures = 0
         self.review_failure_mode: str | None = None
         self.review_failed = False
+        self.trusted_spool: Path | None = None
+        self.dispatches: list[dict[str, str]] = []
+        self.tamper_evaluator_binding = False
 
     def publish_assignment(self, **kwargs: Any) -> dict[str, Any]:
+        metadata = json.loads(kwargs["files"][".adaptive-tutor/assignment.json"])
+        if self.trusted_spool is not None:
+            assert (self.trusted_spool / f"{metadata['id']}.json").is_file()
         if self.publish_failures:
             self.publish_failures -= 1
             raise ExternalServiceError("temporary publish failure", retryable=True)
@@ -51,6 +59,9 @@ class ControlledGitHub:
     def download_evidence(self, run_id: int) -> bytes:
         assert run_id == 700
         now = datetime.now(UTC)
+        assert self.trusted_spool is not None
+        data_dir = self.trusted_spool.parent.parent
+        trusted = TrustedBundleStore(data_dir).load("A-0001")
         evidence = AutomatedEvaluation(
             assignment_id="A-0001",
             commit_sha="a" * 40,
@@ -65,14 +76,28 @@ class ControlledGitHub:
             started_at=now,
             completed_at=now,
             runner="github-actions",
+            evaluator_binding=(
+                "sha256:" + "0" * 64
+                if self.tamper_evaluator_binding
+                else trusted.binding_digest
+            ),
+            evaluator_key_id=trusted.key_id,
             artifact_digest="sha256:" + hashlib.sha256(b"controlled").hexdigest(),
         ).with_computed_digest()
         return evidence.model_dump_json().encode()
 
-    def verify_evaluator_run(self, run_id: int, **kwargs: Any) -> None:
+    def dispatch_evaluator(self, **kwargs: str) -> None:
+        self.dispatches.append(dict(kwargs))
+
+    def verify_evaluator_run(self, run_id: int, **kwargs: Any) -> dict[str, str]:
         assert run_id == 700
-        assert kwargs["branch"].startswith("assignment/")
-        assert len(kwargs["commit_sha"]) == 40
+        assert kwargs == {}
+        return {
+            "assignment_id": "A-0001",
+            "branch": "assignment/0001-bounded-work-queue",
+            "commit_sha": "a" * 40,
+            "workflow_commit": "f" * 40,
+        }
 
     def post_review(self, pull_number: int, body: str, **_: Any) -> int:
         assert pull_number == 42
@@ -122,6 +147,7 @@ def test_controlled_end_to_end_assignment_evaluation_and_next_selection(
         learner_id="learner",
         github=GitHubSettings(owner="owner", workspace_repo="learning-workspace"),
     )
+    github.trusted_spool = settings.data_dir / "trusted-evaluators" / "spool"
     orchestrator = TutorOrchestrator(
         settings,
         database,
@@ -132,7 +158,23 @@ def test_controlled_end_to_end_assignment_evaluation_and_next_selection(
     assert created["id"] == "A-0001"
     assert created["pull_number"] == 42
     assert "reference/bounded_queue.py" not in github.files
+    metadata = json.loads(github.files[".adaptive-tutor/assignment.json"])
+    envelope = TrustedBundleStore(settings.data_dir).load("A-0001")
+    assert metadata["id"] == envelope.assignment_id
+    assert metadata["branch"] == envelope.branch
+    assert metadata["evaluator_binding"] == envelope.binding_digest
+    assert metadata["evaluator_key_id"] == envelope.key_id
+    assert "hidden_evaluator" not in github.files[".adaptive-tutor/assignment.json"]
     branch = created["branch_name"]
+    orchestrator.record_submission(
+        {
+            "ref": f"refs/heads/{branch}",
+            "after": "1" * 40,
+            "head_commit": {"message": "tutor publication"},
+        }
+    )
+    assert database.fetch_one("SELECT COUNT(*) count FROM attempts") == {"count": 0}
+    assert github.dispatches == []
     orchestrator.record_submission(
         {
             "ref": f"refs/heads/{branch}",
@@ -140,6 +182,16 @@ def test_controlled_end_to_end_assignment_evaluation_and_next_selection(
             "head_commit": {"message": "solution\n\nConfidence: 85"},
         }
     )
+    orchestrator.record_submission(
+        {
+            "ref": f"refs/heads/{branch}",
+            "after": "a" * 40,
+            "head_commit": {"message": "solution\n\nConfidence: 85"},
+        }
+    )
+    assert github.dispatches == [
+        {"assignment_id": "A-0001", "branch": branch, "commit_sha": "a" * 40}
+    ]
     orchestrator.process_ci_result(
         {
             "action": "completed",
@@ -179,6 +231,7 @@ def test_assignment_publication_resumes_without_generating_a_duplicate(
         learner_id="learner",
         github=GitHubSettings(owner="owner", workspace_repo="learning-workspace"),
     )
+    github.trusted_spool = settings.data_dir / "trusted-evaluators" / "spool"
     orchestrator = TutorOrchestrator(
         settings,
         database,
@@ -199,6 +252,47 @@ def test_assignment_publication_resumes_without_generating_a_duplicate(
     assert database.fetch_one("SELECT COUNT(*) count FROM assignments") == {"count": 1}
 
 
+def test_ci_evidence_must_match_the_trusted_spool_identity(
+    initialized: tuple[Database, object], tmp_path: Path
+) -> None:
+    database, _ = initialized
+    github = ControlledGitHub()
+    settings = TutorSettings(
+        data_dir=tmp_path,
+        learner_id="learner",
+        github=GitHubSettings(owner="owner", workspace_repo="learning-workspace"),
+    )
+    github.trusted_spool = settings.data_dir / "trusted-evaluators" / "spool"
+    orchestrator = TutorOrchestrator(
+        settings,
+        database,
+        github,  # type: ignore[arg-type]
+        EvaluationService(database, FixtureCodexRunner(fixture())),
+    )
+    created = orchestrator.create_next_assignment(LearnerContext())
+    branch = str(created["branch_name"])
+    orchestrator.record_submission(
+        {
+            "ref": f"refs/heads/{branch}",
+            "after": "a" * 40,
+            "head_commit": {"message": "solution"},
+        }
+    )
+    github.tamper_evaluator_binding = True
+
+    with pytest.raises(SecurityError, match="trusted evaluator"):
+        orchestrator.process_ci_result(
+            {
+                "action": "completed",
+                "workflow_run": {"id": 700, "conclusion": "success"},
+            }
+        )
+    assert database.fetch_one("SELECT COUNT(*) count FROM automated_evaluations") == {
+        "count": 0
+    }
+    assert database.fetch_one("SELECT COUNT(*) count FROM mastery_evidence") == {"count": 0}
+
+
 @pytest.mark.parametrize("failure_mode", ["before", "after"])
 def test_review_delivery_resumes_after_grading_or_delivery_crash(
     initialized: tuple[Database, object], tmp_path: Path, failure_mode: str
@@ -211,6 +305,7 @@ def test_review_delivery_resumes_after_grading_or_delivery_crash(
         learner_id="learner",
         github=GitHubSettings(owner="owner", workspace_repo="learning-workspace"),
     )
+    github.trusted_spool = settings.data_dir / "trusted-evaluators" / "spool"
     orchestrator = TutorOrchestrator(
         settings,
         database,

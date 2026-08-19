@@ -23,6 +23,7 @@ classifiers = [
   "Topic :: Education",
 ]
 dependencies = [
+  "cryptography>=45,<51",
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
   "jinja2>=3.1,<4",

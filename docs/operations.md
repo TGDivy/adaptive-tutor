@@ -73,6 +73,34 @@ docker compose exec tutor adaptive-tutor webhook-setup
 docker compose ps
 ```
 
+### Provision ephemeral evaluators
+
+Assignment publication creates a signed envelope under
+`runtime/state/trusted-evaluators/spool` before writing the learner branch. The
+runner autoscaler or other trusted provisioner must derive the assignment ID
+and exact branch/commit from the bounded protected-workflow run title, then
+stage that identity before registering a one-job runner. For a protected runner
+staging directory:
+
+```bash
+install -d -m 0700 runtime/runner-staging/trusted
+docker compose --profile remote run --rm --no-deps \
+  --volume "$(pwd)/runtime/runner-staging:/runner/temp" \
+  worker stage-evaluator A-0001 \
+  --run-id 123456789 \
+  --branch assignment/0001-bounded-work-queue \
+  --commit-sha 0123456789abcdef0123456789abcdef01234567 \
+  --output /runner/temp/trusted/assignment-bundle.json \
+  --verification-key-output /runner/temp/trusted/evaluator-signing.pub
+```
+
+The destination directory and files must belong to the eventual runner user
+with modes `0700` and `0600`. Transfer this protected directory through the
+provisioner's authenticated channel, register the runner only after staging
+succeeds, allow one job, and destroy the runner plus its temporary storage
+afterward. Never place either staged file in the workspace repository, runner
+image, cache, logs, or an Actions artifact.
+
 ### Lifecycle commands
 
 ```bash
@@ -197,6 +225,12 @@ Backups land under the configured data directory's `backups/` directory with
 mode `0600`. Copy them to encrypted off-host storage and test a restore at least
 monthly. A backup that exists only beside the primary database is not disaster
 recovery.
+
+SQLite contains each complete assignment bundle, so the signed evaluator spool
+is derived state. On a clean host, `stage-evaluator` creates a new owner-only key
+and re-seals the requested database bundle before provisioning the next runner.
+For an exact in-flight host snapshot, preserve `trusted-evaluators/` together;
+never restore its envelopes without the matching `signing.key`.
 
 Restore is intentionally explicit. Stop both writers, retain a copy of the
 current database, and restore a verified snapshot:

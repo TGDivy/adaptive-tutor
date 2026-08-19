@@ -1,15 +1,27 @@
 name: Adaptive Tutor Evaluation
+run-name: "Adaptive Tutor | ${{ inputs.assignment_id }} | ${{ inputs.branch }} | ${{ inputs.commit_sha }}"
 
 on:
-  push:
-    branches:
-      - "assignment/**"
+  workflow_dispatch:
+    inputs:
+      assignment_id:
+        description: Bound assignment identifier
+        required: true
+        type: string
+      branch:
+        description: Bound assignment branch
+        required: true
+        type: string
+      commit_sha:
+        description: Exact learner commit to evaluate
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: adaptive-tutor-evaluate-${{ github.ref }}
+  group: adaptive-tutor-evaluate-${{ inputs.assignment_id }}-${{ inputs.commit_sha }}
   cancel-in-progress: true
 
 jobs:
@@ -17,10 +29,15 @@ jobs:
     name: Credential-free assignment checks
     runs-on: [self-hosted, adaptive-tutor-ephemeral]
     timeout-minutes: 10
+    env:
+      ASSIGNMENT_ID: ${{ inputs.assignment_id }}
+      ASSIGNMENT_BRANCH: ${{ inputs.branch }}
+      ASSIGNMENT_COMMIT: ${{ inputs.commit_sha }}
     steps:
       - name: Check out learner commit without retained credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.commit_sha }}
           persist-credentials: false
           clean: true
       - name: Run trusted evaluator
@@ -28,11 +45,18 @@ jobs:
         run: |
           set -euo pipefail
           trusted_bundle="${RUNNER_TEMP}/trusted/assignment-bundle.json"
+          verification_key="${RUNNER_TEMP}/trusted/evaluator-signing.pub"
           evidence_dir="${RUNNER_TEMP}/adaptive-tutor-evidence"
-          branch_tail="${GITHUB_REF_NAME#assignment/}"
-          [[ "${branch_tail}" =~ ^([0-9]{4})-[a-z0-9-]+$ ]]
-          assignment_id="A-${BASH_REMATCH[1]}"
+          branch_tail="${ASSIGNMENT_BRANCH#assignment/}"
+          [[ "${branch_tail}" =~ ^([0-9]{4,12})-[a-z0-9-]+$ ]]
+          test "${ASSIGNMENT_ID}" = "A-${BASH_REMATCH[1]}"
+          [[ "${ASSIGNMENT_COMMIT}" =~ ^[0-9a-f]{40,64}$ ]]
           test -f "${trusted_bundle}"
+          test ! -L "${trusted_bundle}"
+          test "$(stat -c '%a' "${trusted_bundle}")" = "600"
+          test -f "${verification_key}"
+          test ! -L "${verification_key}"
+          test "$(stat -c '%a' "${verification_key}")" = "600"
           install -d -m 0700 "${evidence_dir}"
           env -i \
             PATH="/usr/local/bin:/usr/bin:/bin" \
@@ -40,10 +64,12 @@ jobs:
             LC_ALL="C.UTF-8" \
             adaptive-tutor evaluate \
               --bundle "${trusted_bundle}" \
+              --verification-key "${verification_key}" \
               --workspace "${GITHUB_WORKSPACE}" \
               --output "${evidence_dir}/adaptive-tutor-evidence.json" \
-              --assignment-id "${assignment_id}" \
-              --commit-sha "${GITHUB_SHA}"
+              --assignment-id "${ASSIGNMENT_ID}" \
+              --branch "${ASSIGNMENT_BRANCH}" \
+              --commit-sha "${ASSIGNMENT_COMMIT}"
       - name: Upload normalized evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

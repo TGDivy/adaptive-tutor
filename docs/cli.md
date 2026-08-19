@@ -72,10 +72,12 @@ service or intentionally disabled Codex worker—into a nonzero exit status.
 | `restore PATH --yes` | Replace state from an integrity-checked backup while services are stopped. |
 | `curriculum-load PATH` | Validate and persist a curriculum package without core-code changes. |
 | `webhook-setup` | Create or reconcile the configured signed repository webhook. |
+| `stage-evaluator ID --run-id RUN --branch BRANCH --commit-sha SHA --output PATH --verification-key-output PATH` | Verify a protected run and issue one short-lived evaluator envelope. |
 
-`serve` and `worker` are hidden from the concise interactive help because they
-are supervisor entry points, not everyday learning commands. Their behavior is
-covered in [Deployment and recovery](operations.md).
+`serve`, `worker`, `grader`, `evaluate`, and `stage-evaluator` are hidden from
+the concise interactive help because they are service or provisioner entry
+points, not everyday learning commands. Their behavior is covered in
+[Deployment and recovery](operations.md).
 
 ## Exit behavior
 

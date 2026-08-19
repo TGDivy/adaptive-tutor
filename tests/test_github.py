@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import json
 import zipfile
@@ -131,8 +132,9 @@ def test_download_evidence_rejects_oversized_chunked_response() -> None:
         ("workflow_id", 10),
         ("path", ".github/workflows/other.yml"),
         ("head_branch", "assignment/other"),
-        ("head_sha", "b" * 40),
-        ("event", "pull_request"),
+        ("head_sha", "not-a-commit"),
+        ("event", "push"),
+        ("display_title", "Adaptive Tutor | invalid"),
         ("repository", {"full_name": "other/repository"}),
         ("head_repository", {"full_name": "other/repository"}),
     ],
@@ -144,9 +146,10 @@ def test_evaluator_run_requires_complete_trusted_provenance(
     run = {
         "workflow_id": 9,
         "path": workflow_path,
-        "head_branch": "assignment/0001-example",
-        "head_sha": "a" * 40,
-        "event": "push",
+        "head_branch": "main",
+        "head_sha": "f" * 40,
+        "event": "workflow_dispatch",
+        "display_title": "Adaptive Tutor | A-0001 | assignment/0001-example | " + "a" * 40,
         "repository": {"full_name": "owner/learning-workspace"},
         "head_repository": {"full_name": "owner/learning-workspace"},
     }
@@ -178,14 +181,53 @@ def test_evaluator_run_requires_complete_trusted_provenance(
         transport=httpx.MockTransport(handler),
     )
     if field is None:
-        client.verify_evaluator_run(
-            77, branch="assignment/0001-example", commit_sha="a" * 40
-        )
+        assert client.verify_evaluator_run(77) == {
+            "assignment_id": "A-0001",
+            "branch": "assignment/0001-example",
+            "commit_sha": "a" * 40,
+            "workflow_commit": "f" * 40,
+        }
     else:
-        with pytest.raises(SecurityError, match="provenance"):
-            client.verify_evaluator_run(
-                77, branch="assignment/0001-example", commit_sha="a" * 40
+        with pytest.raises(SecurityError, match="Actions run"):
+            client.verify_evaluator_run(77)
+
+
+def test_evaluator_dispatch_uses_trusted_default_branch_and_typed_inputs() -> None:
+    observed: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/owner/learning-workspace":
+            return httpx.Response(
+                200,
+                json={
+                    "private": True,
+                    "default_branch": "main",
+                    "permissions": {"push": True},
+                },
             )
+        if request.url.path.endswith("/adaptive-tutor-evaluate.yml/dispatches"):
+            observed.update(json.loads(request.content))
+            return httpx.Response(204)
+        return httpx.Response(404)
+
+    client = GitHubClient(
+        GitHubSettings(owner="owner"),
+        auth=StaticAuth(),  # type: ignore[arg-type]
+        transport=httpx.MockTransport(handler),
+    )
+    client.dispatch_evaluator(
+        assignment_id="A-0001",
+        branch="assignment/0001-example",
+        commit_sha="a" * 40,
+    )
+    assert observed == {
+        "ref": "main",
+        "inputs": {
+            "assignment_id": "A-0001",
+            "branch": "assignment/0001-example",
+            "commit_sha": "a" * 40,
+        },
+    }
 
 
 def test_repository_scope_must_be_private_and_writable() -> None:
@@ -434,6 +476,8 @@ def test_publish_assignment_creates_git_objects_and_pull_request() -> None:
 
 @pytest.mark.parametrize("existing_pull", [True, False])
 def test_publish_assignment_resumes_an_existing_branch(existing_pull: bool) -> None:
+    manifest = '{"id":"A-0042","evaluator_binding":"sha256:test"}\n'
+
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/repos/owner/learning-workspace":
@@ -447,6 +491,15 @@ def test_publish_assignment_resumes_an_existing_branch(existing_pull: bool) -> N
             )
         if path.endswith("/git/ref/heads/tutor/a-0042"):
             return httpx.Response(200, json={"object": {"sha": "existing-sha"}})
+        if path.endswith("/contents/.adaptive-tutor/assignment.json"):
+            return httpx.Response(
+                200,
+                json={
+                    "type": "file",
+                    "encoding": "base64",
+                    "content": base64.b64encode(manifest.encode()).decode(),
+                },
+            )
         if request.method == "GET" and path.endswith("/pulls"):
             assert request.url.params["head"] == "owner:tutor/a-0042"
             return httpx.Response(
@@ -471,12 +524,54 @@ def test_publish_assignment_resumes_an_existing_branch(existing_pull: bool) -> N
     )
     try:
         result = client.publish_assignment(
-            branch="tutor/a-0042", title="Assignment", body="Body", files={}
+            branch="tutor/a-0042",
+            title="Assignment",
+            body="Body",
+            files={".adaptive-tutor/assignment.json": manifest},
         )
     finally:
         client.close()
     assert result["pull_number"] == (41 if existing_pull else 42)
     assert result["head_sha"] == "existing-sha"
+
+
+def test_publish_assignment_rejects_a_precreated_conflicting_branch() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/repos/owner/learning-workspace":
+            return httpx.Response(
+                200,
+                json={
+                    "private": True,
+                    "default_branch": "main",
+                    "permissions": {"push": True},
+                },
+            )
+        if path.endswith("/git/ref/heads/assignment/0042-example"):
+            return httpx.Response(200, json={"object": {"sha": "attacker-sha"}})
+        if path.endswith("/contents/.adaptive-tutor/assignment.json"):
+            return httpx.Response(
+                200,
+                json={
+                    "type": "file",
+                    "encoding": "base64",
+                    "content": base64.b64encode(b'{"id":"attacker"}\n').decode(),
+                },
+            )
+        return httpx.Response(404)
+
+    client = GitHubClient(
+        GitHubSettings(owner="owner"),
+        auth=StaticAuth(),  # type: ignore[arg-type]
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(SecurityError, match="conflicts with tutor state"):
+        client.publish_assignment(
+            branch="assignment/0042-example",
+            title="Assignment",
+            body="Body",
+            files={".adaptive-tutor/assignment.json": '{"id":"A-0042"}\n'},
+        )
 
 
 def test_webhook_review_and_comment_writes_are_idempotent() -> None:

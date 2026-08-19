@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import resource
+import stat
 import subprocess
 import sys
 import tempfile
@@ -15,44 +16,65 @@ from pathlib import Path
 from .errors import AssignmentValidationError, SecurityError
 from .models import AssignmentBundle, AutomatedCheck, AutomatedEvaluation
 from .security import assert_credentials_absent, untrusted_process_environment
+from .trusted_bundles import TrustedBundleEnvelope, read_provisioned_envelope
 
 MAX_SUBMISSION_BYTES = 5 * 1024 * 1024
 MAX_OUTPUT_BYTES = 2 * 1024 * 1024
-MAX_BUNDLE_BYTES = 5 * 1024 * 1024
+MAX_ASSIGNMENT_METADATA_BYTES = 64 * 1024
 
 
 def evaluate_workspace_to_file(
     *,
     bundle_path: Path,
+    verification_key_path: Path,
     workspace: Path,
     output_path: Path,
     assignment_id: str,
+    branch: str,
     commit_sha: str,
 ) -> AutomatedEvaluation:
     """Evaluate an untrusted checkout while keeping trusted inputs and output outside it."""
-    trusted_bundle = bundle_path.expanduser().resolve(strict=True)
-    untrusted_workspace = workspace.expanduser().resolve(strict=True)
+    trusted_bundle = bundle_path.expanduser().absolute()
+    trusted_key = verification_key_path.expanduser().absolute()
+    workspace_input = workspace.expanduser().absolute()
+    if workspace_input.is_symlink():
+        raise SecurityError("Evaluator workspace must not be a symlink")
+    untrusted_workspace = workspace_input.resolve(strict=True)
     if not untrusted_workspace.is_dir():
         raise SecurityError("Evaluator workspace must be a directory")
     destination = output_path.expanduser().resolve()
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if _is_within(trusted_bundle, untrusted_workspace):
         raise SecurityError("Trusted evaluator bundle must be outside the learner workspace")
+    if _is_within(trusted_key, untrusted_workspace):
+        raise SecurityError("Evaluator verification key must be outside the learner workspace")
     if _is_within(destination, untrusted_workspace):
         raise SecurityError("Evidence output must be outside the learner workspace")
-    if trusted_bundle.stat().st_size > MAX_BUNDLE_BYTES:
-        raise SecurityError("Trusted evaluator bundle exceeds the size limit")
-    try:
-        bundle = AssignmentBundle.model_validate_json(
-            trusted_bundle.read_text(encoding="utf-8")
+    envelope = read_provisioned_envelope(
+        trusted_bundle,
+        verification_key_path=trusted_key,
+    )
+    if (
+        envelope.assignment_id != assignment_id
+        or envelope.branch != branch
+        or envelope.commit_sha != commit_sha
+    ):
+        raise SecurityError(
+            "Trusted evaluator envelope does not match assignment, branch, and commit"
         )
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise AssignmentValidationError(f"Trusted evaluator bundle is invalid: {exc}") from exc
+    _verify_workspace_binding(untrusted_workspace, envelope)
+    try:
+        trusted_bundle.unlink()
+        trusted_key.unlink()
+    except OSError as exc:
+        raise SecurityError("Trusted evaluator envelope could not be consumed") from exc
     evidence = CredentialFreeEvaluator().evaluate(
-        bundle=bundle,
+        bundle=envelope.bundle,
         assignment_id=assignment_id,
         commit_sha=commit_sha,
         workspace=untrusted_workspace,
+        evaluator_binding=envelope.binding_digest,
+        evaluator_key_id=envelope.key_id,
     )
     temporary_path: Path | None = None
     try:
@@ -84,6 +106,8 @@ class CredentialFreeEvaluator:
         assignment_id: str,
         commit_sha: str,
         workspace: Path,
+        evaluator_binding: str | None = None,
+        evaluator_key_id: str | None = None,
     ) -> AutomatedEvaluation:
         started = datetime.now(UTC)
         started_clock = time.monotonic()
@@ -145,6 +169,8 @@ class CredentialFreeEvaluator:
                 started_at=started,
                 completed_at=datetime.now(UTC),
                 runner="adaptive-tutor-credential-free-ci",
+                evaluator_binding=evaluator_binding,
+                evaluator_key_id=evaluator_key_id,
                 artifact_digest="sha256:" + "0" * 64,
             )
             return evidence.with_computed_digest()
@@ -155,10 +181,12 @@ class CredentialFreeEvaluator:
         for item in bundle.files:
             if item.role not in {"instructions", "starter", "public_test"}:
                 continue
-            source = _safe_path(workspace, item.path)
-            if not source.is_file() or source.is_symlink():
-                raise SecurityError(f"Submission is missing a regular file: {item.path}")
-            content = source.read_bytes()
+            content = _read_workspace_file(
+                workspace,
+                item.path,
+                maximum=MAX_SUBMISSION_BYTES - total,
+                label="Submission file",
+            )
             total += len(content)
             if total > MAX_SUBMISSION_BYTES:
                 raise SecurityError("Submission exceeds the evaluator size limit")
@@ -194,6 +222,78 @@ def _safe_path(root: Path, relative: str) -> Path:
     if root not in candidate.parents:
         raise SecurityError(f"Path escapes evaluator workspace: {relative}")
     return candidate
+
+
+def _verify_workspace_binding(
+    workspace: Path,
+    envelope: TrustedBundleEnvelope,
+) -> None:
+    try:
+        raw = _read_workspace_file(
+            workspace,
+            ".adaptive-tutor/assignment.json",
+            maximum=MAX_ASSIGNMENT_METADATA_BYTES,
+            label="Assignment metadata",
+        )
+        manifest = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise SecurityError("Assignment metadata is invalid") from exc
+    if not isinstance(manifest, dict):
+        raise SecurityError("Assignment metadata must be a JSON object")
+    expected = {
+        "schema_version": "1.0",
+        "id": envelope.assignment_id,
+        "branch": envelope.branch,
+        "evaluator_binding": envelope.binding_digest,
+        "evaluator_key_id": envelope.key_id,
+    }
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        raise SecurityError("Assignment metadata does not match the trusted evaluator envelope")
+
+
+def _read_workspace_file(root: Path, relative: str, *, maximum: int, label: str) -> bytes:
+    """Read one regular file without following learner-controlled path symlinks."""
+    parts = Path(relative).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise SecurityError(f"{label} has an unsafe path: {relative}")
+    descriptors: list[int] = []
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptors.append(os.open(root, os.O_RDONLY | directory | nofollow))
+        for part in parts[:-1]:
+            descriptors.append(
+                os.open(
+                    part,
+                    os.O_RDONLY | directory | nofollow,
+                    dir_fd=descriptors[-1],
+                )
+            )
+        file_descriptor = os.open(
+            parts[-1],
+            os.O_RDONLY | nofollow,
+            dir_fd=descriptors[-1],
+        )
+        descriptors.append(file_descriptor)
+        info = os.fstat(file_descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise SecurityError(f"{label} must be one regular non-linked file: {relative}")
+        if info.st_size > maximum:
+            raise SecurityError(f"{label} exceeds the evaluator size limit")
+        content = bytearray()
+        while len(content) <= maximum:
+            chunk = os.read(file_descriptor, min(64 * 1024, maximum + 1 - len(content)))
+            if not chunk:
+                return bytes(content)
+            content.extend(chunk)
+        raise SecurityError(f"{label} exceeds the evaluator size limit")
+    except FileNotFoundError as exc:
+        raise SecurityError(f"{label} is missing: {relative}") from exc
+    except OSError as exc:
+        raise SecurityError(f"{label} is not safely readable: {relative}") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def _is_within(path: Path, root: Path) -> bool:

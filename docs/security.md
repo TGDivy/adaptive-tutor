@@ -20,6 +20,7 @@ separation: untrusted execution never shares a credentialed process boundary.
 | Curriculum package | Operator-trusted, schema-validated | Supply concepts, guidance, references, fixtures. |
 | Webhook request | Authenticated but untrusted payload | Persist and enqueue only after HMAC and repository scope checks. |
 | Learner repository/content | Untrusted | Execute only in credential-free ephemeral CI. |
+| Signed evaluator spool | Tutor-trusted, owner-only | Provision one assignment-and-branch-bound envelope. |
 | CI artifact | Untrusted until contract/digest validation | Become deterministic evidence, never instructions. |
 | Codex output | Untrusted until schema validation | Become qualitative evidence only after validation. |
 | Tutor/worker | Trusted | GitHub orchestration and transactional state updates. |
@@ -70,6 +71,15 @@ online backups. Keep backups encrypted and off-host.
 Configuration stores secret *references*. Put raw values only in owner-only
 environment/secret files. Never commit `.env`, private keys, SQLite, artifacts,
 screenshots with tokens, or generated private curricula.
+
+Hidden evaluator bundles are Ed25519-signed into an owner-only spool before
+GitHub publication. A trusted provisioner validates the spool record and issues
+a short-lived, commit-bound `0600` runner envelope outside the learner checkout.
+The credential-free runner receives only the public verification key; it
+authenticates the signature and verifies the exact assignment, branch, commit,
+expiry, canonical digests, and public-manifest binding. The spool is derived
+from complete bundles in SQLite and can be re-created on a clean restore. Never
+retain old envelopes without their matching key pair; they fail closed.
 
 The public-boundary gate scans every tracked file for private subject material,
 organization infrastructure, key blocks, and token formats. It complements—

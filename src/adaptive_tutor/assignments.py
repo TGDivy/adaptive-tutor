@@ -297,9 +297,18 @@ class AssignmentService:
             row["bundle"] = AssignmentBundle.model_validate_json(row.pop("bundle_json"))
         return row
 
-    def public_files(self, assignment_id: str) -> dict[str, str]:
+    def public_files(
+        self,
+        assignment_id: str,
+        *,
+        evaluator_binding: str | None = None,
+        evaluator_key_id: str | None = None,
+    ) -> dict[str, str]:
+        if (evaluator_binding is None) != (evaluator_key_id is None):
+            raise ConfigurationError("Evaluator binding and key ID must be published together")
         row = self.database.fetch_one(
-            "SELECT bundle_json, current_stage FROM assignments WHERE id=?", (assignment_id,)
+            "SELECT bundle_json, branch_name, current_stage FROM assignments WHERE id=?",
+            (assignment_id,),
         )
         if row is None:
             raise ConfigurationError(f"Unknown assignment: {assignment_id}")
@@ -309,22 +318,25 @@ class AssignmentService:
             for item in bundle.files
             if item.role not in {"reference", "evaluator"}
         }
-        public[".adaptive-tutor/assignment.json"] = json.dumps(
-            {
-                "schema_version": "1.0",
-                "id": assignment_id,
-                "slug": bundle.slug,
-                "concepts": bundle.concepts,
-                "exercise_type": bundle.exercise_type.value,
-                "difficulty": bundle.difficulty,
-                "expected_minutes": bundle.expected_minutes,
-                "current_stage": int(row["current_stage"]),
-                "tags": bundle.tags,
-                "selection_reason": bundle.selection_reason,
-            },
-            indent=2,
-            sort_keys=True,
-        ) + "\n"
+        metadata = {
+            "schema_version": "1.0",
+            "id": assignment_id,
+            "slug": bundle.slug,
+            "concepts": bundle.concepts,
+            "exercise_type": bundle.exercise_type.value,
+            "difficulty": bundle.difficulty,
+            "expected_minutes": bundle.expected_minutes,
+            "current_stage": int(row["current_stage"]),
+            "tags": bundle.tags,
+            "selection_reason": bundle.selection_reason,
+        }
+        if evaluator_binding is not None:
+            metadata["branch"] = str(row["branch_name"])
+            metadata["evaluator_binding"] = evaluator_binding
+            metadata["evaluator_key_id"] = evaluator_key_id
+        public[".adaptive-tutor/assignment.json"] = (
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n"
+        )
         return public
 
     def next_hint(self, assignment_id: str, learner_id: str) -> tuple[int, str]:

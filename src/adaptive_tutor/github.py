@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import io
+import re
 import time
 import zipfile
 from dataclasses import dataclass
@@ -18,6 +19,12 @@ import jwt
 from .config import GitHubSettings
 from .errors import ConfigurationError, ExternalServiceError, SecurityError
 from .security import MAX_ARTIFACT_BYTES, redact
+
+_EVALUATOR_WORKFLOW = ".github/workflows/adaptive-tutor-evaluate.yml"
+_EVALUATOR_RUN_TITLE = re.compile(
+    r"Adaptive Tutor \| (A-(\d{4,12})) \| "
+    r"(assignment/(\d{4,12})-[a-z0-9][a-z0-9-]{2,100}) \| ([0-9a-f]{40,64})"
+)
 
 
 @dataclass
@@ -236,6 +243,20 @@ class GitHubClient:
         )
         if existing_ref.status_code == 200:
             head_sha = str(existing_ref.json()["object"]["sha"])
+            expected_manifest = files.get(".adaptive-tutor/assignment.json")
+            if expected_manifest is None:
+                raise SecurityError("Assignment publication is missing its trusted binding")
+            try:
+                observed_manifest = self.get_file(
+                    ".adaptive-tutor/assignment.json",
+                    head_sha,
+                )
+            except ExternalServiceError as exc:
+                raise SecurityError(
+                    "Existing assignment branch has no verifiable tutor binding"
+                ) from exc
+            if observed_manifest != expected_manifest:
+                raise SecurityError("Existing assignment branch conflicts with tutor state")
             pulls = self._request(
                 "GET",
                 f"{self.repository_path}/pulls",
@@ -314,6 +335,30 @@ class GitHubClient:
             "branch": branch,
         }
 
+    def dispatch_evaluator(
+        self,
+        *,
+        assignment_id: str,
+        branch: str,
+        commit_sha: str,
+        workflow_path: str = _EVALUATOR_WORKFLOW,
+    ) -> None:
+        _validate_evaluator_identity(assignment_id, branch, commit_sha)
+        repository = self.verify_private_repository()
+        self._request(
+            "POST",
+            f"{self.repository_path}/actions/workflows/{workflow_path}/dispatches",
+            expected=(204,),
+            json={
+                "ref": str(repository["default_branch"]),
+                "inputs": {
+                    "assignment_id": assignment_id,
+                    "branch": branch,
+                    "commit_sha": commit_sha,
+                },
+            },
+        )
+
     def get_file(self, path: str, ref: str) -> str:
         _validate_repository_path(path)
         payload = self._request(
@@ -361,10 +406,8 @@ class GitHubClient:
         self,
         run_id: int,
         *,
-        branch: str,
-        commit_sha: str,
-        workflow_path: str = ".github/workflows/adaptive-tutor-evaluate.yml",
-    ) -> None:
+        workflow_path: str = _EVALUATOR_WORKFLOW,
+    ) -> dict[str, str]:
         repository = self.verify_private_repository()
         workflow = self._request(
             "GET", f"{self.repository_path}/actions/workflows/{workflow_path}"
@@ -373,29 +416,44 @@ class GitHubClient:
         expected_repository = f"{self.settings.owner}/{self.settings.workspace_repo}".lower()
         observed_repository = str((run.get("repository") or {}).get("full_name", "")).lower()
         head_repository = str((run.get("head_repository") or {}).get("full_name", "")).lower()
+        default_branch = str(repository["default_branch"])
         if (
             int(run.get("workflow_id") or 0) != int(workflow["id"])
             or str(run.get("path")) != workflow_path
-            or str(run.get("head_branch")) != branch
-            or str(run.get("head_sha")) != commit_sha
-            or str(run.get("event")) != "push"
+            or str(run.get("head_branch")) != default_branch
+            or str(run.get("event")) != "workflow_dispatch"
             or observed_repository != expected_repository
             or head_repository != expected_repository
         ):
             raise SecurityError("Actions run provenance does not match the trusted evaluator")
-        default_branch = str(repository["default_branch"])
+        title_match = _EVALUATOR_RUN_TITLE.fullmatch(str(run.get("display_title", "")))
+        if title_match is None or title_match.group(2) != title_match.group(4):
+            raise SecurityError("Actions run has an invalid evaluator identity")
+        assignment_id = title_match.group(1)
+        branch = title_match.group(3)
+        commit_sha = title_match.group(5)
+        _validate_evaluator_identity(assignment_id, branch, commit_sha)
+        workflow_commit = str(run.get("head_sha", ""))
+        if re.fullmatch(r"[0-9a-f]{40,64}", workflow_commit) is None:
+            raise SecurityError("Actions run has an invalid trusted workflow commit")
         trusted = self._request(
             "GET",
             f"{self.repository_path}/contents/{workflow_path}",
             params={"ref": default_branch},
         ).json()
-        candidate = self._request(
+        executed = self._request(
             "GET",
             f"{self.repository_path}/contents/{workflow_path}",
-            params={"ref": commit_sha},
+            params={"ref": workflow_commit},
         ).json()
-        if trusted.get("sha") != candidate.get("sha"):
-            raise SecurityError("Assignment branch modified the trusted evaluator workflow")
+        if trusted.get("sha") != executed.get("sha"):
+            raise SecurityError("Actions run did not use the trusted default-branch workflow")
+        return {
+            "assignment_id": assignment_id,
+            "branch": branch,
+            "commit_sha": commit_sha,
+            "workflow_commit": workflow_commit,
+        }
 
     def _download_limited(self, path: str, maximum: int) -> bytes:
         headers = {
@@ -474,6 +532,14 @@ class GitHubClient:
             if marker in str(comment.get("body") or ""):
                 return int(comment["id"])
         return self.post_comment(issue_number, body)
+
+
+def _validate_evaluator_identity(assignment_id: str, branch: str, commit_sha: str) -> None:
+    match = _EVALUATOR_RUN_TITLE.fullmatch(
+        f"Adaptive Tutor | {assignment_id} | {branch} | {commit_sha}"
+    )
+    if match is None or match.group(2) != match.group(4):
+        raise SecurityError("Invalid assignment identity for evaluator dispatch")
 
 
 def _validate_repository_path(path: str) -> None:

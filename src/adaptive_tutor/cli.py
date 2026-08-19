@@ -39,12 +39,13 @@ from .github import GitHubClient
 from .grader import create_grader_app
 from .jobs import JobQueue, Worker
 from .learner import LearnerModel
-from .models import LearnerContext
+from .models import AssignmentBundle, LearnerContext
 from .orchestrator import TutorOrchestrator
 from .reporting import ReportDocument, ReportService
 from .runner import evaluate_workspace_to_file
 from .scheduler import AdaptiveScheduler
 from .state import StatusService
+from .trusted_bundles import TrustedBundleStore
 
 app = typer.Typer(
     name="adaptive-tutor",
@@ -645,6 +646,12 @@ def evaluate_command(
     bundle: Path = typer.Option(
         ..., exists=True, dir_okay=False, help="Trusted assignment bundle outside the checkout."
     ),
+    verification_key: Path = typer.Option(
+        ...,
+        exists=True,
+        dir_okay=False,
+        help="Trusted Ed25519 verification key outside the checkout.",
+    ),
     workspace: Path = typer.Option(
         ..., exists=True, file_okay=False, help="Untrusted learner checkout."
     ),
@@ -652,6 +659,7 @@ def evaluate_command(
         ..., dir_okay=False, help="Evidence path outside the learner checkout."
     ),
     assignment_id: str = typer.Option(..., help="Assignment identifier."),
+    branch: str = typer.Option(..., help="Assignment branch bound to the trusted envelope."),
     commit_sha: str = typer.Option(
         ..., envvar="GITHUB_SHA", help="Evaluated commit SHA."
     ),
@@ -660,15 +668,77 @@ def evaluate_command(
     try:
         evidence = evaluate_workspace_to_file(
             bundle_path=bundle,
+            verification_key_path=verification_key,
             workspace=workspace,
             output_path=output,
             assignment_id=assignment_id,
+            branch=branch,
             commit_sha=commit_sha,
         )
     except (TutorError, ValueError, OSError) as exc:
         _abort(str(exc))
     state = "passed" if evidence.learner_passed else "failed"
     console.print(f"Deterministic evaluation {state}; evidence written to {output}")
+
+
+@app.command("stage-evaluator", hidden=True)
+def stage_evaluator_command(
+    ctx: typer.Context,
+    assignment_id: str = typer.Argument(..., help="Assignment identifier to provision."),
+    branch: str = typer.Option(..., help="Exact assignment branch for the runner job."),
+    commit_sha: str = typer.Option(..., help="Exact learner commit for the runner job."),
+    run_id: int = typer.Option(..., min=1, help="Queued protected-workflow run identifier."),
+    output: Path = typer.Option(
+        ..., dir_okay=False, help="Owner-only envelope path in runner temporary storage."
+    ),
+    verification_key_output: Path = typer.Option(
+        ...,
+        dir_okay=False,
+        help="Owner-only Ed25519 public-key path in runner temporary storage.",
+    ),
+) -> None:
+    """Validate and stage a signed evaluator envelope for an ephemeral runner."""
+    settings, database = _runtime(ctx)
+    row = database.fetch_one(
+        "SELECT branch_name, bundle_json FROM assignments WHERE id=?",
+        (assignment_id,),
+    )
+    if row is None:
+        _abort(f"Unknown assignment: {assignment_id}")
+    if str(row["branch_name"]) != branch:
+        _abort("Requested branch does not match the stored assignment")
+    try:
+        github = GitHubClient(settings.github)
+        try:
+            run_identity = github.verify_evaluator_run(run_id)
+        finally:
+            github.close()
+        if (
+            run_identity["assignment_id"] != assignment_id
+            or run_identity["branch"] != branch
+            or run_identity["commit_sha"] != commit_sha
+        ):
+            raise ValueError("Queued evaluator run does not match the requested assignment")
+        store = TrustedBundleStore(settings.data_dir)
+        store.seal(
+            assignment_id=assignment_id,
+            branch=branch,
+            bundle=AssignmentBundle.model_validate_json(str(row["bundle_json"])),
+        )
+        envelope = store.stage(
+            assignment_id=assignment_id,
+            branch=branch,
+            commit_sha=commit_sha,
+            destination=output,
+            verification_key_destination=verification_key_output,
+        )
+    except (TutorError, ValueError, OSError) as exc:
+        _abort(str(exc))
+    console.print(
+        f"Trusted evaluator staged for {assignment_id} · {branch}\n"
+        f"Binding: {envelope.binding_digest}\n"
+        f"Destination: {output}"
+    )
 
 
 @app.command()

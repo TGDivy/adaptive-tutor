@@ -89,6 +89,9 @@ GitHub credentials; SQLite—not model history—is the system of record.
 - Duplicate deliveries are idempotent.
 - Untrusted code never receives model, repository-write, dashboard, or agent
   credentials.
+- Hidden evaluator bundles are signed, spooled before branch publication, and
+  bound to one assignment, branch, and commit before a trusted provisioner
+  stages them for a protected workflow dispatch.
 - Repository and learner text is delimited as untrusted data for model review.
 - The dashboard binds to loopback and requires authorization by default;
   exposed binds refuse to start without a token.

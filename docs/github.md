@@ -29,7 +29,8 @@ Grant only the repository capabilities needed by your deployment:
 - metadata: read;
 - contents: read/write for assignment branches;
 - pull requests: read/write;
-- Actions and checks: read;
+- Actions: read/write for trusted workflow dispatches;
+- checks: read;
 - issues: read/write for PR discussion commands; and
 - repository webhooks: read/write only if using `webhook-setup` reconciliation.
 
@@ -90,15 +91,20 @@ true` and does not create duplicate learner evidence.
 
 ## Branch and workflow protection
 
-Protect the workspace default branch. Require the evaluator check, disallow
-force pushes and deletion, restrict changes to evaluator/workflow paths, and
-require the tutor App or an operator review for those protected files. Learner
-branches should change only assignment-visible paths.
+Protect the workspace default branch. Disallow force pushes and deletion,
+restrict changes to evaluator/workflow paths, and require the tutor App or an
+operator review for those protected files. Learner
+branches should change only assignment-visible paths. Apply a repository
+ruleset that blocks learner writes to `.github/workflows/**` on every branch;
+default-branch protection alone does not prevent a new branch workflow from
+requesting a self-hosted runner.
 
-The evaluator workflow must use a trusted default-branch definition, a pinned
-action/toolchain, `persist-credentials: false`, read-only token permissions,
-and an isolated credential-free container for learner code. Never use
-`pull_request_target` to execute a pull request checkout with write credentials.
+The evaluator workflow is dispatched by the tutor on the protected default
+branch; assignment pushes never supply its executable definition. It uses a
+pinned action/toolchain, `persist-credentials: false`, read-only job token
+permissions, and an isolated credential-free environment for learner code.
+Never use `pull_request_target`, or a `push` workflow loaded from an assignment
+branch, to execute learner content.
 
 The repository includes a hardened workspace template at
 `deploy/workspace/adaptive-tutor-evaluate.yml`. Install it as
@@ -108,21 +114,37 @@ It runs only on dedicated, one-job runners carrying the
 must never be the tutor host or a machine holding GitHub-write, model, personal
 agent, or dashboard credentials.
 
-Before registering the ephemeral runner, the trusted provisioner places the
-assignment's complete bundle at
-`$RUNNER_TEMP/trusted/assignment-bundle.json` with owner-only permissions. That
-file arrives out of band from the tutor's protected state, never from the
-learner branch. The workflow checks out without retained credentials, invokes
-the hidden `adaptive-tutor evaluate` command with an empty environment, writes
-evidence outside the checkout, and uploads exactly
-`adaptive-tutor-evidence.json`. The command starts learner tests in a further
-scrubbed, resource-limited temporary directory. A missing trusted bundle fails
+The tutor signs and writes an assignment-and-branch-bound envelope to its
+owner-only evaluator spool before it calls GitHub to create the branch or pull
+request. The signed push webhook then records the submission and dispatches the
+protected workflow with a typed assignment ID, branch, and commit. Its run title
+exposes those bounded identifiers to the runner autoscaler.
+
+Before registering the ephemeral runner, the trusted provisioner runs
+`adaptive-tutor stage-evaluator` with the queued run ID and exact identity. The
+command verifies the workflow provenance before placing the
+short-lived envelope at `$RUNNER_TEMP/trusted/assignment-bundle.json` and its
+public key at `$RUNNER_TEMP/trusted/evaluator-signing.pub`, both mode `0600`.
+The private signing key remains on the tutor host. These files arrive out of
+band from protected tutor state, never from the learner branch or an Actions
+artifact.
+
+The workflow checks both files and modes, checks out the exact input commit
+without retained credentials, invokes the hidden `adaptive-tutor evaluate`
+command with an empty environment, writes evidence outside the checkout, and
+uploads exactly `adaptive-tutor-evidence.json`. The evaluator authenticates the
+signature and requires the envelope assignment, branch, commit, expiry, and
+digest to match the public assignment manifest before it consumes the staged
+files and starts learner tests in a scrubbed, resource-limited temporary
+directory. A
+missing, substituted, replayed, symlinked, or broadly readable envelope fails
 closed.
 
 The tutor accepts a run only when its workflow ID and path, repository, head
-repository, branch, commit SHA, event type, and unchanged default-branch
-workflow digest all match. The normalized artifact's internal assignment ID,
-commit SHA, schema, and digest must then match before qualitative review starts.
+repository, `workflow_dispatch` event, typed run identity, default branch, and
+unchanged default-branch workflow digest all match. The normalized artifact's
+internal assignment ID, commit SHA, schema, and digest must then match before
+qualitative review starts.
 
 ## Reconciliation and recovery
 
