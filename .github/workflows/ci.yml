@@ -71,8 +71,8 @@ jobs:
         run: uv sync --locked --extra dev
       - name: Validate public and deployment boundaries
         run: |
-          ./scripts/check-public-boundary
-          ./scripts/check-deployment
+          uv run --locked python scripts/check-public-boundary
+          uv run --locked python scripts/check-deployment
       - name: Build strict documentation
         run: ./scripts/check-docs
       - name: Build distributions

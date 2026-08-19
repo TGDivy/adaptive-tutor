@@ -33,7 +33,7 @@ def test_ci_exercises_package_docs_container_and_privacy() -> None:
         "mypy",
         "pytest",
         "check-public-boundary",
-        "check-deployment",
+        "uv run --locked python scripts/check-deployment",
         "check-docs",
         "uv build",
         "adaptive-tutor demo",

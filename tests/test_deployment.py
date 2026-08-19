@@ -45,3 +45,10 @@ def test_systemd_units_restart_and_harden_services() -> None:
     timer = (unit_root / "adaptive-tutor-backup.timer").read_text(encoding="utf-8")
     assert "OnCalendar=daily" in timer
     assert "Persistent=true" in timer
+
+
+def test_container_virtualenv_uses_its_runtime_path() -> None:
+    content = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "UV_PROJECT_ENVIRONMENT=/opt/adaptive-tutor" in content
+    assert "COPY --from=builder /opt/adaptive-tutor /opt/adaptive-tutor" in content
+    assert "COPY --from=builder /build/.venv" not in content

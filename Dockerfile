@@ -10,7 +10,8 @@ COPY --from=uv /uv /usr/local/bin/uv
 WORKDIR /build
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    UV_NO_CACHE=1
+    UV_NO_CACHE=1 \
+    UV_PROJECT_ENVIRONMENT=/opt/adaptive-tutor
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY curricula ./curricula
 COPY src ./src
@@ -31,7 +32,7 @@ ENV PATH="/opt/adaptive-tutor/bin:/usr/local/bin:${PATH}" \
     CODEX_HOME=/var/lib/adaptive-tutor-codex \
     ADAPTIVE_TUTOR_CONFIG=/etc/adaptive-tutor/config.yaml
 
-COPY --from=builder /build/.venv /opt/adaptive-tutor
+COPY --from=builder /opt/adaptive-tutor /opt/adaptive-tutor
 COPY --from=codex /usr/local/bin/node /usr/local/bin/node
 COPY --from=codex /usr/local/bin/codex /usr/local/bin/codex
 COPY --from=codex /usr/local/lib/node_modules/@openai/codex /usr/local/lib/node_modules/@openai/codex
