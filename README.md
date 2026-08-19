@@ -11,6 +11,11 @@ deterministic evidence, structured review, spaced retrieval, and visible progres
 [Quick start](#quick-start) ·
 [Security](#security-model)
 
+[![CI](https://github.com/TGDivy/adaptive-tutor/actions/workflows/ci.yml/badge.svg)](https://github.com/TGDivy/adaptive-tutor/actions/workflows/ci.yml)
+[![Security](https://github.com/TGDivy/adaptive-tutor/actions/workflows/security.yml/badge.svg)](https://github.com/TGDivy/adaptive-tutor/actions/workflows/security.yml)
+[![Docs](https://github.com/TGDivy/adaptive-tutor/actions/workflows/docs.yml/badge.svg)](https://tgdivy.github.io/adaptive-tutor/)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+
 </div>
 
 > Adaptive Tutor is under active construction. The repository is being built
@@ -31,23 +36,29 @@ ship with the project.
 
 ## Quick start
 
-The final installation flow is:
-
-```bash
-pipx install adaptive-tutor
-adaptive-tutor init
-adaptive-tutor doctor
-adaptive-tutor demo
-```
-
-During source development:
+Run the full credential-free learning loop from a source checkout:
 
 ```bash
 git clone https://github.com/tgdivy/adaptive-tutor.git
 cd adaptive-tutor
-uv sync --extra dev
+uv sync --locked --extra dev
 uv run adaptive-tutor demo
 ```
+
+To keep private local state and inspect recommendations:
+
+```bash
+uv run adaptive-tutor init
+uv run adaptive-tutor doctor --offline
+uv run adaptive-tutor next --dry-run --available-minutes 30
+uv run adaptive-tutor status
+```
+
+The demo uses no credentials or network calls. It loads curriculum data,
+selects and validates an assignment, normalizes deterministic evidence, applies
+a schema-valid fixture review transactionally, and generates a progress report.
+See the [installation guide](https://tgdivy.github.io/adaptive-tutor/getting-started/)
+for isolated installs, dashboard startup, and remote integration.
 
 ## Architecture
 
@@ -75,10 +86,30 @@ short-lived, read-only worker; SQLite—not model history—is the system of rec
 - Untrusted code never receives model, repository-write, dashboard, or agent
   credentials.
 - Repository and learner text is delimited as untrusted data for model review.
-- The dashboard binds to loopback by default and requires authorization when
-  exposed through a private network.
+- The dashboard binds to loopback and requires authorization by default;
+  exposed binds refuse to start without a token.
 - Public-boundary checks reject credentials, internal infrastructure references,
   learner data, and private curriculum material before release.
+
+Read the complete [security model](https://tgdivy.github.io/adaptive-tutor/security/)
+before enabling GitHub or model credentials.
+
+## Deploy
+
+Hardened Docker Compose and systemd paths include non-root/read-only services,
+worker-only model credentials, health checks, restart recovery, daily online
+backups, upgrade/rollback, and disaster recovery procedures.
+
+```bash
+cd deploy
+./prepare-compose.sh
+docker compose build
+docker compose --profile tools run --rm initializer
+docker compose up -d tutor
+```
+
+Follow the [operations guide](https://tgdivy.github.io/adaptive-tutor/operations/)
+rather than exposing the example service directly.
 
 ## Project status
 

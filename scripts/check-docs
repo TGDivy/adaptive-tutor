@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Validate documentation coverage, local links, and the strict site build."""
+
+from __future__ import annotations
+
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+DOCS = ROOT / "docs"
+LOCAL_LINK = re.compile(r"(?<!!)\[[^]]+\]\(([^)]+)\)")
+REQUIRED_PAGES = {
+    "index.md",
+    "getting-started.md",
+    "cli.md",
+    "operations.md",
+    "github.md",
+    "curricula.md",
+    "adaptation.md",
+    "learner-model.md",
+    "evaluation.md",
+    "codex.md",
+    "security.md",
+    "architecture.md",
+    "api.md",
+    "troubleshooting.md",
+    "faq.md",
+    "contributing.md",
+    "specification.md",
+}
+REQUIRED_COMMANDS = {
+    "init",
+    "doctor",
+    "status",
+    "next",
+    "current",
+    "hint",
+    "readiness",
+    "report",
+    "history",
+    "concepts",
+    "pause",
+    "resume",
+    "demo",
+}
+
+
+def flatten_nav(value: Any) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, str) and value.endswith(".md"):
+        found.add(value)
+    elif isinstance(value, list):
+        for item in value:
+            found.update(flatten_nav(item))
+    elif isinstance(value, dict):
+        for item in value.values():
+            found.update(flatten_nav(item))
+    return found
+
+
+def check_links(failures: list[str]) -> None:
+    for source in DOCS.glob("*.md"):
+        content = source.read_text(encoding="utf-8")
+        for raw_target in LOCAL_LINK.findall(content):
+            target = raw_target.strip().split()[0].strip("<>")
+            if target.startswith(("http://", "https://", "mailto:", "#")):
+                continue
+            path_text = target.split("#", 1)[0]
+            if not path_text:
+                continue
+            destination = (source.parent / path_text).resolve()
+            if not destination.exists():
+                failures.append(f"{source.relative_to(ROOT)} links to missing {path_text}")
+
+
+def main() -> int:
+    failures: list[str] = []
+    try:
+        config = yaml.safe_load((ROOT / "mkdocs.yml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        print(f"Documentation validation failed: invalid mkdocs.yml: {exc}", file=sys.stderr)
+        return 1
+    missing = sorted(page for page in REQUIRED_PAGES if not (DOCS / page).is_file())
+    if missing:
+        failures.append("required pages are missing: " + ", ".join(missing))
+    nav_pages = flatten_nav(config.get("nav", [])) if isinstance(config, dict) else set()
+    unnavigable = sorted(REQUIRED_PAGES - nav_pages)
+    if unnavigable:
+        failures.append("required pages are absent from navigation: " + ", ".join(unnavigable))
+    cli_text = (DOCS / "cli.md").read_text(encoding="utf-8")
+    undocumented = sorted(command for command in REQUIRED_COMMANDS if f"`{command}`" not in cli_text)
+    if undocumented:
+        failures.append("CLI page omits commands: " + ", ".join(undocumented))
+    check_links(failures)
+
+    local_mkdocs = ROOT / ".venv" / "bin" / "mkdocs"
+    mkdocs = shutil.which("mkdocs") or (str(local_mkdocs) if local_mkdocs.is_file() else None)
+    if mkdocs is None:
+        failures.append("mkdocs is unavailable; sync the dev dependencies")
+    else:
+        with tempfile.TemporaryDirectory(prefix="adaptive-tutor-docs-") as output:
+            built = subprocess.run(  # noqa: S603 - resolved executable, fixed arguments
+                [mkdocs, "build", "--strict", "--site-dir", output],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        if built.returncode:
+            failures.append("strict MkDocs build failed:\n" + built.stdout + built.stderr)
+
+    if failures:
+        print("Documentation validation failed:", file=sys.stderr)
+        for failure in failures:
+            print(f"  - {failure}", file=sys.stderr)
+        return 1
+    print("Documentation validation: PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

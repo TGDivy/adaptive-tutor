@@ -1,0 +1,82 @@
+[data-md-color-scheme="adaptive-light"] {
+  --md-primary-fg-color: #143a33;
+  --md-primary-fg-color--light: #245c50;
+  --md-primary-fg-color--dark: #0b2822;
+  --md-accent-fg-color: #087c64;
+  --md-typeset-a-color: #087c64;
+  --md-default-bg-color: #fbfdfc;
+}
+
+[data-md-color-scheme="adaptive-dark"] {
+  color-scheme: dark;
+  --md-primary-fg-color: #102d27;
+  --md-primary-fg-color--light: #19463b;
+  --md-primary-fg-color--dark: #081b17;
+  --md-accent-fg-color: #58d7b3;
+  --md-typeset-a-color: #70e5c3;
+  --md-default-bg-color: #0a1110;
+  --md-default-fg-color: #e4efeb;
+  --md-code-bg-color: #111c1a;
+}
+
+.md-header {
+  backdrop-filter: blur(12px);
+  background: color-mix(in srgb, var(--md-primary-fg-color) 92%, transparent);
+}
+
+.hero {
+  display: grid;
+  gap: 2rem;
+  grid-template-columns: minmax(0, 1.35fr) minmax(16rem, 0.65fr);
+  margin: 1rem 0 2.5rem;
+  padding: clamp(1.5rem, 4vw, 3.5rem);
+  border: 1px solid color-mix(in srgb, var(--md-accent-fg-color) 25%, transparent);
+  border-radius: 1.25rem;
+  background:
+    radial-gradient(circle at 95% 10%, color-mix(in srgb, #6f7cff 22%, transparent), transparent 45%),
+    radial-gradient(circle at 5% 95%, color-mix(in srgb, #58d7b3 20%, transparent), transparent 42%),
+    var(--md-code-bg-color);
+}
+
+.hero h1 {
+  margin: 0 0 1rem;
+  font-size: clamp(2.3rem, 6vw, 4.6rem);
+  line-height: 0.98;
+  letter-spacing: -0.055em;
+}
+
+.hero p {
+  max-width: 46rem;
+  font-size: 1.08rem;
+}
+
+.hero-card {
+  align-self: center;
+  padding: 1.25rem;
+  border: 1px solid color-mix(in srgb, var(--md-accent-fg-color) 35%, transparent);
+  border-radius: 1rem;
+  background: color-mix(in srgb, var(--md-default-bg-color) 84%, transparent);
+  box-shadow: 0 1.2rem 3rem rgb(0 0 0 / 14%);
+}
+
+.hero-card code {
+  display: block;
+  padding: 0.3rem 0;
+  background: transparent;
+}
+
+.grid.cards > ul > li {
+  border-radius: 0.8rem;
+  transition: border-color 150ms ease, transform 150ms ease;
+}
+
+.grid.cards > ul > li:hover {
+  border-color: var(--md-accent-fg-color);
+  transform: translateY(-2px);
+}
+
+@media (max-width: 52rem) {
+  .hero {
+    grid-template-columns: 1fr;
+  }
+}

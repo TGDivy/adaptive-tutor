@@ -1,0 +1,87 @@
+# CLI reference
+
+Every stateful command accepts the global `--config PATH` option (or the
+`ADAPTIVE_TUTOR_CONFIG` environment variable). Add `--json` where supported for
+stable machine-readable output.
+
+```bash
+adaptive-tutor --help
+adaptive-tutor COMMAND --help
+```
+
+## Learning workflow
+
+| Command | Purpose |
+| --- | --- |
+| `init` | Create secure configuration, migrate SQLite, and load the bundled curriculum. |
+| `doctor` | Check configuration, permissions, database, tooling, Codex, GitHub, webhook, and service health. |
+| `status` | Summarize runtime state, active work, reviews, misconceptions, readiness, and model cost. |
+| `next` | Select and publish the next assignment; `--dry-run` only recommends. |
+| `current` | Show the active assignment without hidden evaluator or reference material. |
+| `hint` | Reveal and record the next of five progressive hint levels. |
+| `readiness` | Show weighted readiness and uncertainty by domain. |
+| `concepts` | Inspect mastery, uncertainty, evidence, spacing, calibration, and trend by concept. |
+| `history` | List assignment status, attempts, and structured review scores. |
+| `report` | Generate a weekly or monthly console, Markdown, or JSON report. |
+| `pause` / `resume` | Stop or resume new assignment creation without discarding evaluation jobs. |
+| `demo` | Run the deterministic credential-free product flow. |
+
+### Context-aware recommendation
+
+```bash
+adaptive-tutor next \
+  --dry-run \
+  --available-minutes 25 \
+  --energy low \
+  --days-until-goal 14 \
+  --json
+```
+
+The response exposes the chosen concept, format, target difficulty, priority,
+factor values, and explanation. It never exposes trusted answer material.
+
+### Reports
+
+```bash
+adaptive-tutor report --period weekly
+adaptive-tutor report --period monthly --format markdown --output progress.md
+adaptive-tutor report --period weekly --format json --output progress.json
+```
+
+Report periods use current UTC time unless an internal controlled test supplies
+an explicit end. Re-running the exact same period is idempotent.
+
+### Offline diagnostics
+
+```bash
+adaptive-tutor doctor --offline
+adaptive-tutor doctor --offline --strict
+adaptive-tutor doctor --offline --json
+```
+
+Offline mode skips GitHub calls. Strict mode turns warnings—such as a stopped
+service or intentionally disabled Codex worker—into a nonzero exit status.
+
+## Operations
+
+| Command | Purpose |
+| --- | --- |
+| `serve` | Run the dashboard, personal-agent API, health probes, and signed webhook receiver. |
+| `worker` | Lease and process durable event jobs; `--once` is useful for controlled checks. |
+| `backup [PATH]` | Create an online, mode-0600 SQLite backup and verify its destination. |
+| `restore PATH --yes` | Replace state from an integrity-checked backup while services are stopped. |
+| `curriculum-load PATH` | Validate and persist a curriculum package without core-code changes. |
+| `webhook-setup` | Create or reconcile the configured signed repository webhook. |
+
+`serve` and `worker` are hidden from the concise interactive help because they
+are supervisor entry points, not everyday learning commands. Their behavior is
+covered in [Deployment and recovery](operations.md).
+
+## Exit behavior
+
+- Success returns zero.
+- Configuration, validation, security, or integration errors return nonzero and
+  print a bounded diagnostic.
+- JSON commands put machine-readable data on standard output.
+- Raw tokens, private keys, trusted solutions, and hidden evaluator material
+  are never printed by normal status commands.

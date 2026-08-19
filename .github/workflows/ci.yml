@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_NO_CONFIG: "1"
+  UV_SYSTEM_CERTS: "true"
+
+jobs:
+  test:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - name: Check out trusted workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Sync locked dependencies
+        run: uv sync --locked --extra dev
+      - name: Lint
+        run: uv run --locked ruff check src tests scripts
+      - name: Type check
+        run: uv run --locked mypy src/adaptive_tutor
+      - name: Test with warnings as errors
+        run: uv run --locked pytest -q -W error
+
+  package-docs:
+    name: Package and documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Sync locked dependencies
+        run: uv sync --locked --extra dev
+      - name: Validate public and deployment boundaries
+        run: |
+          ./scripts/check-public-boundary
+          ./scripts/check-deployment
+      - name: Build strict documentation
+        run: ./scripts/check-docs
+      - name: Build distributions
+        run: uv build
+      - name: Smoke-test installed wheel
+        run: |
+          wheel_path=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
+          uv run --isolated --no-project --with "${wheel_path}" \
+            adaptive-tutor demo --json > /tmp/adaptive-tutor-demo.json
+          python -c "import json; p=json.load(open('/tmp/adaptive-tutor-demo.json')); assert p['report']['study_activity']['attempts'] == 1"
+      - name: Upload distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: adaptive-tutor-distributions
+          path: dist/
+          if-no-files-found: error
+
+  container:
+    name: Container smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build digest-pinned image
+        run: docker build --build-arg SOURCE_REVISION="${GITHUB_SHA}" -t adaptive-tutor:ci .
+      - name: Run credential-free demo in image
+        run: |
+          docker run --rm --cap-drop ALL --network none \
+            --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=128m \
+            adaptive-tutor:ci demo --json > /tmp/container-demo.json
+          python3 -c "import json; p=json.load(open('/tmp/container-demo.json')); assert p['assignment']['id'] == 'A-0001'"
