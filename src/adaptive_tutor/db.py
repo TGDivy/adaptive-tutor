@@ -21,6 +21,7 @@ class Database:
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=15, isolation_level=None)
+        self.path.chmod(0o600)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 15000")

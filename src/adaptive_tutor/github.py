@@ -206,6 +206,18 @@ class GitHubClient:
         )
         return int(response.json()["id"])
 
+    def webhook_status(self, callback_url: str) -> dict[str, Any] | None:
+        hooks = self._request("GET", f"{self.repository_path}/hooks").json()
+        for hook in hooks:
+            if hook.get("config", {}).get("url") == callback_url:
+                return {
+                    "id": int(hook["id"]),
+                    "active": bool(hook.get("active")),
+                    "events": list(hook.get("events") or []),
+                    "last_response": dict(hook.get("last_response") or {}),
+                }
+        return None
+
     def publish_assignment(
         self,
         *,

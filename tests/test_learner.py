@@ -140,6 +140,13 @@ def test_mastery_history_spacing_and_idempotency(initialized: tuple[Database, ob
     assert row["mastery_estimate"] > 0.2
     assert row["review_interval_days"] > 1
     assert row["highest_successful_difficulty"] == 4
+    transition = database.fetch_one(
+        "SELECT mastery_before, mastery_after FROM mastery_evidence WHERE attempt_id=?",
+        (attempt_id,),
+    )
+    assert transition is not None
+    assert transition["mastery_before"] == 0.2
+    assert transition["mastery_after"] == row["mastery_estimate"]
     model.apply_evaluation(
         learner_id="learner",
         assignment_id="A-0001",

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign in · Adaptive Tutor</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body class="login-page">
+    <main class="login-card">
+      <div class="brand-mark" aria-hidden="true">AT</div>
+      <p class="eyebrow">Private learning console</p>
+      <h1>Adaptive Tutor</h1>
+      <p class="muted">Enter the dashboard token stored on your tutor server.</p>
+      {% if error %}<p class="alert" role="alert">{{ error }}</p>{% endif %}
+      <form method="post" action="/login">
+        <label for="token">Access token</label>
+        <input id="token" name="token" type="password" autocomplete="current-password" required autofocus>
+        <button type="submit">Open dashboard</button>
+      </form>
+      <p class="fine-print">The service binds to loopback by default. Use a private network or VPN for remote access.</p>
+    </main>
+  </body>
+</html>

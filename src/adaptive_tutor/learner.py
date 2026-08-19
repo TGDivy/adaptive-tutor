@@ -145,8 +145,8 @@ class LearnerModel:
             INSERT INTO mastery_evidence(
                 id, learner_id, concept_id, assignment_id, attempt_id, outcome,
                 strength, difficulty, exercise_type, learner_confidence,
-                transfer_context, source, observed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                transfer_context, source, observed_at, mastery_before, mastery_after
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(uuid.uuid4()),
@@ -162,6 +162,8 @@ class LearnerModel:
                 evidence.transfer_context,
                 source,
                 observed.isoformat(timespec="seconds"),
+                old_mastery,
+                new_mastery,
             ),
         )
         history = connection.execute(

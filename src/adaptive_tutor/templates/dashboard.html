@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Learning overview · Adaptive Tutor</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">AT</span><span>Adaptive Tutor</span></div>
+      <div class="top-actions">
+        <span class="status-dot {{ 'paused' if status.paused else '' }}"></span>
+        <span>{{ 'Paused' if status.paused else 'Active' }}</span>
+        <form method="post" action="/logout"><button class="quiet" type="submit">Sign out</button></form>
+      </div>
+    </header>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">{{ status.active_curriculum|replace('-', ' ') }}</p>
+          <h1>Your learning system, in motion.</h1>
+          <p class="muted">Evidence, retrieval, and the next useful challenge—without losing the thread.</p>
+        </div>
+        <div class="period-grid">
+          <article><strong>{{ weekly.assignments }}</strong><span>assignments · 7 days</span><small>{{ weekly.average_score }} avg score</small></article>
+          <article><strong>{{ monthly.attempts }}</strong><span>attempts · 30 days</span><small>{{ monthly.average_score }} avg score</small></article>
+        </div>
+      </section>
+
+      <section class="grid primary-grid">
+        <article class="card assignment-card">
+          <p class="eyebrow">Current assignment</p>
+          {% if status.active_assignment %}
+            <div class="assignment-heading"><span class="pill">{{ status.active_assignment.id }}</span><span class="pill subtle">Stage {{ status.active_assignment.current_stage }}</span></div>
+            <h2>{{ status.active_assignment.title }}</h2>
+            <p class="muted">{{ status.active_assignment.exercise_type|replace('_', ' ') }} · Difficulty {{ status.active_assignment.difficulty }}/10 · {{ status.active_assignment.expected_minutes }} min</p>
+            <div class="assignment-footer"><span>{{ status.active_assignment.status|replace('_', ' ') }}</span>{% if status.active_assignment.pull_number %}<span>PR #{{ status.active_assignment.pull_number }}</span>{% endif %}</div>
+          {% else %}
+            <h2>No active assignment</h2>
+            <p class="muted">The scheduler is ready to select a new challenge.</p>
+          {% endif %}
+        </article>
+
+        <article class="card">
+          <p class="eyebrow">Model usage</p>
+          <div class="metric"><strong>{{ status.model_usage.input_tokens + status.model_usage.output_tokens }}</strong><span>tokens</span></div>
+          <div class="metric-row"><span>{{ status.model_usage.invocations }} invocations</span><span>${{ '%.4f'|format(status.model_usage.cost_usd) }}</span></div>
+        </article>
+      </section>
+
+      <section class="grid two-grid">
+        <article class="card">
+          <div class="card-title"><div><p class="eyebrow">Readiness</p><h2>By domain</h2></div></div>
+          <div class="bars">
+            {% for item in status.readiness %}
+              <div class="bar-row">
+                <div><span>{{ item.domain|replace('-', ' ') }}</span><strong>{{ (item.readiness * 100)|round|int }}%</strong></div>
+                <div class="bar"><i style="width: {{ (item.readiness * 100)|round|int }}%"></i></div>
+                <small>uncertainty {{ (item.uncertainty * 100)|round|int }}%</small>
+              </div>
+            {% endfor %}
+          </div>
+        </article>
+
+        <article class="card">
+          <p class="eyebrow">Focus queue</p>
+          <h2>Current weaknesses</h2>
+          <div class="list">
+            {% for item in status.weaknesses %}
+              <div class="list-row"><div><strong>{{ item.name }}</strong><small>{{ item.domain|replace('-', ' ') }}</small></div><span>{{ (item.mastery_estimate * 100)|round|int }}%</span></div>
+            {% endfor %}
+          </div>
+        </article>
+      </section>
+
+      <section class="grid two-grid">
+        <article class="card">
+          <p class="eyebrow">Knowledge repair</p>
+          <h2>Active misconceptions</h2>
+          {% if status.misconceptions %}
+            <div class="list">
+              {% for item in status.misconceptions %}
+                <div class="misconception"><div><span class="severity s{{ item.severity }}"></span><strong>{{ item.concept_name }}</strong><span class="pill subtle">{{ item.status }}</span></div><p>{{ item.description }}</p></div>
+              {% endfor %}
+            </div>
+          {% else %}<p class="empty">No active misconceptions.</p>{% endif %}
+        </article>
+
+        <article class="card">
+          <p class="eyebrow">Spaced retrieval</p>
+          <h2>Upcoming reviews</h2>
+          {% if status.upcoming_reviews %}
+            <div class="list">
+              {% for item in status.upcoming_reviews %}
+                <div class="list-row"><div><strong>{{ item.name }}</strong><small>{{ item.domain|replace('-', ' ') }}</small></div><time>{{ item.next_review[:10] }}</time></div>
+              {% endfor %}
+            </div>
+          {% else %}<p class="empty">Reviews appear after the first evidence.</p>{% endif %}
+        </article>
+      </section>
+
+      <section class="grid two-grid">
+        <article class="card">
+          <p class="eyebrow">Recent evidence</p>
+          <h2>Scores</h2>
+          {% if status.recent_scores %}
+            <div class="list">
+              {% for item in status.recent_scores %}
+                <div class="list-row"><div><strong>{{ item.title }}</strong><small>{{ item.created_at[:10] }} · {{ item.review_kind }}</small></div><span class="score">{{ item.overall_score|round|int }}</span></div>
+              {% endfor %}
+            </div>
+          {% else %}<p class="empty">Scores appear after evaluated submissions.</p>{% endif %}
+        </article>
+        <article class="card">
+          <p class="eyebrow">Event stream</p>
+          <h2>Recent activity</h2>
+          {% if status.recent_activity %}
+            <div class="timeline">
+              {% for item in status.recent_activity %}<div><i></i><p><strong>{{ item.summary }}</strong><small>{{ item.occurred_at[:16]|replace('T', ' ') }}</small></p></div>{% endfor %}
+            </div>
+          {% else %}<p class="empty">Activity begins with your first assignment.</p>{% endif %}
+        </article>
+      </section>
+    </main>
+    <footer>Private by default · SQLite-backed · Git-native</footer>
+  </body>
+</html>
