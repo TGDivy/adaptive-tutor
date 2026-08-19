@@ -33,7 +33,7 @@ dependencies = [
   "pyyaml>=6.0,<7",
   "pytest>=9.0.3,<10",
   "pytest-xdist>=3.8,<4",
-  "rich>=14.0,<15",
+  "rich>=14.0,<16",
   "typer>=0.16,<1",
   "uvicorn[standard]>=0.35,<1",
 ]
