@@ -21,7 +21,12 @@ class StatusService:
         active = self.database.fetch_one(
             """
             SELECT id, title, status, difficulty, exercise_type, expected_minutes,
-                   branch_name, pull_number, current_stage, created_at, updated_at
+                   branch_name, pull_number, current_stage, created_at, updated_at,
+                   json_extract(bundle_json, '$.summary') summary,
+                   json_extract(bundle_json, '$.selection_reason') selection_reason,
+                   (SELECT ac.concept_id FROM assignment_concepts ac
+                    WHERE ac.assignment_id=assignments.id AND ac.is_primary=1)
+                       primary_concept_id
             FROM assignments WHERE learner_id=? AND status IN
                 ('validated','published','submitted','reviewing','follow_up')
             ORDER BY created_at DESC LIMIT 1
@@ -35,9 +40,9 @@ class StatusService:
         weaknesses = self.database.fetch_all(
             """
             SELECT c.id concept_id, c.name, c.domain, m.mastery_estimate,
-                   m.uncertainty, m.trend, m.next_review
+                   m.uncertainty, m.evidence_count, m.trend, m.next_review
             FROM mastery m JOIN concepts c ON c.id=m.concept_id
-            WHERE m.learner_id=? AND c.curriculum_id=?
+            WHERE m.learner_id=? AND c.curriculum_id=? AND m.evidence_count > 0
             ORDER BY m.mastery_estimate ASC, m.uncertainty DESC,
                      c.importance DESC LIMIT 6
             """,
@@ -46,7 +51,8 @@ class StatusService:
         misconceptions = self.database.fetch_all(
             """
             SELECT m.id, m.concept_id, c.name concept_name, m.description,
-                   m.status, m.frequency, m.severity, m.last_observed
+                   m.status, m.frequency, m.severity, m.last_observed,
+                   m.challenged_at, m.resolved_at, m.resolution_transfer_context
             FROM misconceptions m JOIN concepts c ON c.id=m.concept_id
             WHERE m.learner_id=? AND m.status IN
                 ('suspected','active','challenged','recurred')
@@ -54,15 +60,27 @@ class StatusService:
             """,
             (learner_id,),
         )
+        for item in misconceptions:
+            item["lifecycle"] = self.database.fetch_all(
+                """
+                SELECT action, exercise_type, transfer_context, observed_at
+                FROM misconception_evidence
+                WHERE misconception_id=? ORDER BY observed_at, rowid
+                """,
+                (item["id"],),
+            )
         reviews = self.database.fetch_all(
             """
             SELECT c.id concept_id, c.name, c.domain, m.next_review,
-                   m.review_interval_days, m.mastery_estimate
+                   m.last_reviewed, m.review_interval_days, m.mastery_estimate,
+                   CASE WHEN m.next_review <= ? THEN 1 ELSE 0 END due,
+                   CAST(MAX(0, julianday(?) - julianday(m.next_review)) AS INTEGER)
+                       overdue_days
             FROM mastery m JOIN concepts c ON c.id=m.concept_id
             WHERE m.learner_id=? AND c.curriculum_id=? AND m.next_review IS NOT NULL
             ORDER BY m.next_review ASC LIMIT 10
             """,
-            (learner_id, curriculum_id),
+            (iso_now(), iso_now(), learner_id, curriculum_id),
         )
         scores = self.database.fetch_all(
             """
@@ -82,6 +100,22 @@ class StatusService:
             """,
             (learner_id,),
         )
+        changes = self.database.fetch_all(
+            """
+            SELECT c.id concept_id, c.name, c.domain, a.title assignment_title,
+                   e.mastery_before, e.mastery_after,
+                   ROUND(e.mastery_after-e.mastery_before, 4) movement,
+                   e.observed_at
+            FROM mastery_evidence e
+            JOIN concepts c ON c.id=e.concept_id
+            LEFT JOIN assignments a ON a.id=e.assignment_id
+            WHERE e.learner_id=? AND e.mastery_before IS NOT NULL
+              AND e.mastery_after != e.mastery_before
+            ORDER BY e.observed_at DESC LIMIT 6
+            """,
+            (learner_id,),
+        )
+        calibration = LearnerModel(self.database).calibration(learner_id)
         usage = self.database.fetch_one(
             """
             SELECT COUNT(*) invocations,
@@ -100,7 +134,9 @@ class StatusService:
             misconceptions=misconceptions,
             upcoming_reviews=reviews,
             recent_scores=scores,
+            recent_changes=changes,
             recent_activity=activity,
+            confidence_calibration=calibration,
             model_usage=usage,
         )
 

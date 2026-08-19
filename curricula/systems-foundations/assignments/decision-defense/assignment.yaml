@@ -1,0 +1,52 @@
+id: decision-defense
+slug: decision-defense
+title: Defend an engineering decision under pressure
+summary: Turn an initially correct answer into a precise interviewer-style defense of assumptions and trade-offs.
+concept_ids:
+  - reasoning.communication
+exercise_types: [interviewer_follow_up]
+difficulty_min: 3
+difficulty_max: 10
+expected_minutes: 25
+tags: [communication, follow-up, trade-offs]
+files:
+  - path: README.md
+    source: README.md
+    role: instructions
+  - path: RESPONSE.md
+    source: RESPONSE.md
+    role: starter
+  - path: reference/expectations.md
+    source: expectations.md
+    role: reference
+hidden_evaluator:
+  constraints:
+    - the answer states assumptions before defending a decision
+    - claims distinguish known evidence from inference
+    - alternatives are rejected for concrete workload reasons
+    - the response changes course when the new constraint invalidates an assumption
+  hints:
+    - Start by naming the workload fact your original choice depends on.
+    - Separate what was measured from what you inferred.
+    - Give the strongest alternative before explaining why you did not choose it.
+    - State the threshold at which your choice would change.
+    - Answer the changed constraint directly, then revise the design rather than defending it blindly.
+rubric:
+  reasoning: 0.30
+  tradeoffs: 0.30
+  communication: 0.30
+  design: 0.10
+reference_expectations:
+  - The response is concise, assumption-led, and explicit about evidence quality.
+  - At least one alternative is treated charitably and rejected with a workload-specific reason.
+  - The final answer revises the decision when a key assumption changes.
+stages:
+  - number: 1
+    title: Initial defense
+    instructions: Give the ninety-second defense and identify its decisive assumption.
+    unlock_condition: The answer separates evidence, inference, and preference.
+  - number: 2
+    title: Constraint reversal
+    instructions: Respond when the interviewer changes the workload so your decisive assumption no longer holds.
+    unlock_condition: Stage 1 names a falsifiable decision threshold.
+validation_command: []

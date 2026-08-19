@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from adaptive_tutor.curriculum import CurriculumLoader, bundled_curriculum_path
 from adaptive_tutor.db import Database
 from adaptive_tutor.models import ExerciseType, LearnerContext
 from adaptive_tutor.scheduler import AdaptiveScheduler
@@ -89,3 +90,26 @@ def test_active_misconception_changes_priority(initialized: tuple[Database, obje
     )
     target = next(item for item in candidates if item.concept_id == "performance.measurement")
     assert target.factors["misconception"] > 2
+
+
+def test_recommendations_fit_an_authored_difficulty_range(
+    initialized: tuple[Database, object],
+) -> None:
+    database, _ = initialized
+    candidates = AdaptiveScheduler(database).recommend(
+        "learner", "systems-foundations", "generalist", LearnerContext(), limit=20
+    )
+    package = CurriculumLoader().load(bundled_curriculum_path())
+
+    for candidate in candidates:
+        matching = [
+            blueprint
+            for blueprint in package.assignments
+            if candidate.concept_id in blueprint.concept_ids
+            and candidate.exercise_type in blueprint.exercise_types
+        ]
+        assert matching
+        assert any(
+            item.difficulty_min <= candidate.target_difficulty <= item.difficulty_max
+            for item in matching
+        )

@@ -38,7 +38,8 @@ from .jobs import JobQueue, Worker
 from .learner import LearnerModel
 from .models import LearnerContext
 from .orchestrator import TutorOrchestrator
-from .reporting import ReportService
+from .reporting import ReportDocument, ReportService
+from .runner import evaluate_workspace_to_file
 from .scheduler import AdaptiveScheduler
 from .state import StatusService
 
@@ -46,6 +47,7 @@ app = typer.Typer(
     name="adaptive-tutor",
     help="A self-hosted, Git-native adaptive learning engine.",
     no_args_is_help=True,
+    invoke_without_command=True,
     rich_markup_mode="markdown",
     pretty_exceptions_enable=False,
     context_settings={"help_option_names": ["-h", "--help"]},
@@ -170,8 +172,9 @@ def doctor(
 def status(
     ctx: typer.Context,
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show model and domain detail."),
 ) -> None:
-    """Show the active assignment, readiness, weak spots, and runtime state."""
+    """Show what to work on now and the evidence behind that choice."""
     settings, database = _runtime(ctx)
     snapshot = StatusService(database).get_status(
         settings.learner_id, settings.active_curriculum
@@ -180,22 +183,56 @@ def status(
         console.print_json(data=snapshot.model_dump(mode="json"))
         return
     active = snapshot.active_assignment
-    grid = Table.grid(padding=(0, 2))
-    grid.add_column(style="bold")
-    grid.add_column()
-    grid.add_row(
-        "Runtime",
-        "[yellow]paused[/yellow]" if snapshot.paused else "[green]✓ active[/green]",
-    )
-    grid.add_row("Curriculum", snapshot.active_curriculum)
-    grid.add_row("Assignment", f"{active['id']} · {active['title']}" if active else "none")
+    state = "PAUSED" if snapshot.paused else "READY"
+    state_style = "yellow" if snapshot.paused else "green"
+    console.print(f"[bold]Adaptive Tutor[/bold]  [{state_style}]{state}[/{state_style}]")
+    console.print()
     if active:
-        grid.add_row("Progress", f"{active['status']} · stage {active['current_stage']}")
-    grid.add_row("Reviews due", str(_due_count(snapshot.upcoming_reviews)))
-    grid.add_row("Active misconceptions", str(len(snapshot.misconceptions)))
-    grid.add_row("Model cost", f"${float(snapshot.model_usage['cost_usd']):.4f}")
-    console.print(Panel(grid, title="[bold]Adaptive Tutor[/bold]", border_style="green"))
-    _print_readiness(snapshot.readiness)
+        console.print(f"[green bold]CURRENT · {active['id']}[/green bold]")
+        console.print(f"[bold]{active['title']}[/bold]")
+        console.print(
+            f"{str(active['exercise_type']).replace('_', ' ').title()} · "
+            f"{active['expected_minutes']} min · difficulty {active['difficulty']}/10"
+        )
+        if active.get("selection_reason"):
+            console.print(f"[dim]Why now:[/dim] {active['selection_reason']}")
+        location_label, location = _assignment_location(settings, database, active)
+        console.print(f"[green]{location_label}:[/green] {location}")
+    else:
+        candidates = AdaptiveScheduler(database).recommend(
+            settings.learner_id,
+            settings.active_curriculum,
+            settings.active_profile,
+            LearnerContext(),
+            limit=1,
+        )
+        if candidates:
+            candidate = candidates[0]
+            name = _concept_names(database).get(candidate.concept_id, candidate.concept_id)
+            console.print("[green bold]NEXT RECOMMENDATION[/green bold]")
+            console.print(f"[bold]{name}[/bold]")
+            console.print(
+                f"{candidate.exercise_type.value.replace('_', ' ').title()} · "
+                f"difficulty {candidate.target_difficulty}/10"
+            )
+            console.print(f"[dim]Why now:[/dim] {candidate.reason}")
+            console.print("[green]Start:[/green] adaptive-tutor next")
+        else:
+            console.print("No schedulable concept is available for the current profile.")
+    assessed = sum(item.assessed_concept_count for item in snapshot.readiness)
+    total = sum(item.concept_count for item in snapshot.readiness)
+    console.print()
+    console.print(
+        f"[dim]{_due_count(snapshot.upcoming_reviews)} reviews due · "
+        f"{len(snapshot.misconceptions)} open misconceptions · "
+        f"{assessed}/{total} concepts assessed[/dim]"
+    )
+    if verbose:
+        console.print(
+            f"[dim]Curriculum:[/dim] {snapshot.active_curriculum}  "
+            f"[dim]Model cost:[/dim] ${float(snapshot.model_usage['cost_usd']):.4f}"
+        )
+        _print_readiness(snapshot.readiness, verbose=True)
 
 
 @app.command("next")
@@ -205,6 +242,7 @@ def next_assignment(
     energy: Literal["low", "medium", "high"] = typer.Option("medium"),
     days_until_goal: int | None = typer.Option(None, min=0, help="Optional scheduling horizon."),
     dry_run: bool = typer.Option(False, help="Show the recommendation without creating a PR."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show ranked alternatives."),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Select and create the next adaptive assignment."""
@@ -220,22 +258,41 @@ def next_assignment(
             settings.active_curriculum,
             settings.active_profile,
             context,
-            limit=3,
+            limit=3 if verbose or json_output else 1,
         )
         payload = [item.model_dump(mode="json") for item in candidates]
         if json_output:
             console.print_json(data=payload)
+        elif not candidates:
+            console.print("No schedulable concept matches this session context.")
         else:
-            table = Table("Concept", "Format", "Difficulty", "Priority", "Why", box=box.ROUNDED)
-            for item in candidates:
-                table.add_row(
-                    item.concept_id,
-                    item.exercise_type.value.replace("_", " "),
-                    str(item.target_difficulty),
-                    f"{item.priority:.2f}",
-                    item.reason,
+            active = AssignmentService(database).active(settings.learner_id)
+            if active:
+                console.print(
+                    f"[yellow]Current work remains active:[/yellow] "
+                    f"{active['id']} · {active['title']}\n"
                 )
-            console.print(table)
+            names = _concept_names(database)
+            first = candidates[0]
+            console.print("[green bold]NEXT RECOMMENDATION[/green bold]")
+            console.print(f"[bold]{names.get(first.concept_id, first.concept_id)}[/bold]")
+            console.print(
+                f"{first.exercise_type.value.replace('_', ' ').title()} · "
+                f"difficulty {first.target_difficulty}/10 · "
+                f"fits a {available_minutes} min session"
+            )
+            console.print(f"[dim]Why now:[/dim] {first.reason}")
+            if verbose and len(candidates) > 1:
+                table = Table("Rank", "Concept", "Format", "Diff", "Priority", box=box.SIMPLE)
+                for rank, item in enumerate(candidates, 1):
+                    table.add_row(
+                        str(rank),
+                        names.get(item.concept_id, item.concept_id),
+                        item.exercise_type.value.replace("_", " "),
+                        str(item.target_difficulty),
+                        f"{item.priority:.2f}",
+                    )
+                console.print(table)
         return
     orchestrator = _orchestrator(settings, database)
     try:
@@ -265,6 +322,7 @@ def next_assignment(
 def current(
     ctx: typer.Context,
     json_output: bool = typer.Option(False, "--json"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Show the current assignment without exposing hidden evaluator material."""
     settings, database = _runtime(ctx)
@@ -272,24 +330,31 @@ def current(
     if active is None:
         console.print("No active assignment. Run [bold]adaptive-tutor next[/bold].")
         return
+    bundle = active["bundle"]
     public = {key: value for key, value in active.items() if key != "bundle"}
     if json_output:
         console.print_json(data=_json_safe(public))
         return
-    table = Table.grid(padding=(0, 2))
-    for label, key in (
-        ("ID", "id"),
-        ("Title", "title"),
-        ("Status", "status"),
-        ("Format", "exercise_type"),
-        ("Difficulty", "difficulty"),
-        ("Expected", "expected_minutes"),
-        ("Branch", "branch_name"),
-        ("Pull request", "pull_number"),
-        ("Stage", "current_stage"),
-    ):
-        table.add_row(f"[bold]{label}[/bold]", str(public.get(key) or "—"))
-    console.print(Panel(table, title="Current assignment"))
+    console.print(f"[green bold]CURRENT · {public['id']}[/green bold]")
+    console.print(f"[bold]{public['title']}[/bold]")
+    console.print(str(bundle.summary))
+    console.print(
+        f"{str(public['exercise_type']).replace('_', ' ').title()} · "
+        f"{public['expected_minutes']} min · difficulty {public['difficulty']}/10"
+    )
+    if bundle.selection_reason:
+        console.print(f"[dim]Why now:[/dim] {bundle.selection_reason}")
+    location_label, location = _assignment_location(settings, database, public)
+    console.print(f"[green]{location_label}:[/green] {location}")
+    if verbose:
+        console.print(
+            f"[dim]Status:[/dim] {public['status']}  [dim]Stage:[/dim] "
+            f"{public['current_stage']}  [dim]Branch:[/dim] {public['branch_name']}"
+        )
+        files = [
+            item.path for item in bundle.files if item.role not in {"reference", "evaluator"}
+        ]
+        console.print(f"[dim]Public files:[/dim] {', '.join(files)}")
 
 
 @app.command()
@@ -309,6 +374,7 @@ def hint(ctx: typer.Context) -> None:
 def readiness(
     ctx: typer.Context,
     json_output: bool = typer.Option(False, "--json"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Show readiness and uncertainty by curriculum domain."""
     settings, database = _runtime(ctx)
@@ -316,7 +382,7 @@ def readiness(
     if json_output:
         console.print_json(data=domains)
     else:
-        _print_readiness(domains)
+        _print_readiness(domains, verbose=verbose)
 
 
 @app.command()
@@ -325,6 +391,7 @@ def report(
     period: Literal["weekly", "monthly"] = typer.Option("weekly"),
     format: Literal["console", "markdown", "json"] = typer.Option("console", "--format"),
     output: Path | None = typer.Option(None, help="Write Markdown or JSON to this file."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show operational totals."),
 ) -> None:
     """Generate a polished weekly or monthly progress report."""
     settings, database = _runtime(ctx)
@@ -344,7 +411,7 @@ def report(
     elif format == "markdown":
         console.print(rendered, markup=False)
     else:
-        console.print(Panel(document.markdown, title=f"{period.title()} report"))
+        _print_console_report(document, verbose=verbose)
 
 
 @app.command()
@@ -432,9 +499,13 @@ def demo(
     if json_output:
         console.print_json(
             data={
+                "database_path": result.database_path,
+                "config_path": result.config_path,
+                "workspace_path": result.workspace_path,
                 "curriculum": result.curriculum,
                 "recommendation": result.recommendation,
                 "assignment": result.assignment,
+                "journey": result.journey,
                 "validation_checks": result.validation_checks,
                 "automated_evidence": result.automated_evidence,
                 "qualitative_evaluation": result.qualitative_evaluation,
@@ -443,29 +514,30 @@ def demo(
             }
         )
         return
+    passed = sum(bool(item["automated_passed"]) for item in result.journey)
+    failed = len(result.journey) - passed
     stages = Table.grid(padding=(0, 2))
     stages.add_column(width=3, style="green bold")
     stages.add_column(style="bold")
     stages.add_column(style="dim")
     stages.add_row("1", "Curriculum loaded", result.curriculum)
+    stages.add_row("2", "Learning history", f"{len(result.journey)} evaluated submissions")
     stages.add_row(
-        "2",
-        "Scheduler selected",
-        f"{result.recommendation['concept_id']} · difficulty "
-        f"{result.recommendation['target_difficulty']}",
+        "3",
+        "Deterministic evidence",
+        f"{passed} passing · {failed} failing submissions",
     )
-    stages.add_row("3", "Assignment validated", result.assignment["title"])
     stages.add_row(
         "4",
-        "Deterministic evidence",
-        f"{len(result.automated_evidence['checks'])} checks passed",
+        "Adaptive history",
+        "confident failures · challenge · transfer · recurrence",
     )
+    stages.add_row("5", "Learner model", "transactional evidence and spaced reviews")
     stages.add_row(
-        "5",
-        "Structured review",
-        f"{result.qualitative_evaluation['overall_score']:.0f}/100",
+        "6",
+        "Next assignment",
+        f"{result.assignment['id']} · difficulty {result.assignment['difficulty']}",
     )
-    stages.add_row("6", "Learner model updated", "transaction committed")
     stages.add_row("7", "Progress report", "weekly Markdown + structured data")
     console.print(
         Panel(
@@ -475,12 +547,15 @@ def demo(
         )
     )
     console.print(
-        f"[bold]Next recommendation:[/bold] {result.recommendation['reason']}\n"
+        f"[bold]Why this is next:[/bold] {result.recommendation['reason']}\n"
         "[dim]No GitHub credentials, private curriculum, network calls, or live model "
         "were used.[/dim]"
     )
-    if keep:
-        console.print(f"Demo state kept at {keep}")
+    if keep and result.config_path:
+        console.print(
+            f"\nDemo state: [bold]{keep}[/bold]\n"
+            f"Inspect it: [bold]adaptive-tutor --config {result.config_path} status[/bold]"
+        )
 
 
 @app.command(hidden=True)
@@ -521,6 +596,37 @@ def worker(
                 time.sleep(1)
     except KeyboardInterrupt:
         console.print("Worker stopped.")
+
+
+@app.command("evaluate", hidden=True)
+def evaluate_command(
+    bundle: Path = typer.Option(
+        ..., exists=True, dir_okay=False, help="Trusted assignment bundle outside the checkout."
+    ),
+    workspace: Path = typer.Option(
+        ..., exists=True, file_okay=False, help="Untrusted learner checkout."
+    ),
+    output: Path = typer.Option(
+        ..., dir_okay=False, help="Evidence path outside the learner checkout."
+    ),
+    assignment_id: str = typer.Option(..., help="Assignment identifier."),
+    commit_sha: str = typer.Option(
+        ..., envvar="GITHUB_SHA", help="Evaluated commit SHA."
+    ),
+) -> None:
+    """Run the trusted deterministic evaluator in an isolated runner."""
+    try:
+        evidence = evaluate_workspace_to_file(
+            bundle_path=bundle,
+            workspace=workspace,
+            output_path=output,
+            assignment_id=assignment_id,
+            commit_sha=commit_sha,
+        )
+    except (TutorError, ValueError, OSError) as exc:
+        _abort(str(exc))
+    state = "passed" if evidence.learner_passed else "failed"
+    console.print(f"Deterministic evaluation {state}; evidence written to {output}")
 
 
 @app.command()
@@ -634,19 +740,135 @@ def _orchestrator(settings: TutorSettings, database: Database) -> TutorOrchestra
     return TutorOrchestrator(settings, database, github, evaluator)
 
 
-def _print_readiness(domains: list[Any]) -> None:
-    table = Table("Domain", "Readiness", "Uncertainty", "Concepts", box=box.ROUNDED)
-    for item in domains:
-        values = item.model_dump() if hasattr(item, "model_dump") else item
-        readiness_value = float(values["readiness"])
-        color = "green" if readiness_value >= 0.7 else "yellow" if readiness_value >= 0.4 else "red"
-        table.add_row(
-            str(values["domain"]).replace("-", " ").title(),
-            f"[{color}]{readiness_value:.0%}[/{color}]",
-            f"{float(values['uncertainty']):.0%}",
-            str(values["concept_count"]),
+def _concept_names(database: Database) -> dict[str, str]:
+    return {
+        str(item["id"]): str(item["name"])
+        for item in database.fetch_all("SELECT id, name FROM concepts")
+    }
+
+
+def _assignment_location(
+    settings: TutorSettings,
+    database: Database,
+    assignment: dict[str, Any],
+) -> tuple[str, str]:
+    if assignment.get("pull_number") and settings.github.owner:
+        return (
+            "Open",
+            f"https://github.com/{settings.github.owner}/{settings.github.workspace_repo}/"
+            f"pull/{assignment['pull_number']}",
         )
-    console.print(table)
+    demo_workspace = database.fetch_one(
+        "SELECT value_json FROM configuration WHERE key='demo_workspace_path'"
+    )
+    if demo_workspace:
+        try:
+            value = json.loads(str(demo_workspace["value_json"]))
+            if isinstance(value, str) and value:
+                return "Workspace", value
+        except json.JSONDecodeError:
+            pass
+    return "Branch", str(assignment.get("branch_name") or "not published")
+
+
+def _print_readiness(domains: list[Any], *, verbose: bool = False) -> None:
+    values = [item.model_dump() if hasattr(item, "model_dump") else item for item in domains]
+    assessed_count = sum(int(item["assessed_concept_count"]) for item in values)
+    concept_count = sum(int(item["concept_count"]) for item in values)
+    evidence_count = sum(int(item["evidence_count"]) for item in values)
+    console.print("[bold]Readiness[/bold]")
+    if assessed_count < concept_count:
+        console.print(
+            f"Evidence covers [bold]{assessed_count}/{concept_count} concepts[/bold] "
+            f"({evidence_count} observations). Readiness is provisional."
+        )
+    else:
+        console.print(
+            f"Evidence covers all {concept_count} concepts across {evidence_count} observations."
+        )
+    assessed = sorted(
+        (item for item in values if item["readiness"] is not None),
+        key=lambda item: float(item["readiness"]),
+    )
+    if assessed:
+        table = Table("Domain", "Readiness", "Confidence", "Coverage", box=box.SIMPLE)
+        for item in assessed:
+            readiness_value = float(item["readiness"])
+            uncertainty = float(item["uncertainty"])
+            color = (
+                "green"
+                if readiness_value >= 0.7
+                else "yellow"
+                if readiness_value >= 0.4
+                else "red"
+            )
+            confidence = "high" if uncertainty <= 0.3 else "medium" if uncertainty <= 0.6 else "low"
+            table.add_row(
+                str(item["domain"]).replace("-", " ").title(),
+                f"[{color}]{readiness_value:.0%}[/{color}]",
+                confidence,
+                f"{item['assessed_concept_count']}/{item['concept_count']}",
+            )
+        console.print(table)
+    unassessed = [item for item in values if item["readiness"] is None]
+    if unassessed:
+        names = ", ".join(str(item["domain"]).replace("-", " ") for item in unassessed)
+        label = "Unassessed domains" if len(unassessed) > 1 else "Unassessed domain"
+        console.print(f"[dim]{label}: {names}[/dim]")
+    if verbose and values:
+        console.print(
+            "[dim]Confidence describes uncertainty in the learner estimate, "
+            "not confidence reported by the learner.[/dim]"
+        )
+
+
+def _print_console_report(document: ReportDocument, *, verbose: bool) -> None:
+    data = document.data
+    activity = data["study_activity"]
+    console.print(
+        f"[bold]{document.period_type.title()} review[/bold]  "
+        f"[dim]{document.period_start[:10]} to {document.period_end[:10]}[/dim]"
+    )
+    console.print(
+        f"{activity['attempts']} attempts · {activity['assignments']} assignments · "
+        f"{activity['planned_minutes']} planned minutes"
+    )
+    console.print("\n[green bold]IMPROVED[/green bold]")
+    positive = [item for item in data["mastery_movement"] if float(item["movement"]) > 0]
+    if positive:
+        for item in positive[:3]:
+            console.print(
+                f"- {item['name']}: [green]+{float(item['movement']):.0%}[/green] "
+                f"from {item['evidence_count']} observation(s)"
+            )
+    else:
+        console.print("- No positive mastery movement was recorded in this period.")
+    console.print("\n[yellow bold]NEEDS ATTENTION[/yellow bold]")
+    weaknesses = data["weaknesses"]
+    if weaknesses:
+        for item in weaknesses[:3]:
+            console.print(f"- {item['name']}: {float(item['mastery']):.0%} mastery")
+    else:
+        console.print("- More evidence is needed before naming a weakness.")
+    retention = data["retention"]
+    if retention["due_reviews"]:
+        console.print(f"- {retention['due_reviews']} retrieval review(s) are due")
+    if data["active_misconceptions"]:
+        console.print(f"- {data['active_misconceptions']} misconception(s) remain open")
+    console.print("\n[green bold]NEXT SESSION[/green bold]")
+    if data["recommended_focus"]:
+        console.print(f"Focus on {', '.join(data['recommended_focus'][:3])}.")
+    else:
+        console.print("Build baseline evidence for an unassessed concept.")
+    if verbose:
+        calibration = data["confidence_calibration"]
+        usage = data["model_usage"]
+        console.print(
+            "\n[dim]Confidence observations: "
+            f"{calibration['observations']} · calibration error: "
+            f"{float(calibration['mean_absolute_error']):.1%} · model calls: "
+            f"{usage['invocations']} · recorded cost: ${float(usage['cost_usd']):.4f}[/dim]"
+        )
 
 
 def _due_count(reviews: list[dict[str, Any]]) -> int:

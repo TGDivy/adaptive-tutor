@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -11,6 +12,7 @@ from starlette.testclient import TestClient
 from adaptive_tutor.config import GitHubSettings, TutorSettings
 from adaptive_tutor.db import Database
 from adaptive_tutor.jobs import EventStore
+from adaptive_tutor.security import MAX_WEBHOOK_BYTES
 from adaptive_tutor.webhooks import webhook_router
 
 SECRET = "webhook-test-secret"
@@ -71,4 +73,23 @@ def test_webhook_rejects_invalid_signature_and_wrong_repository(
     assert (
         wrong_response.status_code == 403
     )
+    assert database.fetch_one("SELECT COUNT(*) count FROM events") == {"count": 0}
+
+
+def test_webhook_rejects_oversized_chunked_body_without_content_length(
+    database: Database, tmp_path: Path, monkeypatch: object
+) -> None:
+    body = b"{" + b" " * MAX_WEBHOOK_BYTES + b"}"
+
+    def chunks() -> Iterator[bytes]:
+        for offset in range(0, len(body), 64 * 1024):
+            yield body[offset : offset + 64 * 1024]
+
+    response = client(database, tmp_path, monkeypatch).post(
+        "/webhooks/github",
+        content=chunks(),
+        headers=signed_headers(body, delivery="oversized-chunked"),
+    )
+
+    assert response.status_code == 413
     assert database.fetch_one("SELECT COUNT(*) count FROM events") == {"count": 0}

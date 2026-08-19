@@ -57,10 +57,50 @@ Documentation = "https://tgdivy.github.io/adaptive-tutor/"
 Issues = "https://github.com/tgdivy/adaptive-tutor/issues"
 Repository = "https://github.com/tgdivy/adaptive-tutor"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/adaptive_tutor"]
+[tool.hatch.build]
+exclude = [
+  "/.dockerignore",
+  "/.github",
+  "/AGENTS.md",
+  "/Dockerfile",
+  "/GOAL.md",
+  "/SPEC.md",
+  "/deploy",
+  "/dist",
+  "/docs",
+  "/implementation",
+  "/mkdocs.yml",
+  "/scripts",
+  "/site",
+  "/tests",
+  "/uv.lock",
+  "**/.env",
+  "**/.env.*",
+  "**/credentials.json",
+  "**/*.key",
+  "**/*.p12",
+  "**/*.pem",
+  "**/__pycache__",
+  "**/*.pyc",
+  "**/*.pyo",
+]
 
-[tool.hatch.build.targets.wheel.force-include]
+[tool.hatch.build.targets.sdist]
+include = [
+  "/.gitignore",
+  "/LICENSE",
+  "/README.md",
+  "/pyproject.toml",
+  "/src/adaptive_tutor",
+  "/curricula",
+]
+
+[tool.hatch.build.targets.wheel]
+only-include = ["src/adaptive_tutor", "curricula"]
+dev-mode-dirs = ["src"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src" = ""
 "curricula" = "adaptive_tutor/bundled_curricula"
 
 [tool.pytest.ini_options]

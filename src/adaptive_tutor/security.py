@@ -79,7 +79,7 @@ def build_review_prompt(
         "# TRUSTED REFERENCES (JSON)",
         json.dumps(dict(trusted_references), ensure_ascii=True, sort_keys=True),
         "",
-        "# TRUSTED CI EVIDENCE (JSON)",
+        "# UNTRUSTED CI OBSERVATIONS (JSON)",
         json.dumps(dict(ci_evidence), ensure_ascii=True, sort_keys=True),
         "",
         "# LEARNER CONTEXT (UNTRUSTED METADATA, JSON)",
@@ -99,6 +99,7 @@ def codex_worker_environment(source: Mapping[str, str] | None = None) -> dict[st
     incoming = dict(source or os.environ)
     safe_names = {
         "PATH",
+        "USER",
         "LANG",
         "LC_ALL",
         "TZ",

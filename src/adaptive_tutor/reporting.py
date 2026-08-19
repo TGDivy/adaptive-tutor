@@ -108,10 +108,21 @@ class ReportService:
         retention = self.database.fetch_one(
             """
             SELECT COUNT(*) observations,
-                   COALESCE(SUM(CASE WHEN outcome='success' THEN 1 ELSE 0 END), 0) successes,
-                   COALESCE(SUM(CASE WHEN outcome='failure' THEN 1 ELSE 0 END), 0) failures
-            FROM mastery_evidence
-            WHERE learner_id=? AND observed_at BETWEEN ? AND ?
+                   COALESCE(SUM(CASE WHEN e.outcome='success' THEN 1 ELSE 0 END), 0)
+                       successes,
+                   COALESCE(SUM(CASE WHEN e.outcome='failure' THEN 1 ELSE 0 END), 0)
+                       failures
+            FROM mastery_evidence e
+            WHERE e.learner_id=? AND e.observed_at BETWEEN ? AND ?
+              AND EXISTS (
+                  SELECT 1 FROM mastery_evidence prior
+                  WHERE prior.learner_id=e.learner_id
+                    AND prior.concept_id=e.concept_id
+                    AND (
+                        prior.observed_at < e.observed_at OR
+                        (prior.observed_at=e.observed_at AND prior.rowid < e.rowid)
+                    )
+              )
             """,
             (learner_id, start_text, end_text),
         ) or {"observations": 0, "successes": 0, "failures": 0}
@@ -120,7 +131,8 @@ class ReportService:
                 self.database.fetch_one(
                     """
                     SELECT COUNT(*) count FROM mastery m JOIN concepts c ON c.id=m.concept_id
-                    WHERE m.learner_id=? AND c.curriculum_id=? AND m.next_review <= ?
+                    WHERE m.learner_id=? AND c.curriculum_id=?
+                      AND m.evidence_count > 0 AND m.next_review <= ?
                     """,
                     (learner_id, curriculum_id, end_text),
                 )
@@ -219,7 +231,7 @@ class ReportService:
                    ROUND(m.mastery_estimate, 4) mastery,
                    ROUND(m.uncertainty, 4) uncertainty, ROUND(m.trend, 4) trend
             FROM mastery m JOIN concepts c ON c.id=m.concept_id
-            WHERE m.learner_id=? AND c.curriculum_id=?
+            WHERE m.learner_id=? AND c.curriculum_id=? AND m.evidence_count > 0
             ORDER BY m.mastery_estimate {direction}, m.uncertainty ASC LIMIT 5
             """,  # noqa: S608 - direction is an internal two-value constant
             (learner_id, curriculum_id),
@@ -252,11 +264,14 @@ def render_markdown(
         "| Domain | Readiness | Uncertainty |",
         "| --- | ---: | ---: |",
     ]
-    lines.extend(
-        f"| {item['domain']} | {float(item['readiness']):.0%} | "
-        f"{float(item['uncertainty']):.0%} |"
-        for item in data["readiness_by_domain"]
-    )
+    for item in data["readiness_by_domain"]:
+        if item["readiness"] is None:
+            lines.append(f"| {item['domain']} | Unassessed | Unknown |")
+        else:
+            lines.append(
+                f"| {item['domain']} | {float(item['readiness']):.0%} | "
+                f"{float(item['uncertainty']):.0%} |"
+            )
     lines.extend(("", "## Mastery movement", ""))
     if data["mastery_movement"]:
         lines.extend(

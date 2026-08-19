@@ -233,11 +233,11 @@ class Doctor:
         url = f"http://{self.settings.server.host}:{self.settings.server.port}/readyz"
         try:
             response = httpx.get(url, timeout=1.5)
-        except httpx.HTTPError:
+        except (httpx.HTTPError, OSError) as exc:
             return DoctorCheck(
                 "Service health",
                 "warn",
-                "Service is not currently reachable",
+                f"Service is not currently reachable ({exc})",
                 "Start it with the documented systemd or Docker Compose command.",
             )
         if response.status_code == 200:

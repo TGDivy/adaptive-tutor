@@ -1,0 +1,70 @@
+id: rolling-event-counter
+slug: rolling-event-counter
+title: Repair a rolling event counter
+summary: Repair mutation during iteration and defend the moving-window invariant with measurements.
+concept_ids:
+  - performance.measurement
+  - programming.data-structures
+  - programming.invariants
+exercise_types: [debugging, performance_investigation, refactoring, code_review]
+difficulty_min: 3
+difficulty_max: 7
+expected_minutes: 40
+tags: [measurement, amortized-cost, python]
+files:
+  - path: README.md
+    source: README.md
+    role: instructions
+  - path: src/__init__.py
+    source: empty.py
+    role: starter
+  - path: src/rolling_counter.py
+    source: rolling_counter.py
+    role: starter
+  - path: tests/test_counter.py
+    source: test_counter.py
+    role: public_test
+  - path: reference/rolling_counter.py
+    source: reference.py
+    role: reference
+  - path: evaluator/test_hidden.py
+    source: test_hidden.py
+    role: evaluator
+  - path: ANSWER.md
+    source: ANSWER.md
+    role: starter
+hidden_evaluator:
+  reference_replacements:
+    src/rolling_counter.py: reference/rolling_counter.py
+  extra_tests:
+    tests/test_hidden.py: evaluator/test_hidden.py
+  constraints:
+    - all and only expired prefix events are removed
+    - the half-open boundary is implemented exactly
+    - repeated observations are idempotent
+    - the complexity claim matches the implementation
+  hints:
+    - Trace the list after each removal when three old values are adjacent.
+    - Mutating the collection changes which element the iterator visits next.
+    - Nondecreasing timestamps make expired events a contiguous prefix.
+    - Find the first retained index, then remove the prefix once.
+    - Advance while now minus timestamps[index] is at least window, then delete the slice.
+rubric:
+  correctness: 0.40
+  tests: 0.20
+  reasoning: 0.20
+  performance: 0.20
+reference_expectations:
+  - Expiration removes a prefix without mutating during iteration.
+  - Tests pin the exact boundary and idempotence.
+  - The explanation connects sorted timestamps to measured or amortized cost.
+stages:
+  - number: 1
+    title: Correct expiration
+    instructions: Repair expiration and state the moving-window invariant.
+    unlock_condition: Public and hidden boundary checks pass.
+  - number: 2
+    title: Scale follow-up
+    instructions: Redesign for one million retained events and defend the memory-reclamation policy.
+    unlock_condition: Stage 1 is correct and its complexity is justified.
+validation_command: [python, -m, pytest, -q]

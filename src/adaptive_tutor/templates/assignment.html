@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ assignment.id }} · Adaptive Tutor</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/"><span class="brand-mark">AT</span><span>Adaptive Tutor</span></a>
+      <a class="quiet-link" href="/">Back to today</a>
+    </header>
+    <main class="assignment-shell">
+      <p class="eyebrow">{{ assignment.id }} · {{ assignment_state }}</p>
+      <h1>{{ assignment.title }}</h1>
+      <p class="assignment-summary">{{ bundle.summary }}</p>
+      <div class="assignment-meta">
+        <span>{{ assignment.exercise_type|replace('_', ' ') }}</span>
+        <span>Difficulty {{ assignment.difficulty }}/10</span>
+        <span>{{ assignment.expected_minutes }} min</span>
+        <span>Stage {{ assignment.current_stage }}</span>
+      </div>
+      {% if assignment_action and assignment_action.external == 'true' %}
+        <a class="primary-action" href="{{ assignment_action.url }}" target="_blank" rel="noreferrer">Open pull request <span aria-hidden="true">→</span></a>
+      {% endif %}
+
+      <div class="assignment-layout">
+        <section class="assignment-brief">
+          <h2>Brief</h2>
+          <div class="assignment-copy">{{ instructions_html }}</div>
+        </section>
+        <aside class="assignment-sidebar">
+          <section>
+            <p class="eyebrow">Why now</p>
+            <p>{{ bundle.selection_reason }}</p>
+          </section>
+          <section>
+            <p class="eyebrow">Working branch</p>
+            <code>{{ assignment.branch_name }}</code>
+          </section>
+          {% if workspace_path %}<section><p class="eyebrow">Workspace</p><code>{{ workspace_path }}</code></section>{% endif %}
+          {% if bundle.stages %}
+            <section>
+              <p class="eyebrow">Stages</p>
+              <ol class="stage-list">
+                {% for stage in bundle.stages %}<li class="{{ 'current' if stage.number == assignment.current_stage else '' }}"><span>{{ stage.number }}</span><div><strong>{{ stage.title }}</strong><small>{{ stage.unlock_condition }}</small></div></li>{% endfor %}
+              </ol>
+            </section>
+          {% endif %}
+          <section>
+            <p class="eyebrow">Files</p>
+            <ul class="file-list">{% for file in public_files %}<li><code>{{ file.path }}</code><span>{{ file.role|replace('_', ' ') }}</span></li>{% endfor %}</ul>
+          </section>
+        </aside>
+      </div>
+    </main>
+  </body>
+</html>

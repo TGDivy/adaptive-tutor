@@ -1,0 +1,70 @@
+id: bounded-work-queue
+slug: bounded-work-queue
+title: Repair a bounded work queue
+summary: Repair an ambiguous ring-buffer representation and defend the invariant that makes it correct.
+concept_ids:
+  - programming.invariants
+  - programming.data-structures
+  - concurrency.synchronization
+exercise_types: [debugging, implementation, refactoring]
+difficulty_min: 2
+difficulty_max: 7
+expected_minutes: 45
+tags: [state-machines, boundary-cases, python]
+files:
+  - path: README.md
+    source: README.md
+    role: instructions
+  - path: src/__init__.py
+    source: empty.py
+    role: starter
+  - path: src/bounded_queue.py
+    source: bounded_queue.py
+    role: starter
+  - path: tests/test_queue.py
+    source: test_queue.py
+    role: public_test
+  - path: reference/bounded_queue.py
+    source: reference.py
+    role: reference
+  - path: evaluator/test_hidden.py
+    source: test_hidden.py
+    role: evaluator
+  - path: ANSWER.md
+    source: ANSWER.md
+    role: starter
+hidden_evaluator:
+  reference_replacements:
+    src/bounded_queue.py: reference/bounded_queue.py
+  extra_tests:
+    tests/test_hidden.py: evaluator/test_hidden.py
+  constraints:
+    - insertion fails exactly at configured capacity
+    - removal preserves insertion order through wraparound
+    - the representation distinguishes equal-index empty and full states
+    - non-positive capacity is rejected
+  hints:
+    - Write down every state in which the two indices are equal.
+    - The current representation loses one bit of occupancy information.
+    - Track information that changes on every successful put and get.
+    - Add a value bounded by zero and capacity, then use it for empty and full.
+    - Increment size after put, decrement after get, and compare it with zero or capacity.
+rubric:
+  correctness: 0.45
+  tests: 0.20
+  reasoning: 0.25
+  communication: 0.10
+reference_expectations:
+  - The representation retains an independent occupancy bit or count.
+  - Tests cover fill, drain, wraparound, and repeated reuse.
+  - The explanation states the empty/full invariant and one alternative representation.
+stages:
+  - number: 1
+    title: Correctness repair
+    instructions: Repair the queue and state its invariant.
+    unlock_condition: Deterministic correctness checks pass.
+  - number: 2
+    title: Representation follow-up
+    instructions: Replace the count with another unambiguous representation and compare its API and storage trade-offs.
+    unlock_condition: Stage 1 passes with a supported explanation.
+validation_command: [python, -m, pytest, -q]

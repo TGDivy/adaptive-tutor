@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from .config import TutorSettings
 from .errors import SecurityError
 from .jobs import EventStore
-from .security import verify_webhook_signature
+from .security import MAX_WEBHOOK_BYTES, verify_webhook_signature
 
 
 def webhook_router(settings: TutorSettings, events: EventStore) -> APIRouter:
@@ -22,7 +22,20 @@ def webhook_router(settings: TutorSettings, events: EventStore) -> APIRouter:
         secret = settings.webhook_secret
         if not secret:
             raise HTTPException(status_code=503, detail="Webhook secret is not configured")
-        payload_bytes = await request.body()
+        content_length = request.headers.get("Content-Length")
+        if content_length:
+            try:
+                declared_size = int(content_length)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid Content-Length") from exc
+            if declared_size > MAX_WEBHOOK_BYTES:
+                raise HTTPException(status_code=413, detail="Webhook payload is too large")
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > MAX_WEBHOOK_BYTES:
+                raise HTTPException(status_code=413, detail="Webhook payload is too large")
+        payload_bytes = bytes(body)
         try:
             verify_webhook_signature(
                 payload_bytes, request.headers.get("X-Hub-Signature-256"), secret

@@ -15,6 +15,8 @@ from pydantic import ValidationError
 from .db import Database
 from .errors import CurriculumError
 from .models import (
+    AssignmentBlueprint,
+    AssignmentFile,
     ConceptDefinition,
     CurriculumMetadata,
     CurriculumPackage,
@@ -58,17 +60,19 @@ class CurriculumLoader:
                 ProfileDefinition.model_validate(item)
                 for item in self._list_yaml(root / "profiles.yaml", "profiles")
             ]
+            assignments = self._load_assignments(root)
         except (ValidationError, TypeError, ValueError) as exc:
             raise CurriculumError(f"Curriculum schema validation failed: {exc}") from exc
 
         prompts = self._load_prompts(root)
         fixtures = self._load_fixtures(root)
-        self._validate_graph(metadata, concepts, profiles, root)
+        self._validate_graph(metadata, concepts, profiles, assignments, root)
         return CurriculumPackage(
             root=root,
             metadata=metadata,
             concepts=concepts,
             profiles=profiles,
+            assignments=assignments,
             prompts=prompts,
             fixtures=fixtures,
         )
@@ -247,11 +251,59 @@ class CurriculumLoader:
                 raise CurriculumError(f"Invalid fixture {path.name}: {exc}") from exc
         return fixtures
 
+    def _load_assignments(self, root: Path) -> list[AssignmentBlueprint]:
+        assignment_root = root / "assignments"
+        manifests = sorted(assignment_root.glob("*/assignment.yaml"))
+        if not manifests:
+            raise CurriculumError("Curriculum must provide assignments/*/assignment.yaml")
+        blueprints: list[AssignmentBlueprint] = []
+        for manifest in manifests:
+            raw = self._yaml(manifest)
+            raw_files = raw.pop("files", None)
+            if not isinstance(raw_files, list) or len(raw_files) < 2:
+                raise CurriculumError(f"{manifest.parent.name} must define at least two files")
+            files: list[AssignmentFile] = []
+            for raw_file in raw_files:
+                if not isinstance(raw_file, dict):
+                    raise CurriculumError(
+                        f"Every file in {manifest.parent.name} must be a mapping"
+                    )
+                source = raw_file.get("source")
+                if not isinstance(source, str) or not source:
+                    raise CurriculumError(
+                        f"Assignment file in {manifest.parent.name} is missing source"
+                    )
+                source_path = (manifest.parent / source).resolve()
+                package_root = manifest.parent.resolve()
+                if package_root not in source_path.parents or not source_path.is_file():
+                    raise CurriculumError(
+                        f"Invalid assignment source in {manifest.parent.name}: {source}"
+                    )
+                try:
+                    content = source_path.read_text(encoding="utf-8")
+                except (OSError, UnicodeError) as exc:
+                    raise CurriculumError(f"Cannot read assignment source {source}: {exc}") from exc
+                if len(content.encode("utf-8")) > 500_000:
+                    raise CurriculumError(f"Assignment source is too large: {source}")
+                files.append(
+                    AssignmentFile.model_validate(
+                        {
+                            "path": raw_file.get("path", source),
+                            "role": raw_file.get("role"),
+                            "content": content,
+                        }
+                    )
+                )
+            raw["files"] = files
+            blueprints.append(AssignmentBlueprint.model_validate(raw))
+        return blueprints
+
     @staticmethod
     def _validate_graph(
         metadata: CurriculumMetadata,
         concepts: list[ConceptDefinition],
         profiles: list[ProfileDefinition],
+        assignments: list[AssignmentBlueprint],
         root: Path,
     ) -> None:
         ids = [concept.id for concept in concepts]
@@ -279,6 +331,31 @@ class CurriculumLoader:
                 raise CurriculumError(f"Profile {profile.id} references an unknown domain")
             if set(profile.concept_weights) - known:
                 raise CurriculumError(f"Profile {profile.id} references an unknown concept")
+        blueprint_ids = [item.id for item in assignments]
+        if len(blueprint_ids) != len(set(blueprint_ids)):
+            raise CurriculumError("Assignment blueprint identifiers must be unique")
+        for blueprint in assignments:
+            unknown = set(blueprint.concept_ids) - known
+            if unknown:
+                raise CurriculumError(
+                    f"Assignment {blueprint.id} references unknown concepts: {sorted(unknown)}"
+                )
+        covered = {
+            (concept_id, exercise_type)
+            for blueprint in assignments
+            for concept_id in blueprint.concept_ids
+            for exercise_type in blueprint.exercise_types
+        }
+        missing = [
+            f"{concept.id}:{exercise_type.value}"
+            for concept in concepts
+            for exercise_type in concept.exercise_types
+            if (concept.id, exercise_type) not in covered
+        ]
+        if missing:
+            raise CurriculumError(
+                "Assignment coverage is incomplete: " + ", ".join(sorted(missing))
+            )
 
 
 def _assert_acyclic(concepts: list[ConceptDefinition]) -> None:

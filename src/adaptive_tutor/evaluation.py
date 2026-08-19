@@ -12,7 +12,7 @@ from .codex import QualitativeGrader
 from .db import Database
 from .errors import ModelSchemaError
 from .learner import LearnerModel
-from .models import AutomatedEvaluation, QualitativeEvaluation
+from .models import AssignmentBundle, AutomatedEvaluation, QualitativeEvaluation
 from .security import build_review_prompt, sha256_digest
 from .time import iso_now
 
@@ -27,7 +27,10 @@ class EvidenceNormalizer:
                 raw = json.loads(payload)
             else:
                 raw = payload
-            return AutomatedEvaluation.model_validate(raw)
+            evidence = AutomatedEvaluation.model_validate(raw)
+            if evidence.artifact_digest != evidence.computed_digest():
+                raise ValueError("artifact digest does not match normalized evidence")
+            return evidence
         except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError) as exc:
             raise ModelSchemaError(f"Deterministic evidence contract is invalid: {exc}") from exc
 
@@ -88,8 +91,14 @@ class EvaluationService:
         learner_confidence: int | None,
     ) -> tuple[str, QualitativeEvaluation, list[str]]:
         automated_row = self.database.fetch_one(
-            "SELECT evidence_json FROM automated_evaluations WHERE id=? AND attempt_id=?",
-            (automated_evaluation_id, attempt_id),
+            """
+            SELECT ae.evidence_json, at.assignment_id, at.commit_sha, a.bundle_json
+            FROM automated_evaluations ae
+            JOIN attempts at ON at.id=ae.attempt_id
+            JOIN assignments a ON a.id=at.assignment_id
+            WHERE ae.id=? AND ae.attempt_id=? AND at.assignment_id=?
+            """,
+            (automated_evaluation_id, attempt_id, assignment_id),
         )
         if automated_row is None:
             raise ValueError("Automated evaluation does not belong to this attempt")
@@ -103,9 +112,19 @@ class EvaluationService:
             learner_context={"confidence": learner_confidence},
         )
         evaluation = self.grader.grade(prompt, prompt_version=prompt_version)
+        bundle = AssignmentBundle.model_validate_json(automated_row["bundle_json"])
+        self._validate_qualitative(
+            evaluation,
+            bundle=bundle,
+            automated=automated,
+            assignment_id=assignment_id,
+            commit_sha=str(automated_row["commit_sha"]),
+            injection_flags=injection_flags,
+        )
         evaluation_id = str(uuid.uuid4())
         now = iso_now()
-        with self.database.transaction() as connection:
+
+        def persist(connection: Any) -> None:
             connection.execute(
                 """
                 INSERT INTO qualitative_evaluations(
@@ -126,6 +145,7 @@ class EvaluationService:
                     now,
                 ),
             )
+
         self.learner_model.apply_evaluation(
             learner_id=learner_id,
             assignment_id=assignment_id,
@@ -133,8 +153,63 @@ class EvaluationService:
             evaluation_id=evaluation_id,
             evaluation=evaluation,
             learner_confidence=learner_confidence,
+            persist_evaluation=persist,
         )
         return evaluation_id, evaluation, injection_flags
+
+    @staticmethod
+    def _validate_qualitative(
+        evaluation: QualitativeEvaluation,
+        *,
+        bundle: AssignmentBundle,
+        automated: AutomatedEvaluation,
+        assignment_id: str,
+        commit_sha: str,
+        injection_flags: list[str],
+    ) -> None:
+        if automated.assignment_id != assignment_id or automated.commit_sha != commit_sha:
+            raise ModelSchemaError("Deterministic evidence is outside the assignment attempt")
+        concept_ids = [item.concept_id for item in evaluation.concept_evidence]
+        allowed = set(bundle.concepts)
+        if len(concept_ids) != len(set(concept_ids)) or not set(concept_ids).issubset(allowed):
+            raise ModelSchemaError("Qualitative evidence contains duplicate or unscoped concepts")
+        observed = [
+            item for item in evaluation.concept_evidence if item.outcome != "not_observed"
+        ]
+        if not observed or not allowed.intersection(item.concept_id for item in observed):
+            raise ModelSchemaError("Qualitative review contains no scoped concept evidence")
+        if any(
+            item.difficulty != bundle.difficulty or item.exercise_type != bundle.exercise_type
+            for item in observed
+        ):
+            raise ModelSchemaError("Qualitative evidence does not match assignment context")
+        if any(item.transfer_context and item.outcome != "success" for item in observed):
+            raise ModelSchemaError("Only successful evidence may claim transfer")
+        if any(item.concept_id not in allowed for item in evaluation.misconceptions):
+            raise ModelSchemaError("Misconception finding is outside assignment scope")
+        scores = [item.score for item in evaluation.dimensions]
+        average = sum(scores) / len(scores)
+        if abs(evaluation.overall_score - average) > 25:
+            raise ModelSchemaError("Overall score contradicts dimension scores")
+        if evaluation.classification in {"correct", "valid_alternative"} and (
+            evaluation.overall_score < 60
+        ):
+            raise ModelSchemaError("Correct classification contradicts the score")
+        if evaluation.classification == "wrong" and evaluation.overall_score >= 70:
+            raise ModelSchemaError("Wrong classification contradicts the score")
+        if evaluation.escalation_recommended and evaluation.follow_up != "human_review":
+            raise ModelSchemaError("Escalated reviews must route to human review")
+        if injection_flags:
+            raise ModelSchemaError(
+                "Potential prompt injection was quarantined before learner-state mutation"
+            )
+        if not automated.learner_passed and (
+            evaluation.overall_score >= 70
+            or any(item.outcome == "success" for item in observed)
+        ):
+            raise ModelSchemaError(
+                "Qualitative success contradicts failing deterministic evidence"
+            )
 
     def create_appeal(
         self, assignment_id: str, original_evaluation_id: str, learner_argument: str

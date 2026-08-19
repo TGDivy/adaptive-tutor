@@ -39,8 +39,25 @@ def test_job_leasing_completion_and_expired_recovery(database: Database) -> None
     recovered = queue.claim("worker-b")
     assert recovered is not None and recovered.id == job_id
     assert recovered.attempts == 2
-    queue.complete(recovered)
+    assert queue.complete(claimed) is False
+    assert queue.fail(claimed, ValueError("late worker")) == "lost_lease"
+    assert queue.heartbeat(recovered, lease_seconds=60)
+    assert queue.complete(recovered)
     assert queue.counts() == {"completed": 1}
+
+
+def test_expired_final_lease_dead_letters_instead_of_restarting(database: Database) -> None:
+    queue = JobQueue(database)
+    job_id = queue.enqueue("work", {}, deduplication_key="final-lease", max_attempts=1)
+    claimed = queue.claim("worker-a", lease_seconds=30)
+    assert claimed is not None
+    database.execute(
+        "UPDATE jobs SET leased_until=? WHERE id=?",
+        ((utc_now() - timedelta(seconds=1)).isoformat(), job_id),
+    )
+
+    assert queue.claim("worker-b") is None
+    assert queue.counts() == {"dead_letter": 1}
 
 
 def test_retryable_failure_backs_off_and_nonretryable_dead_letters(database: Database) -> None:

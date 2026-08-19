@@ -13,7 +13,7 @@
       "outcome": "success",
       "strength": 0.9,
       "difficulty": 4,
-      "exercise_type": "debugging",
+      "exercise_type": "implementation",
       "rationale": "The fix restores the stated state invariant.",
       "transfer_context": "repairing a bounded work queue"
     }

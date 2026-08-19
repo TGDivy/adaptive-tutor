@@ -5,7 +5,7 @@ concepts:
     description: Acquire, transfer, and release resources safely on all control-flow paths.
     importance: 1.4
     base_difficulty: 3
-    exercise_types: [implementation, debugging, code_review, refactoring]
+    exercise_types: [code_review, explain_the_code, refactoring]
     reference_files: [resource-lifetime.md]
     generation_guidance: Include early returns or exceptional paths.
     grading_guidance: Reward explicit ownership and deterministic cleanup.
@@ -15,7 +15,7 @@ concepts:
     description: Select and implement data structures from workload and complexity constraints.
     importance: 1.2
     base_difficulty: 4
-    exercise_types: [implementation, code_review, performance_investigation]
+    exercise_types: [implementation, refactoring, performance_investigation]
     reference_files: [measurement.md]
   - id: programming.invariants
     name: Program invariants
@@ -23,7 +23,7 @@ concepts:
     description: State, preserve, and test invariants across APIs and state transitions.
     importance: 1.5
     base_difficulty: 4
-    exercise_types: [debugging, code_review, explain_the_code, written]
+    exercise_types: [debugging, implementation, explain_the_code]
     reference_files: [resource-lifetime.md]
   - id: operating-systems.processes
     name: Processes and isolation
@@ -31,7 +31,7 @@ concepts:
     description: Explain process boundaries, lifecycle, descriptors, and isolation guarantees.
     importance: 1.1
     base_difficulty: 3
-    exercise_types: [written, debugging, system_design, explain_the_code]
+    exercise_types: [written, system_design, explain_the_code]
     reference_files: [operating-systems.md]
   - id: operating-systems.virtual-memory
     name: Virtual memory
@@ -39,7 +39,7 @@ concepts:
     description: Reason about mappings, page faults, locality, and memory protection.
     importance: 1.3
     base_difficulty: 5
-    exercise_types: [written, debugging, performance_investigation, system_design]
+    exercise_types: [written, performance_investigation, mathematics, system_design]
     reference_files: [operating-systems.md, measurement.md]
   - id: operating-systems.scheduling
     name: Scheduling and latency
@@ -47,7 +47,7 @@ concepts:
     description: Connect scheduling, contention, and workload shape to latency behavior.
     importance: 1.2
     base_difficulty: 5
-    exercise_types: [written, performance_investigation, system_design, code_review]
+    exercise_types: [written, performance_investigation, mathematics, quiz]
     reference_files: [operating-systems.md, measurement.md]
   - id: concurrency.synchronization
     name: Synchronization
@@ -87,7 +87,7 @@ concepts:
     description: Design and parse messages correctly across arbitrary transport boundaries.
     importance: 1.3
     base_difficulty: 5
-    exercise_types: [implementation, debugging, code_review, system_design]
+    exercise_types: [implementation, debugging, code_review, explain_the_code]
     reference_files: [networking.md]
   - id: networking.flow-control
     name: Flow control and buffering
@@ -103,7 +103,7 @@ concepts:
     description: Form hypotheses and collect repeatable measurements without common benchmark bias.
     importance: 1.5
     base_difficulty: 4
-    exercise_types: [performance_investigation, code_review, written, refactoring]
+    exercise_types: [performance_investigation, code_review, written, mathematics]
     reference_files: [measurement.md]
   - id: performance.locality
     name: Data locality
@@ -111,7 +111,7 @@ concepts:
     description: Connect access patterns and representation to cache and memory-system costs.
     importance: 1.2
     base_difficulty: 6
-    exercise_types: [performance_investigation, implementation, code_review, written]
+    exercise_types: [performance_investigation, implementation, mathematics, written]
     reference_files: [measurement.md]
   - id: reasoning.communication
     name: Technical communication

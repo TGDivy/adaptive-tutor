@@ -1,0 +1,54 @@
+id: tail-latency-analysis
+slug: tail-latency-analysis
+title: Explain a tail-latency collapse
+summary: Use queueing arithmetic and controlled measurements to separate saturation from scheduler interference.
+concept_ids:
+  - operating-systems.scheduling
+  - concurrency.progress
+  - performance.measurement
+exercise_types: [written, performance_investigation, mathematics, quiz]
+difficulty_min: 4
+difficulty_max: 10
+expected_minutes: 40
+tags: [latency, queueing, scheduling]
+files:
+  - path: README.md
+    source: README.md
+    role: instructions
+  - path: ANALYSIS.md
+    source: ANALYSIS.md
+    role: starter
+  - path: reference/expectations.md
+    source: expectations.md
+    role: reference
+hidden_evaluator:
+  constraints:
+    - utilization and service capacity calculations use consistent units
+    - averages are not used to dismiss tail behavior
+    - experiments distinguish queueing from scheduler and lock effects
+    - recommended mitigations name the overload regime they address
+  hints:
+    - Convert every rate and duration into the same units first.
+    - Compare offered work per second with available worker-seconds per second.
+    - Near saturation, small service-time changes can create large waiting-time changes.
+    - Measure runnable time, queue residence, lock wait, and service time separately.
+    - A mitigation that helps scheduler delay may not help admission overload.
+rubric:
+  correctness: 0.25
+  reasoning: 0.25
+  evidence: 0.25
+  performance: 0.25
+reference_expectations:
+  - Capacity arithmetic identifies whether the offered load is below, near, or above saturation.
+  - The plan measures queue residence and scheduler delay independently of service time.
+  - Each mitigation is tied to evidence and a defined overload regime.
+stages:
+  - number: 1
+    title: Capacity analysis
+    instructions: Calculate the operating point and design discriminating measurements.
+    unlock_condition: Arithmetic and measurement units are internally consistent.
+  - number: 2
+    title: Burst follow-up
+    instructions: Re-evaluate the plan for five-second bursts at twice the steady arrival rate.
+    unlock_condition: Stage 1 separates steady-state capacity from transient queueing.
+validation_command: []

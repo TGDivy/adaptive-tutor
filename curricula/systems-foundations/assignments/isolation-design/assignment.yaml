@@ -1,0 +1,53 @@
+id: isolation-design
+slug: isolation-design
+title: Design isolation for an untrusted build worker
+summary: Define process, filesystem, memory, and credential boundaries for running untrusted build steps.
+concept_ids:
+  - operating-systems.processes
+  - operating-systems.virtual-memory
+exercise_types: [system_design, written, explain_the_code]
+difficulty_min: 3
+difficulty_max: 9
+expected_minutes: 45
+tags: [isolation, sandboxing, threat-model]
+files:
+  - path: README.md
+    source: README.md
+    role: instructions
+  - path: DESIGN.md
+    source: DESIGN.md
+    role: starter
+  - path: reference/expectations.md
+    source: expectations.md
+    role: reference
+hidden_evaluator:
+  constraints:
+    - the threat model names protected assets and attacker capabilities
+    - process and filesystem boundaries are distinguished from credential removal
+    - resource and network limits have explicit enforcement points
+    - residual risk and cleanup after termination are addressed
+  hints:
+    - Start with assets and attacker capabilities, not a list of sandbox features.
+    - An empty environment does not prevent reading same-UID files.
+    - Read-only access can still disclose secrets and private source.
+    - Define network, mount, user, process, time, memory, and output boundaries separately.
+    - Explain how the supervisor proves cleanup after timeout, crash, or forked descendants.
+rubric:
+  reasoning: 0.25
+  design: 0.40
+  correctness: 0.20
+  communication: 0.15
+reference_expectations:
+  - The design uses a distinct security principal and no sensitive shared mounts.
+  - Egress, process count, memory, CPU, time, and artifact size are bounded.
+  - Termination and cleanup cover descendants, temporary storage, and partial outputs.
+stages:
+  - number: 1
+    title: Isolation design
+    instructions: Produce the threat model, boundary diagram, and enforcement table.
+    unlock_condition: Every protected asset has a concrete isolation mechanism.
+  - number: 2
+    title: Escape review
+    instructions: Assume the runtime isolation layer has one kernel vulnerability and design blast-radius reduction.
+    unlock_condition: Stage 1 distinguishes prevention from detection and recovery.
+validation_command: []

@@ -52,3 +52,28 @@ def test_doctor_rejects_world_readable_private_state(
     assert check.status == "fail"
     assert str(data_dir) in check.detail
     assert check.fix
+
+
+def test_doctor_reports_transport_setup_errors_without_crashing(
+    initialized: tuple[Database, object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database, _ = initialized
+    settings = TutorSettings(
+        data_dir=tmp_path / "private-state",
+        database_path=database.path,
+        learner_id="learner",
+        codex={"enabled": False},
+    )
+    settings.ensure_runtime_dirs()
+    monkeypatch.setattr(
+        "adaptive_tutor.doctor.httpx.get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("certificate unreadable")),
+    )
+
+    check = Doctor(settings, database)._service()
+
+    assert check.status == "warn"
+    assert "certificate unreadable" in check.detail
+    assert check.fix

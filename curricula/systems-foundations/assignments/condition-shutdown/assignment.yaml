@@ -1,0 +1,54 @@
+id: condition-shutdown
+slug: condition-shutdown
+title: Repair a missed-shutdown wakeup
+summary: Diagnose a condition-variable shutdown race and make its safety and progress arguments explicit.
+concept_ids:
+  - concurrency.synchronization
+  - concurrency.condition-coordination
+  - concurrency.progress
+exercise_types: [implementation, debugging, code_review, explain_the_code]
+difficulty_min: 4
+difficulty_max: 9
+expected_minutes: 45
+tags: [concurrency, condition-variables, shutdown]
+files:
+  - path: README.md
+    source: README.md
+    role: instructions
+  - path: RESPONSE.md
+    source: RESPONSE.md
+    role: starter
+  - path: reference/expectations.md
+    source: expectations.md
+    role: reference
+hidden_evaluator:
+  constraints:
+    - the predicate and all state transitions are protected by one synchronization discipline
+    - waits use a loop that rechecks state after every wakeup
+    - shutdown wakes every waiter that can otherwise remain blocked
+    - the answer distinguishes safety from liveness
+  hints:
+    - Write the predicate a waiter needs before it may proceed or exit.
+    - A notification is not remembered; the protected state is the durable fact.
+    - Check the predicate before and after every possible scheduling point.
+    - Shutdown changes the predicate for every waiting consumer, not only one.
+    - Hold the lock while changing state, notify all, and wait in a predicate loop.
+rubric:
+  correctness: 0.35
+  reasoning: 0.30
+  design: 0.20
+  communication: 0.15
+reference_expectations:
+  - The answer states a durable predicate combining queued work and shutdown state.
+  - All predicate reads and writes share the condition lock and waits recheck in a loop.
+  - A deterministic schedule or stress strategy demonstrates the original failure.
+stages:
+  - number: 1
+    title: Race diagnosis
+    instructions: Produce the failing interleaving and a minimal correction.
+    unlock_condition: The predicate and wakeup protocol are coherent.
+  - number: 2
+    title: Cancellation follow-up
+    instructions: Add per-task cancellation without starving non-cancelled consumers.
+    unlock_condition: Stage 1 proves both safety and shutdown progress.
+validation_command: []

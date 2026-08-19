@@ -6,8 +6,10 @@ import json
 import math
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
+from .curriculum import CurriculumLoader
 from .db import Database
 from .models import ExerciseType, LearnerContext, SchedulerCandidate
 from .time import parse_time, utc_now
@@ -20,6 +22,9 @@ def _clamp(value: float, low: float, high: float) -> float:
 class AdaptiveScheduler:
     def __init__(self, database: Database) -> None:
         self.database = database
+        self._authored_ranges: dict[
+            str, dict[tuple[str, ExerciseType], list[tuple[int, int]]]
+        ] = {}
 
     def recommend(
         self,
@@ -105,6 +110,7 @@ class AdaptiveScheduler:
         candidates: list[SchedulerCandidate] = []
         for row in rows:
             concept_id = str(row["id"])
+            evidence_count = int(row["evidence_count"])
             mastery = float(row["mastery_estimate"])
             uncertainty_value = float(row["uncertainty"])
             importance = _clamp(float(row["importance"]), 0.1, 2.0)
@@ -132,7 +138,9 @@ class AdaptiveScheduler:
             prerequisite *= 1.0 + min(blocked_dependents.get(concept_id, 0), 3) * 0.18
             urgency = 1.0
             if context.days_until_goal is not None:
-                urgency += _clamp((30 - context.days_until_goal) / 100, 0, 0.3)
+                horizon = _clamp((30 - context.days_until_goal) / 30, 0, 1)
+                relevance = 0.6 * (importance / 2.0) + 0.4 * (weakness / 1.3)
+                urgency += 0.3 * horizon * relevance
             priority = math.prod(
                 (
                     importance,
@@ -154,7 +162,15 @@ class AdaptiveScheduler:
                 recent,
                 concept_id,
             )
+            if exercise_type is None:
+                continue
             difficulty = self._difficulty(row, last_by_concept.get(concept_id), context)
+            difficulty = self._fit_authored_difficulty(
+                curriculum_id,
+                concept_id,
+                exercise_type,
+                difficulty,
+            )
             factors = {
                 "importance": round(importance, 3),
                 "weakness": round(weakness, 3),
@@ -167,15 +183,38 @@ class AdaptiveScheduler:
                 "prerequisite": round(prerequisite, 3),
                 "urgency": round(urgency, 3),
             }
-            reasons = [f"mastery {mastery:.0%}", f"uncertainty {uncertainty_value:.0%}"]
-            if forgetting > 1.1:
-                reasons.append("review is due")
-            if misconception:
-                reasons.append("active misconception")
-            if weakest_prerequisite < 0.45:
-                reasons.append("a prerequisite needs reinforcement")
-            if blocked_dependents.get(concept_id, 0):
-                reasons.append("unblocks dependent concepts")
+            if evidence_count == 0:
+                reasons = ["Baseline evidence is still missing for this important concept."]
+            elif mastery < 0.35:
+                reasons = [f"Recent evidence is weak at {mastery:.0%} mastery."]
+            elif mastery < 0.65:
+                reasons = [f"Readiness is still developing at {mastery:.0%}."]
+            else:
+                reasons = [f"Current evidence supports {mastery:.0%} mastery."]
+            if (
+                evidence_count
+                and uncertainty_value >= 0.65
+                and forgetting <= 1.1
+                and misconception is None
+            ):
+                reasons.append("The estimate is still uncertain.")
+            if evidence_count and forgetting > 1.1 and misconception:
+                reasons.append(
+                    "A retrieval review is due, and an unresolved misconception needs "
+                    "another test."
+                )
+            elif evidence_count and forgetting > 1.1:
+                reasons.append("A retrieval review is due.")
+            elif misconception:
+                reasons.append("An unresolved misconception needs another test.")
+            if weakest_prerequisite < 0.45 and blocked_dependents.get(concept_id, 0):
+                reasons.append(
+                    "Reinforcing its prerequisite will also unblock dependent concepts."
+                )
+            elif weakest_prerequisite < 0.45:
+                reasons.append("A prerequisite needs reinforcement first.")
+            elif blocked_dependents.get(concept_id, 0):
+                reasons.append("This also unblocks dependent concepts.")
             candidates.append(
                 SchedulerCandidate(
                     concept_id=concept_id,
@@ -183,17 +222,54 @@ class AdaptiveScheduler:
                     target_difficulty=difficulty,
                     priority=round(priority, 6),
                     factors=factors,
-                    reason="; ".join(reasons),
+                    reason=" ".join(reasons),
                 )
             )
         return sorted(candidates, key=lambda item: (-item.priority, item.concept_id))[:limit]
+
+    def _fit_authored_difficulty(
+        self,
+        curriculum_id: str,
+        concept_id: str,
+        exercise_type: ExerciseType,
+        target: int,
+    ) -> int:
+        ranges = self._curriculum_ranges(curriculum_id).get(
+            (concept_id, exercise_type), []
+        )
+        if not ranges:
+            return target
+        candidates = [int(_clamp(target, low, high)) for low, high in ranges]
+        return min(candidates, key=lambda value: (abs(value - target), value))
+
+    def _curriculum_ranges(
+        self, curriculum_id: str
+    ) -> dict[tuple[str, ExerciseType], list[tuple[int, int]]]:
+        cached = self._authored_ranges.get(curriculum_id)
+        if cached is not None:
+            return cached
+        row = self.database.fetch_one(
+            "SELECT source_path FROM curricula WHERE id=?", (curriculum_id,)
+        )
+        if row is None:
+            raise ValueError(f"Unknown curriculum: {curriculum_id}")
+        package = CurriculumLoader().load(Path(str(row["source_path"])))
+        ranges: dict[tuple[str, ExerciseType], list[tuple[int, int]]] = defaultdict(list)
+        for blueprint in package.assignments:
+            for blueprint_concept in blueprint.concept_ids:
+                for blueprint_format in blueprint.exercise_types:
+                    ranges[(blueprint_concept, blueprint_format)].append(
+                        (blueprint.difficulty_min, blueprint.difficulty_max)
+                    )
+        self._authored_ranges[curriculum_id] = dict(ranges)
+        return self._authored_ranges[curriculum_id]
 
     @staticmethod
     def _forgetting_factor(row: dict[str, Any], now: datetime) -> float:
         last = parse_time(row.get("last_reviewed"))
         due = parse_time(row.get("next_review"))
         if last is None or due is None:
-            return 1.25
+            return 1.0
         interval_seconds = max((due - last).total_seconds(), 86_400)
         elapsed = max((now - last).total_seconds(), 0)
         if now >= due:
@@ -220,10 +296,10 @@ class AdaptiveScheduler:
         recent_counts: Counter[str],
         recent: list[dict[str, Any]],
         concept_id: str,
-    ) -> ExerciseType:
+    ) -> ExerciseType | None:
         options = [item for item in allowed if item.value in supported]
         if not options:
-            options = [ExerciseType(item) for item in supported]
+            return None
         last_for_concept = next(
             (item["exercise_type"] for item in recent if item["concept_id"] == concept_id), None
         )

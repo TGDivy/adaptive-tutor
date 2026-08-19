@@ -34,6 +34,8 @@ class Job:
     attempts: int
     max_attempts: int
     event_id: str | None
+    worker_id: str
+    lease_token: str
 
 
 class JobQueue:
@@ -87,9 +89,29 @@ class JobQueue:
         with self.database.transaction() as connection:
             connection.execute(
                 """
+                UPDATE jobs SET status='dead_letter', leased_until=NULL,
+                    worker_id=NULL, lease_token=NULL,
+                    last_error='Worker lease expired after maximum attempts', updated_at=?
+                WHERE status='running' AND leased_until < ? AND attempts >= max_attempts
+                """,
+                (now_text, now_text),
+            )
+            connection.execute(
+                """
+                UPDATE events SET status='failed',
+                    error='Worker lease expired after maximum attempts'
+                WHERE id IN (
+                    SELECT event_id FROM jobs
+                    WHERE status='dead_letter'
+                      AND last_error='Worker lease expired after maximum attempts'
+                )
+                """
+            )
+            connection.execute(
+                """
                 UPDATE jobs SET status='queued', leased_until=NULL, worker_id=NULL,
-                    updated_at=?
-                WHERE status='running' AND leased_until < ?
+                    lease_token=NULL, updated_at=?
+                WHERE status='running' AND leased_until < ? AND attempts < max_attempts
                 """,
                 (now_text, now_text),
             )
@@ -103,13 +125,15 @@ class JobQueue:
             ).fetchone()
             if row is None:
                 return None
+            lease_token = uuid.uuid4().hex
             updated = connection.execute(
                 """
                 UPDATE jobs SET status='running', attempts=attempts+1,
-                    leased_until=?, worker_id=?, updated_at=?
+                    leased_until=?, worker_id=?, lease_token=?,
+                    lease_generation=lease_generation+1, updated_at=?
                 WHERE id=? AND status='queued'
                 """,
-                (lease, worker_id, now_text, row["id"]),
+                (lease, worker_id, lease_token, now_text, row["id"]),
             ).rowcount
             if updated != 1:
                 return None
@@ -120,23 +144,39 @@ class JobQueue:
                 attempts=int(row["attempts"]) + 1,
                 max_attempts=int(row["max_attempts"]),
                 event_id=str(row["event_id"]) if row["event_id"] else None,
+                worker_id=worker_id,
+                lease_token=lease_token,
             )
 
-    def complete(self, job: Job) -> None:
+    def heartbeat(self, job: Job, *, lease_seconds: int = 900) -> bool:
+        now = utc_now()
+        lease = (now + timedelta(seconds=lease_seconds)).isoformat(timespec="seconds")
+        updated = self.database.execute(
+            """
+            UPDATE jobs SET leased_until=?, updated_at=?
+            WHERE id=? AND status='running' AND worker_id=? AND lease_token=?
+            """,
+            (lease, now.isoformat(timespec="seconds"), job.id, job.worker_id, job.lease_token),
+        )
+        return updated == 1
+
+    def complete(self, job: Job) -> bool:
         now = iso_now()
         with self.database.transaction() as connection:
-            connection.execute(
+            updated = connection.execute(
                 """
                 UPDATE jobs SET status='completed', completed_at=?, updated_at=?,
-                    leased_until=NULL WHERE id=? AND status='running'
+                    leased_until=NULL, worker_id=NULL, lease_token=NULL
+                WHERE id=? AND status='running' AND worker_id=? AND lease_token=?
                 """,
-                (now, now, job.id),
-            )
-            if job.event_id:
+                (now, now, job.id, job.worker_id, job.lease_token),
+            ).rowcount
+            if updated and job.event_id:
                 connection.execute(
                     "UPDATE events SET status='processed', processed_at=? WHERE id=?",
                     (now, job.event_id),
                 )
+            return updated == 1
 
     def fail(self, job: Job, error: BaseException) -> str:
         now = utc_now()
@@ -148,13 +188,24 @@ class JobQueue:
         diagnostic = redact("".join(traceback.format_exception_only(type(error), error))).strip()
         diagnostic = diagnostic[:4000]
         with self.database.transaction() as connection:
-            connection.execute(
+            updated = connection.execute(
                 """
                 UPDATE jobs SET status=?, available_at=?, leased_until=NULL,
-                    worker_id=NULL, last_error=?, updated_at=? WHERE id=?
+                    worker_id=NULL, lease_token=NULL, last_error=?, updated_at=?
+                WHERE id=? AND status='running' AND worker_id=? AND lease_token=?
                 """,
-                (status, available, diagnostic, now.isoformat(timespec="seconds"), job.id),
-            )
+                (
+                    status,
+                    available,
+                    diagnostic,
+                    now.isoformat(timespec="seconds"),
+                    job.id,
+                    job.worker_id,
+                    job.lease_token,
+                ),
+            ).rowcount
+            if not updated:
+                return "lost_lease"
             if job.event_id:
                 connection.execute(
                     "UPDATE events SET status=?, error=? WHERE id=?",

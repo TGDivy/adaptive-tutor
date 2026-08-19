@@ -11,17 +11,18 @@ from typing import Any
 from .assignments import (
     AssignmentService,
     AssignmentValidator,
-    TemplateAssignmentGenerator,
 )
 from .config import TutorSettings
 from .curriculum import CurriculumLoader
 from .db import Database
 from .errors import ExternalServiceError, SecurityError
 from .evaluation import EvaluationService, EvidenceNormalizer, render_review
+from .generation import CurriculumAssignmentGenerator
 from .github import GitHubClient
 from .jobs import JobQueue
-from .models import AssignmentBundle, AssignmentRequest, LearnerContext
+from .models import AssignmentBundle, AssignmentRequest, LearnerContext, QualitativeEvaluation
 from .scheduler import AdaptiveScheduler
+from .security import sha256_digest
 from .time import iso_now
 
 _CONFIDENCE = re.compile(r"(?:^|\b)confidence\s*[:=]\s*(\d{1,3})(?:\b|$)", re.I)
@@ -59,6 +60,8 @@ class TutorOrchestrator:
             raise ValueError("Tutor is paused; run 'adaptive-tutor resume' first")
         active = self.assignments.active(self.settings.learner_id)
         if active:
+            if active["status"] == "validated" and not active.get("pull_number"):
+                return self._publish_assignment(active, active["bundle"], scheduler=None)
             return {"existing": True, **active}
         candidates = AdaptiveScheduler(self.database).recommend(
             self.settings.learner_id,
@@ -72,8 +75,12 @@ class TutorOrchestrator:
         candidate = candidates[0]
         recent = self.database.fetch_all(
             """
-            SELECT slug, exercise_type, difficulty, created_at FROM assignments
-            WHERE learner_id=? ORDER BY created_at DESC LIMIT 8
+            SELECT a.slug, a.exercise_type, a.difficulty, a.created_at,
+                   json_extract(a.bundle_json, '$.generator_metadata.blueprint_id') blueprint_id,
+                   (SELECT ac.concept_id FROM assignment_concepts ac
+                    WHERE ac.assignment_id=a.id AND ac.is_primary=1) primary_concept
+            FROM assignments a
+            WHERE a.learner_id=? ORDER BY a.created_at DESC LIMIT 8
             """,
             (self.settings.learner_id,),
         )
@@ -86,7 +93,21 @@ class TutorOrchestrator:
             """,
             (self.settings.learner_id,),
         )
-        references = self._trusted_references(candidate.concept_id)
+        package = self._curriculum_package(candidate.concept_id)
+        concept = next(item for item in package.concepts if item.id == candidate.concept_id)
+        references = {
+            path: (package.root / "references" / path).read_text(encoding="utf-8")
+            for path in concept.reference_files
+        }
+        concept_state = self.database.fetch_one(
+            """
+            SELECT mastery_estimate, uncertainty, evidence_count,
+                   highest_successful_difficulty, recent_performance,
+                   long_term_performance, next_review, confidence_calibration, trend
+            FROM mastery WHERE learner_id=? AND concept_id=?
+            """,
+            (self.settings.learner_id, candidate.concept_id),
+        ) or {}
         request = AssignmentRequest(
             learner_id=self.settings.learner_id,
             curriculum_id=self.settings.active_curriculum,
@@ -97,10 +118,22 @@ class TutorOrchestrator:
             target_difficulty=candidate.target_difficulty,
             context=context.model_copy(update={"allowed_formats": [candidate.exercise_type]}),
             trusted_references=references,
+            concept_state={candidate.concept_id: concept_state},
+            selection_reason=candidate.reason,
+            scheduler_factors=candidate.factors,
         )
-        bundle = TemplateAssignmentGenerator().generate(request)
+        bundle = CurriculumAssignmentGenerator(package).generate(request)
         validation = AssignmentValidator().validate(bundle, request)
         created = self.assignments.create(request, bundle, validation)
+        return self._publish_assignment(created, bundle, scheduler=candidate.model_dump())
+
+    def _publish_assignment(
+        self,
+        created: dict[str, Any],
+        bundle: AssignmentBundle,
+        *,
+        scheduler: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         assignment_id = str(created["id"])
         public_files = self.assignments.public_files(assignment_id)
         pull_body = (
@@ -125,7 +158,10 @@ class TutorOrchestrator:
             """,
             (published["pull_number"], published["head_sha"], now, assignment_id),
         )
-        return {"existing": False, **created, **published, "scheduler": candidate.model_dump()}
+        result = {"existing": False, **created, **published}
+        if scheduler is not None:
+            result["scheduler"] = scheduler
+        return result
 
     def record_submission(self, payload: dict[str, Any]) -> None:
         branch = _branch_from_ref(str(payload.get("ref", "")))
@@ -227,50 +263,76 @@ class TutorOrchestrator:
             )
         if attempt is None:  # pragma: no cover - invariant
             raise RuntimeError("Submission attempt was not recorded")
-        if self.database.fetch_one(
-            "SELECT id FROM qualitative_evaluations WHERE attempt_id=?", (attempt["id"],)
-        ):
-            return
+        existing = self.database.fetch_one(
+            """
+            SELECT id, evaluation_json, review_external_id, review_posted_at
+            FROM qualitative_evaluations
+            WHERE attempt_id=? AND review_kind='initial'
+            """,
+            (attempt["id"],),
+        )
         if workflow.get("conclusion") not in {"success", "failure"}:
             raise ExternalServiceError(
                 f"Evaluation workflow ended as {workflow.get('conclusion')}", retryable=True
             )
-        evidence = EvidenceNormalizer.parse(
-            self.github.download_evidence(int(workflow["id"]))
+        self.github.verify_evaluator_run(
+            int(workflow["id"]),
+            branch=branch,
+            commit_sha=commit_sha,
         )
-        if evidence.assignment_id != assignment["id"] or evidence.commit_sha != commit_sha:
-            raise SecurityError("Actions evidence does not match the assignment and commit")
-        automated_id = self.evaluations.persist_automated(str(attempt["id"]), evidence)
         bundle = AssignmentBundle.model_validate_json(assignment["bundle_json"])
-        submission = self._submission_files(bundle, commit_sha)
-        prompt = self.database.fetch_one(
-            """
-            SELECT version, template_text FROM prompt_versions
-            WHERE purpose='grading' AND active=1 ORDER BY created_at DESC LIMIT 1
-            """
-        )
-        if prompt is None:
-            raise ValueError("No active trusted grading prompt is loaded")
-        references = {
-            item.path: item.content for item in bundle.files if item.role == "reference"
-        }
-        _, qualitative, injection_flags = self.evaluations.grade_attempt(
-            learner_id=self.settings.learner_id,
-            assignment_id=str(assignment["id"]),
-            attempt_id=str(attempt["id"]),
-            automated_evaluation_id=automated_id,
-            rubric=bundle.rubric,
-            references=references,
-            submission=submission,
-            trusted_instructions=str(prompt["template_text"]),
-            prompt_version=str(prompt["version"]),
-            learner_confidence=attempt["learner_confidence"],
-        )
-        if assignment["pull_number"]:
-            self.github.post_review(
+        if existing is None:
+            evidence = EvidenceNormalizer.parse(
+                self.github.download_evidence(int(workflow["id"]))
+            )
+            if evidence.assignment_id != assignment["id"] or evidence.commit_sha != commit_sha:
+                raise SecurityError("Actions evidence does not match the assignment and commit")
+            automated_id = self.evaluations.persist_automated(str(attempt["id"]), evidence)
+            submission = self._submission_files(bundle, commit_sha)
+            prompt = self.database.fetch_one(
+                """
+                SELECT version, template_text FROM prompt_versions
+                WHERE purpose='grading' AND active=1 ORDER BY created_at DESC LIMIT 1
+                """
+            )
+            if prompt is None:
+                raise ValueError("No active trusted grading prompt is loaded")
+            references = {
+                item.path: item.content for item in bundle.files if item.role == "reference"
+            }
+            evaluation_id, qualitative, injection_flags = self.evaluations.grade_attempt(
+                learner_id=self.settings.learner_id,
+                assignment_id=str(assignment["id"]),
+                attempt_id=str(attempt["id"]),
+                automated_evaluation_id=automated_id,
+                rubric=bundle.rubric,
+                references=references,
+                submission=submission,
+                trusted_instructions=str(prompt["template_text"]),
+                prompt_version=str(prompt["version"]),
+                learner_confidence=attempt["learner_confidence"],
+            )
+            review_posted = False
+        else:
+            evaluation_id = str(existing["id"])
+            qualitative = QualitativeEvaluation.model_validate_json(existing["evaluation_json"])
+            injection_flags = []
+            review_posted = bool(existing["review_posted_at"])
+        if assignment["pull_number"] and not review_posted:
+            body = render_review(qualitative, injection_flags=injection_flags)
+            marker = f"<!-- evaluation:{sha256_digest(qualitative.model_dump_json())} -->"
+            review_id = self.github.ensure_review(
                 int(assignment["pull_number"]),
-                render_review(qualitative, injection_flags=injection_flags),
+                body,
+                marker=marker,
                 commit_sha=commit_sha,
+            )
+            self.database.execute(
+                """
+                UPDATE qualitative_evaluations
+                SET review_external_id=?, review_posted_at=? WHERE id=?
+                """,
+                (review_id, iso_now(), evaluation_id),
             )
         self._finish_or_follow_up(assignment, attempt, qualitative)
 
@@ -402,7 +464,11 @@ class TutorOrchestrator:
             ("success" if evaluation.overall_score >= 70 else "failure", attempt["id"]),
         )
         if evaluation.follow_up == "new_stage":
-            next_stage = self.assignments.unlock_follow_up(str(assignment["id"]))
+            next_stage = (
+                int(assignment["current_stage"])
+                if assignment["status"] == "follow_up"
+                else self.assignments.unlock_follow_up(str(assignment["id"]))
+            )
             if next_stage and assignment["pull_number"]:
                 stage = self.database.fetch_one(
                     """
@@ -411,9 +477,12 @@ class TutorOrchestrator:
                     (assignment["id"], next_stage),
                 )
                 if stage:
-                    self.github.post_comment(
+                    marker = f"<!-- adaptive-tutor-stage:{assignment['id']}:{next_stage} -->"
+                    self.github.ensure_comment(
                         int(assignment["pull_number"]),
-                        f"## Stage {next_stage}: {stage['title']}\n\n{stage['instructions']}",
+                        f"## Stage {next_stage}: {stage['title']}\n\n"
+                        f"{stage['instructions']}\n\n{marker}",
+                        marker=marker,
                     )
             return
         status = "reviewing" if evaluation.follow_up == "human_review" else "completed"
@@ -442,7 +511,7 @@ class TutorOrchestrator:
             result[item.path] = content
         return result
 
-    def _trusted_references(self, concept_id: str) -> dict[str, str]:
+    def _curriculum_package(self, concept_id: str) -> Any:
         row = self.database.fetch_one(
             """
             SELECT c.id, cu.source_path FROM concepts c
@@ -451,13 +520,8 @@ class TutorOrchestrator:
             (concept_id,),
         )
         if row is None:
-            return {}
-        package = CurriculumLoader().load(Path(str(row["source_path"])))
-        concept = next(item for item in package.concepts if item.id == concept_id)
-        return {
-            path: (package.root / "references" / path).read_text(encoding="utf-8")
-            for path in concept.reference_files
-        }
+            raise ValueError(f"No curriculum package found for concept {concept_id}")
+        return CurriculumLoader().load(Path(str(row["source_path"])))
 
     def _paused(self) -> bool:
         row = self.database.fetch_one(

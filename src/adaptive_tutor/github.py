@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import io
 import time
 import zipfile
@@ -320,7 +321,16 @@ class GitHubClient:
         ).json()
         if payload.get("type") != "file" or payload.get("encoding") != "base64":
             raise ExternalServiceError(f"Unexpected GitHub content response for {path}")
-        return base64.b64decode(payload["content"], validate=True).decode("utf-8")
+        encoded = payload.get("content")
+        if not isinstance(encoded, str):
+            raise ExternalServiceError(f"GitHub content is missing for {path}")
+        try:
+            normalized = "".join(encoded.split())
+            return base64.b64decode(normalized, validate=True).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError) as exc:
+            raise ExternalServiceError(
+                f"GitHub returned invalid Base64 or UTF-8 content for {path}"
+            ) from exc
 
     def download_evidence(
         self, run_id: int, *, artifact_name: str = "adaptive-tutor-evidence"
@@ -338,15 +348,82 @@ class GitHubClient:
                 f"Expected one non-expired {artifact_name} artifact, found {len(matches)}",
                 retryable=True,
             )
-        response = self._request(
-            "GET",
-            f"{self.repository_path}/actions/artifacts/{matches[0]['id']}/zip",
-            expected=(200,),
-        )
-        archive = response.content
-        if len(archive) > MAX_ARTIFACT_BYTES:
+        metadata_size = int(matches[0].get("size_in_bytes") or 0)
+        if metadata_size > MAX_ARTIFACT_BYTES:
             raise SecurityError("Actions artifact exceeds the size limit")
+        archive = self._download_limited(
+            f"{self.repository_path}/actions/artifacts/{matches[0]['id']}/zip",
+            MAX_ARTIFACT_BYTES,
+        )
         return _read_evidence_zip(archive)
+
+    def verify_evaluator_run(
+        self,
+        run_id: int,
+        *,
+        branch: str,
+        commit_sha: str,
+        workflow_path: str = ".github/workflows/adaptive-tutor-evaluate.yml",
+    ) -> None:
+        repository = self.verify_private_repository()
+        workflow = self._request(
+            "GET", f"{self.repository_path}/actions/workflows/{workflow_path}"
+        ).json()
+        run = self._request("GET", f"{self.repository_path}/actions/runs/{run_id}").json()
+        expected_repository = f"{self.settings.owner}/{self.settings.workspace_repo}".lower()
+        observed_repository = str((run.get("repository") or {}).get("full_name", "")).lower()
+        head_repository = str((run.get("head_repository") or {}).get("full_name", "")).lower()
+        if (
+            int(run.get("workflow_id") or 0) != int(workflow["id"])
+            or str(run.get("path")) != workflow_path
+            or str(run.get("head_branch")) != branch
+            or str(run.get("head_sha")) != commit_sha
+            or str(run.get("event")) != "push"
+            or observed_repository != expected_repository
+            or head_repository != expected_repository
+        ):
+            raise SecurityError("Actions run provenance does not match the trusted evaluator")
+        default_branch = str(repository["default_branch"])
+        trusted = self._request(
+            "GET",
+            f"{self.repository_path}/contents/{workflow_path}",
+            params={"ref": default_branch},
+        ).json()
+        candidate = self._request(
+            "GET",
+            f"{self.repository_path}/contents/{workflow_path}",
+            params={"ref": commit_sha},
+        ).json()
+        if trusted.get("sha") != candidate.get("sha"):
+            raise SecurityError("Assignment branch modified the trusted evaluator workflow")
+
+    def _download_limited(self, path: str, maximum: int) -> bytes:
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {self.auth.token()}",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "adaptive-tutor",
+        }
+        try:
+            with self.client.stream("GET", path, headers=headers) as response:
+                if response.status_code != 200:
+                    raise ExternalServiceError(
+                        f"GitHub GET {path} returned {response.status_code}: "
+                        f"{redact(response.read().decode(errors='replace')[:1500])}",
+                        retryable=response.status_code in {408, 429}
+                        or response.status_code >= 500,
+                    )
+                declared = response.headers.get("Content-Length")
+                if declared and int(declared) > maximum:
+                    raise SecurityError("Actions artifact exceeds the size limit")
+                content = bytearray()
+                for chunk in response.iter_bytes():
+                    content.extend(chunk)
+                    if len(content) > maximum:
+                        raise SecurityError("Actions artifact exceeds the size limit")
+                return bytes(content)
+        except httpx.HTTPError as exc:
+            raise ExternalServiceError(f"GitHub request failed: {exc}", retryable=True) from exc
 
     def post_review(self, pull_number: int, body: str, *, commit_sha: str | None = None) -> int:
         payload: dict[str, Any] = {"body": body, "event": "COMMENT"}
@@ -360,6 +437,24 @@ class GitHubClient:
         )
         return int(response.json()["id"])
 
+    def ensure_review(
+        self,
+        pull_number: int,
+        body: str,
+        *,
+        marker: str,
+        commit_sha: str | None = None,
+    ) -> int:
+        reviews = self._request(
+            "GET",
+            f"{self.repository_path}/pulls/{pull_number}/reviews",
+            params={"per_page": 100},
+        ).json()
+        for review in reviews:
+            if marker in str(review.get("body") or ""):
+                return int(review["id"])
+        return self.post_review(pull_number, body, commit_sha=commit_sha)
+
     def post_comment(self, issue_number: int, body: str) -> int:
         response = self._request(
             "POST",
@@ -368,6 +463,17 @@ class GitHubClient:
             json={"body": body},
         )
         return int(response.json()["id"])
+
+    def ensure_comment(self, issue_number: int, body: str, *, marker: str) -> int:
+        comments = self._request(
+            "GET",
+            f"{self.repository_path}/issues/{issue_number}/comments",
+            params={"per_page": 100},
+        ).json()
+        for comment in comments:
+            if marker in str(comment.get("body") or ""):
+                return int(comment["id"])
+        return self.post_comment(issue_number, body)
 
 
 def _validate_repository_path(path: str) -> None:

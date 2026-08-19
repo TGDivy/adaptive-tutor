@@ -8,8 +8,9 @@ import subprocess
 import tempfile
 import time
 import uuid
+from copy import deepcopy
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import ValidationError
 
@@ -91,7 +92,10 @@ class CodexRunner:
             schema_path = root / "evaluation.schema.json"
             output_path = root / "evaluation.json"
             schema_path.write_text(
-                json.dumps(QualitativeEvaluation.model_json_schema(), sort_keys=True),
+                json.dumps(
+                    _strict_output_schema(QualitativeEvaluation.model_json_schema()),
+                    sort_keys=True,
+                ),
                 encoding="utf-8",
             )
             command = [
@@ -129,7 +133,12 @@ class CodexRunner:
                     retryable=True,
                 ) from exc
             if completed.returncode != 0:
-                diagnostic = redact((completed.stderr or completed.stdout)[-3000:])
+                diagnostic = redact(
+                    "stdout:\n"
+                    + completed.stdout[-1500:]
+                    + "\nstderr:\n"
+                    + completed.stderr[-1500:]
+                )
                 raise ModelError(
                     f"Codex grading failed with exit {completed.returncode}: {diagnostic}",
                     retryable=True,
@@ -173,6 +182,27 @@ class FixtureCodexRunner:
     ) -> QualitativeEvaluation:
         self.prompts.append(prompt)
         return self.fixture
+
+
+def _strict_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Adapt Pydantic JSON Schema to the strict structured-output subset."""
+    strict = deepcopy(schema)
+
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            node.pop("default", None)
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                node["additionalProperties"] = False
+                node["required"] = list(properties)
+            for value in node.values():
+                visit(value)
+        elif isinstance(node, list):
+            for value in node:
+                visit(value)
+
+    visit(strict)
+    return strict
 
 
 def _parse_usage(json_lines: str) -> dict[str, int]:

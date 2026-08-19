@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -86,15 +88,6 @@ class ProfileDefinition(StrictModel):
         return value
 
 
-class CurriculumPackage(StrictModel):
-    root: Path
-    metadata: CurriculumMetadata
-    concepts: list[ConceptDefinition]
-    profiles: list[ProfileDefinition]
-    prompts: dict[str, str]
-    fixtures: dict[str, Any]
-
-
 class LearnerContext(StrictModel):
     available_minutes: int = Field(default=45, ge=5, le=480)
     energy: Literal["low", "medium", "high"] = "medium"
@@ -121,6 +114,11 @@ class AssignmentRequest(StrictModel):
     target_difficulty: int = Field(ge=1, le=10)
     context: LearnerContext
     trusted_references: dict[str, str] = Field(default_factory=dict)
+    concept_state: dict[str, dict[str, float | int | str | None]] = Field(
+        default_factory=dict
+    )
+    selection_reason: str = ""
+    scheduler_factors: dict[str, float] = Field(default_factory=dict)
 
 
 class AssignmentFile(StrictModel):
@@ -159,6 +157,9 @@ class AssignmentBundle(StrictModel):
     reference_expectations: list[str] = Field(min_length=1)
     stages: list[AssignmentStage] = Field(default_factory=list)
     validation_command: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    selection_reason: str = ""
+    generator_metadata: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def weights_and_files_are_coherent(self) -> AssignmentBundle:
@@ -174,6 +175,57 @@ class AssignmentBundle(StrictModel):
         ):
             raise ValueError("assignment stage numbers must be consecutive")
         return self
+
+
+class AssignmentBlueprint(StrictModel):
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{2,80}$")
+    slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{2,80}$")
+    title: str = Field(min_length=5, max_length=160)
+    summary: str = Field(min_length=20)
+    concept_ids: list[str] = Field(min_length=1)
+    exercise_types: list[ExerciseType] = Field(min_length=1)
+    difficulty_min: int = Field(ge=1, le=10)
+    difficulty_max: int = Field(ge=1, le=10)
+    expected_minutes: int = Field(ge=5, le=480)
+    files: list[AssignmentFile] = Field(min_length=2)
+    hidden_evaluator: dict[str, Any]
+    rubric: dict[str, float]
+    reference_expectations: list[str] = Field(min_length=1)
+    stages: list[AssignmentStage] = Field(default_factory=list)
+    validation_command: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def blueprint_is_coherent(self) -> AssignmentBlueprint:
+        if self.difficulty_min > self.difficulty_max:
+            raise ValueError("blueprint difficulty_min cannot exceed difficulty_max")
+        AssignmentBundle(
+            slug=self.slug,
+            title=self.title,
+            summary=self.summary,
+            concepts=[self.concept_ids[0]],
+            exercise_type=self.exercise_types[0],
+            difficulty=self.difficulty_min,
+            expected_minutes=self.expected_minutes,
+            files=self.files,
+            hidden_evaluator=self.hidden_evaluator,
+            rubric=self.rubric,
+            reference_expectations=self.reference_expectations,
+            stages=self.stages,
+            validation_command=self.validation_command,
+            tags=self.tags,
+        )
+        return self
+
+
+class CurriculumPackage(StrictModel):
+    root: Path
+    metadata: CurriculumMetadata
+    concepts: list[ConceptDefinition]
+    profiles: list[ProfileDefinition]
+    assignments: list[AssignmentBlueprint]
+    prompts: dict[str, str]
+    fixtures: dict[str, Any]
 
 
 class AutomatedCheck(StrictModel):
@@ -210,6 +262,14 @@ class AutomatedEvaluation(StrictModel):
     def learner_passed(self) -> bool:
         relevant = [check for check in self.checks if check.status != "skipped"]
         return bool(relevant) and all(check.status == "pass" for check in relevant)
+
+    def computed_digest(self) -> str:
+        payload = self.model_dump(mode="json", exclude={"artifact_digest"})
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+    def with_computed_digest(self) -> AutomatedEvaluation:
+        return self.model_copy(update={"artifact_digest": self.computed_digest()})
 
 
 class DimensionScore(StrictModel):
@@ -276,9 +336,11 @@ class QualitativeEvaluation(StrictModel):
 
 class ReadinessDomain(StrictModel):
     domain: str
-    readiness: float = Field(ge=0, le=1)
-    uncertainty: float = Field(ge=0, le=1)
+    readiness: float | None = Field(default=None, ge=0, le=1)
+    uncertainty: float | None = Field(default=None, ge=0, le=1)
     concept_count: int = Field(ge=0)
+    assessed_concept_count: int = Field(ge=0)
+    evidence_count: int = Field(ge=0)
 
 
 class RuntimeStatus(StrictModel):
@@ -290,5 +352,7 @@ class RuntimeStatus(StrictModel):
     misconceptions: list[dict[str, Any]]
     upcoming_reviews: list[dict[str, Any]]
     recent_scores: list[dict[str, Any]]
+    recent_changes: list[dict[str, Any]]
     recent_activity: list[dict[str, Any]]
+    confidence_calibration: dict[str, float | int]
     model_usage: dict[str, float | int]

@@ -7,6 +7,7 @@ import json
 import math
 import re
 import uuid
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
@@ -36,11 +37,14 @@ class LearnerModel:
         evaluation: QualitativeEvaluation,
         learner_confidence: int | None,
         source: str = "qualitative_evaluation",
+        persist_evaluation: Callable[[Any], None] | None = None,
     ) -> None:
         """Apply already schema-validated evidence in one all-or-nothing transaction."""
         observed = utc_now()
         observed_at = observed.isoformat(timespec="seconds")
         with self.database.transaction() as connection:
+            if persist_evaluation is not None:
+                persist_evaluation(connection)
             exists = connection.execute(
                 "SELECT 1 FROM qualitative_evaluations WHERE id=?", (evaluation_id,)
             ).fetchone()
@@ -287,7 +291,12 @@ class LearnerModel:
             misconception_id = str(existing["id"])
             current = MisconceptionStatus(existing["status"])
             status = self._next_misconception_status(
-                connection, misconception_id, current, finding, concept_evidence
+                connection,
+                misconception_id,
+                current,
+                finding,
+                concept_evidence,
+                assignment_id,
             )
             frequency = int(existing["frequency"]) + int(
                 finding.action in {"suspect", "confirm", "recur"}
@@ -347,6 +356,7 @@ class LearnerModel:
         current: MisconceptionStatus,
         finding: MisconceptionFinding,
         evidence: ConceptEvidence | None,
+        assignment_id: str,
     ) -> MisconceptionStatus:
         if finding.action == "recur" or (
             current == MisconceptionStatus.RESOLVED
@@ -359,23 +369,35 @@ class LearnerModel:
             return MisconceptionStatus.CHALLENGED
         if finding.action != "resolve":
             return current
-        if (
-            evidence is None
-            or evidence.outcome != "success"
-            or not evidence.transfer_context
-        ):
+        if current != MisconceptionStatus.CHALLENGED:
+            return current
+        if evidence is None or evidence.outcome != "success" or not evidence.transfer_context:
             return MisconceptionStatus.CHALLENGED
-        prior_formats = {
-            row["exercise_type"]
-            for row in connection.execute(
-                """
-                SELECT exercise_type FROM misconception_evidence
-                WHERE misconception_id=? AND exercise_type IS NOT NULL
-                """,
-                (misconception_id,),
-            ).fetchall()
+        prior = connection.execute(
+            """
+            SELECT assignment_id, exercise_type, transfer_context, action
+            FROM misconception_evidence
+            WHERE misconception_id=?
+            ORDER BY observed_at DESC, rowid DESC
+            """,
+            (misconception_id,),
+        ).fetchall()
+        challenge = next((row for row in prior if row["action"] == "challenge"), None)
+        prior_assignments = {row["assignment_id"] for row in prior if row["assignment_id"]}
+        prior_formats = {row["exercise_type"] for row in prior if row["exercise_type"]}
+        normalized_context = " ".join(evidence.transfer_context.lower().split())
+        prior_contexts = {
+            " ".join(str(row["transfer_context"]).lower().split())
+            for row in prior
+            if row["transfer_context"]
         }
-        if not prior_formats or evidence.exercise_type.value in prior_formats:
+        if (
+            challenge is None
+            or not challenge["exercise_type"]
+            or assignment_id in prior_assignments
+            or evidence.exercise_type.value in prior_formats
+            or normalized_context in prior_contexts
+        ):
             return MisconceptionStatus.CHALLENGED
         return MisconceptionStatus.RESOLVED
 
@@ -383,11 +405,26 @@ class LearnerModel:
         return self.database.fetch_all(
             """
             SELECT c.domain,
-                   ROUND(SUM(m.mastery_estimate * c.importance) / SUM(c.importance), 4)
+                   ROUND(
+                       SUM(CASE WHEN m.evidence_count > 0
+                                THEN m.mastery_estimate * c.importance END) /
+                       NULLIF(SUM(CASE WHEN m.evidence_count > 0
+                                       THEN c.importance ELSE 0 END), 0),
+                       4
+                   )
                        AS readiness,
-                   ROUND(SUM(m.uncertainty * c.importance) / SUM(c.importance), 4)
+                   ROUND(
+                       SUM(CASE WHEN m.evidence_count > 0
+                                THEN m.uncertainty * c.importance END) /
+                       NULLIF(SUM(CASE WHEN m.evidence_count > 0
+                                       THEN c.importance ELSE 0 END), 0),
+                       4
+                   )
                        AS uncertainty,
-                   COUNT(*) AS concept_count
+                   COUNT(*) AS concept_count,
+                   SUM(CASE WHEN m.evidence_count > 0 THEN 1 ELSE 0 END)
+                       AS assessed_concept_count,
+                   SUM(m.evidence_count) AS evidence_count
             FROM mastery m JOIN concepts c ON c.id=m.concept_id
             WHERE m.learner_id=? AND c.curriculum_id=?
             GROUP BY c.domain ORDER BY c.domain

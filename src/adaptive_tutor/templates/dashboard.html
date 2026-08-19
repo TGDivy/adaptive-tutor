@@ -3,126 +3,157 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Learning overview · Adaptive Tutor</title>
+    <title>Today · Adaptive Tutor</title>
     <link rel="stylesheet" href="/static/app.css">
   </head>
   <body>
     <header class="topbar">
-      <div class="brand"><span class="brand-mark">AT</span><span>Adaptive Tutor</span></div>
+      <a class="brand" href="/" aria-label="Adaptive Tutor home"><span class="brand-mark">AT</span><span>Adaptive Tutor</span></a>
       <div class="top-actions">
-        <span class="status-dot {{ 'paused' if status.paused else '' }}"></span>
-        <span>{{ 'Paused' if status.paused else 'Active' }}</span>
+        <span class="runtime"><i class="status-dot {{ 'paused' if status.paused else '' }}"></i>{{ 'Paused' if status.paused else 'Ready' }}</span>
         <form method="post" action="/logout"><button class="quiet" type="submit">Sign out</button></form>
       </div>
     </header>
-    <main class="shell">
-      <section class="hero">
-        <div>
-          <p class="eyebrow">{{ status.active_curriculum|replace('-', ' ') }}</p>
-          <h1>Your learning system, in motion.</h1>
-          <p class="muted">Evidence, retrieval, and the next useful challenge—without losing the thread.</p>
-        </div>
-        <div class="period-grid">
-          <article><strong>{{ weekly.assignments }}</strong><span>assignments · 7 days</span><small>{{ weekly.average_score }} avg score</small></article>
-          <article><strong>{{ monthly.attempts }}</strong><span>attempts · 30 days</span><small>{{ monthly.average_score }} avg score</small></article>
-        </div>
-      </section>
 
-      <section class="grid primary-grid">
-        <article class="card assignment-card">
-          <p class="eyebrow">Current assignment</p>
+    <main class="dashboard-shell">
+      <div class="page-heading">
+        <div><p class="eyebrow">{{ status.active_curriculum|replace('-', ' ') }}</p><h1>Today</h1></div>
+        <p class="date-context">{{ weekly.attempts }} attempts this week · {{ monthly.attempts }} this month</p>
+      </div>
+
+      <section class="session-panel">
+        <div class="session-main">
           {% if status.active_assignment %}
-            <div class="assignment-heading"><span class="pill">{{ status.active_assignment.id }}</span><span class="pill subtle">Stage {{ status.active_assignment.current_stage }}</span></div>
+            <p class="eyebrow">{{ assignment_state }}</p>
             <h2>{{ status.active_assignment.title }}</h2>
-            <p class="muted">{{ status.active_assignment.exercise_type|replace('_', ' ') }} · Difficulty {{ status.active_assignment.difficulty }}/10 · {{ status.active_assignment.expected_minutes }} min</p>
-            <div class="assignment-footer"><span>{{ status.active_assignment.status|replace('_', ' ') }}</span>{% if status.active_assignment.pull_number %}<span>PR #{{ status.active_assignment.pull_number }}</span>{% endif %}</div>
+            <p class="selection-reason">{{ status.active_assignment.selection_reason or status.active_assignment.summary }}</p>
+            <div class="assignment-meta">
+              <span>{{ status.active_assignment.exercise_type|replace('_', ' ') }}</span>
+              <span>Difficulty {{ status.active_assignment.difficulty }}/10</span>
+              <span>{{ status.active_assignment.expected_minutes }} min</span>
+              <span>Stage {{ status.active_assignment.current_stage }}</span>
+            </div>
+            {% if assignment_action %}
+              <a class="primary-action" href="{{ assignment_action.url }}"{% if assignment_action.external == 'true' %} target="_blank" rel="noreferrer"{% endif %}>{{ assignment_action.label }} <span aria-hidden="true">→</span></a>
+            {% endif %}
           {% else %}
-            <h2>No active assignment</h2>
-            <p class="muted">The scheduler is ready to select a new challenge.</p>
+            <p class="eyebrow">No active assignment</p>
+            <h2>Your next session is ready to be selected.</h2>
+            <p class="selection-reason">The scheduler will use current evidence, due reviews, and unresolved misconceptions.</p>
+            {% if can_create %}<form method="post" action="/actions/create-assignment"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="primary-action" type="submit">Create first assignment <span aria-hidden="true">→</span></button></form>{% endif %}
           {% endif %}
-        </article>
-
-        <article class="card">
-          <p class="eyebrow">Model usage</p>
-          <div class="metric"><strong>{{ status.model_usage.input_tokens + status.model_usage.output_tokens }}</strong><span>tokens</span></div>
-          <div class="metric-row"><span>{{ status.model_usage.invocations }} invocations</span><span>${{ '%.4f'|format(status.model_usage.cost_usd) }}</span></div>
-        </article>
+        </div>
+        <div class="session-signals" aria-label="Session signals">
+          <div><strong>{{ status.upcoming_reviews|selectattr('due', 'equalto', 1)|list|length }}</strong><span>reviews due</span></div>
+          <div><strong>{{ status.misconceptions|length }}</strong><span>open misconceptions</span></div>
+          <div>
+            {% if status.confidence_calibration.observations %}
+              <strong>{{ (status.confidence_calibration.mean_absolute_error * 100)|round|int }}%</strong><span>confidence gap</span>
+            {% else %}
+              <strong>—</strong><span>confidence baseline</span>
+            {% endif %}
+          </div>
+        </div>
       </section>
 
-      <section class="grid two-grid">
-        <article class="card">
-          <div class="card-title"><div><p class="eyebrow">Readiness</p><h2>By domain</h2></div></div>
-          <div class="bars">
+      {% if assessed_concepts %}
+      <div class="dashboard-grid top-grid">
+        <section class="panel readiness-panel">
+          <div class="panel-heading"><div><p class="eyebrow">Readiness</p><h2>What the evidence supports</h2></div><span>{{ status.readiness|sum(attribute='assessed_concept_count') }}/{{ status.readiness|sum(attribute='concept_count') }} concepts assessed</span></div>
+          <div class="readiness-list">
             {% for item in status.readiness %}
-              <div class="bar-row">
-                <div><span>{{ item.domain|replace('-', ' ') }}</span><strong>{{ (item.readiness * 100)|round|int }}%</strong></div>
+              {% if item.readiness is not none %}
+              <div class="readiness-row">
+                <div class="readiness-label"><strong>{{ item.domain|replace('-', ' ') }}</strong><span>{{ item.assessed_concept_count }}/{{ item.concept_count }} assessed</span></div>
                 <div class="bar"><i style="width: {{ (item.readiness * 100)|round|int }}%"></i></div>
-                <small>uncertainty {{ (item.uncertainty * 100)|round|int }}%</small>
+                <span class="readiness-value">{{ (item.readiness * 100)|round|int }}% <small>{{ 'high' if item.uncertainty <= 0.3 else 'medium' if item.uncertainty <= 0.6 else 'low' }} confidence</small></span>
               </div>
+              {% endif %}
             {% endfor %}
           </div>
-        </article>
+          <p class="unassessed-note">{{ status.readiness|selectattr('readiness', 'none')|list|length }} domains remain unassessed.</p>
+        </section>
 
-        <article class="card">
-          <p class="eyebrow">Focus queue</p>
-          <h2>Current weaknesses</h2>
-          <div class="list">
-            {% for item in status.weaknesses %}
-              <div class="list-row"><div><strong>{{ item.name }}</strong><small>{{ item.domain|replace('-', ' ') }}</small></div><span>{{ (item.mastery_estimate * 100)|round|int }}%</span></div>
-            {% endfor %}
-          </div>
-        </article>
-      </section>
-
-      <section class="grid two-grid">
-        <article class="card">
-          <p class="eyebrow">Knowledge repair</p>
-          <h2>Active misconceptions</h2>
-          {% if status.misconceptions %}
-            <div class="list">
-              {% for item in status.misconceptions %}
-                <div class="misconception"><div><span class="severity s{{ item.severity }}"></span><strong>{{ item.concept_name }}</strong><span class="pill subtle">{{ item.status }}</span></div><p>{{ item.description }}</p></div>
+        <section class="panel focus-panel">
+          <div class="panel-heading"><div><p class="eyebrow">Focus</p><h2>Where effort pays off</h2></div></div>
+          {% if status.weaknesses %}
+            <div class="compact-list">
+              {% for item in status.weaknesses[:4] %}
+                <div class="focus-row"><div><strong>{{ item.name }}</strong><span>{{ item.domain|replace('-', ' ') }} · {{ item.evidence_count if item.evidence_count is defined else 'evidence recorded' }}</span></div><div class="focus-score">{{ (item.mastery_estimate * 100)|round|int }}%</div></div>
               {% endfor %}
             </div>
-          {% else %}<p class="empty">No active misconceptions.</p>{% endif %}
-        </article>
+          {% else %}
+            <p class="empty">No weaknesses are claimed before evidence exists.</p>
+          {% endif %}
+        </section>
+      </div>
 
-        <article class="card">
-          <p class="eyebrow">Spaced retrieval</p>
-          <h2>Upcoming reviews</h2>
+      <div class="dashboard-grid middle-grid">
+        <section class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">Retrieval</p><h2>Due and decaying knowledge</h2></div></div>
           {% if status.upcoming_reviews %}
-            <div class="list">
-              {% for item in status.upcoming_reviews %}
-                <div class="list-row"><div><strong>{{ item.name }}</strong><small>{{ item.domain|replace('-', ' ') }}</small></div><time>{{ item.next_review[:10] }}</time></div>
+            <div class="compact-list">
+              {% for item in status.upcoming_reviews[:5] %}
+                <div class="review-row"><div><strong>{{ item.name }}</strong><span>Last retrieval {{ item.last_reviewed[:10] }}{% if status.active_assignment and item.concept_id == status.active_assignment.primary_concept_id %} · current assignment{% endif %}</span></div><time class="{{ 'due' if item.due else '' }}">{% if item.due %}{{ item.overdue_days ~ 'd overdue' if item.overdue_days else 'Due today' }}{% else %}{{ item.next_review[:10] }}{% endif %}</time></div>
               {% endfor %}
             </div>
-          {% else %}<p class="empty">Reviews appear after the first evidence.</p>{% endif %}
-        </article>
-      </section>
+          {% else %}<p class="empty">The review queue starts after the first observation.</p>{% endif %}
+        </section>
 
-      <section class="grid two-grid">
-        <article class="card">
-          <p class="eyebrow">Recent evidence</p>
-          <h2>Scores</h2>
+        <section class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">Knowledge repair</p><h2>Misconception lifecycle</h2></div></div>
+          {% if status.misconceptions %}
+            <div class="compact-list">
+              {% for item in status.misconceptions[:4] %}
+                <div class="misconception-row">
+                  <div class="misconception-title"><strong>{{ item.concept_name }}</strong><span class="state state-{{ item.status }}">{{ item.status }}</span></div>
+                  <p>{{ item.description }}</p>
+                  <div class="lifecycle" aria-label="Misconception evidence history">{% for event in item.lifecycle %}<span class="{{ 'current' if loop.last else '' }}">{{ event.action }}</span>{% if not loop.last %}<i aria-hidden="true">→</i>{% endif %}{% endfor %}</div>
+                  <small>Seen {{ item.frequency }} time{{ '' if item.frequency == 1 else 's' }} · last {{ item.last_observed[:10] }}{% if item.status in ['challenged', 'recurred'] %} · needs success in a new format and context{% endif %}</small>
+                </div>
+              {% endfor %}
+            </div>
+          {% else %}<p class="empty">No misconception is currently supported by evidence.</p>{% endif %}
+        </section>
+      </div>
+
+      <div class="dashboard-grid lower-grid">
+        <section class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">Movement</p><h2>Recent change</h2></div></div>
+          {% if status.recent_changes %}
+            <div class="compact-list">
+              {% for item in status.recent_changes[:5] %}
+                <div class="movement-row"><div><strong>{{ item.name }}</strong><span>{{ item.assignment_title or item.domain|replace('-', ' ') }} · {{ item.observed_at[:10] }}</span></div><span class="{{ 'setback' if item.movement < 0 else '' }}">{{ '+' if item.movement > 0 else '' }}{{ (item.movement * 100)|round|int }}%</span></div>
+              {% endfor %}
+            </div>
+          {% else %}<p class="empty">Positive movement will appear after evaluated work.</p>{% endif %}
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">Reviews</p><h2>Recent scores</h2></div><span>{{ weekly.average_score }} weekly average</span></div>
           {% if status.recent_scores %}
-            <div class="list">
-              {% for item in status.recent_scores %}
-                <div class="list-row"><div><strong>{{ item.title }}</strong><small>{{ item.created_at[:10] }} · {{ item.review_kind }}</small></div><span class="score">{{ item.overall_score|round|int }}</span></div>
+            <div class="score-list">
+              {% for item in status.recent_scores[:5] %}
+                <div><span class="score-value {{ 'strong' if item.overall_score >= 70 else 'partial' if item.overall_score >= 50 else 'weak' }}">{{ item.overall_score|round|int }}</span><p><strong>{{ item.title }}</strong><small>{{ item.created_at[:10] }} · {{ item.review_kind }}</small></p></div>
               {% endfor %}
             </div>
           {% else %}<p class="empty">Scores appear after evaluated submissions.</p>{% endif %}
-        </article>
-        <article class="card">
-          <p class="eyebrow">Event stream</p>
-          <h2>Recent activity</h2>
-          {% if status.recent_activity %}
-            <div class="timeline">
-              {% for item in status.recent_activity %}<div><i></i><p><strong>{{ item.summary }}</strong><small>{{ item.occurred_at[:16]|replace('T', ' ') }}</small></p></div>{% endfor %}
-            </div>
-          {% else %}<p class="empty">Activity begins with your first assignment.</p>{% endif %}
-        </article>
-      </section>
+        </section>
+      </div>
+
+      {% else %}
+      <section class="baseline-empty"><p class="eyebrow">Baseline</p><h2>No learner evidence yet</h2><p>Readiness, focus, retrieval, and progress will appear after the first evaluated submission.</p></section>
+      {% endif %}
+
+      <details class="operations">
+        <summary>System activity</summary>
+        <div class="operations-grid">
+          <div><span>Model calls</span><strong>{{ status.model_usage.invocations }}</strong></div>
+          <div><span>Tokens</span><strong>{{ status.model_usage.input_tokens + status.model_usage.output_tokens }}</strong></div>
+          <div><span>Recorded cost</span><strong>${{ '%.4f'|format(status.model_usage.cost_usd) }}</strong></div>
+          <div><span>Events shown</span><strong>{{ status.recent_activity|length }}</strong></div>
+        </div>
+      </details>
     </main>
-    <footer>Private by default · SQLite-backed · Git-native</footer>
   </body>
 </html>

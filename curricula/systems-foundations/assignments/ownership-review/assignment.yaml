@@ -1,0 +1,53 @@
+id: ownership-review
+slug: ownership-review
+title: Review a leaking worker launch path
+summary: Review resource ownership across partial initialization, process launch, cancellation, and cleanup.
+concept_ids:
+  - programming.resource-lifetime
+  - operating-systems.processes
+exercise_types: [code_review, explain_the_code, refactoring]
+difficulty_min: 2
+difficulty_max: 8
+expected_minutes: 35
+tags: [ownership, cleanup, processes, review]
+files:
+  - path: README.md
+    source: README.md
+    role: instructions
+  - path: REVIEW.md
+    source: REVIEW.md
+    role: starter
+  - path: reference/expectations.md
+    source: expectations.md
+    role: reference
+hidden_evaluator:
+  constraints:
+    - every acquired resource has one explicit owner on every path
+    - cleanup ordering accounts for a partially started child
+    - error preservation does not hide cleanup failures
+    - proposed tests observe descriptors and child lifecycle
+  hints:
+    - List each resource immediately after the line that acquires it.
+    - Track ownership after every early return and exception boundary.
+    - A successfully created child changes which cleanup actions are safe.
+    - Preserve the primary failure while still making cleanup failures observable.
+    - Test repeated failed launches while observing descriptor count and child reaping.
+rubric:
+  correctness: 0.30
+  reasoning: 0.30
+  design: 0.25
+  communication: 0.15
+reference_expectations:
+  - The review presents an ownership table covering descriptors, buffers, and child process state.
+  - The refactor has one clear cleanup strategy for every partial-initialization point.
+  - Tests verify no descriptor growth and no unreaped child after repeated failures.
+stages:
+  - number: 1
+    title: Ownership review
+    instructions: Identify the highest-impact lifecycle faults and propose a minimal refactor.
+    unlock_condition: Ownership is explicit across all failure paths.
+  - number: 2
+    title: Cancellation follow-up
+    instructions: Extend the design for cancellation arriving between child creation and exec confirmation.
+    unlock_condition: Stage 1 accounts for partial initialization.
+validation_command: []

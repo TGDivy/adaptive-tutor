@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs
@@ -12,9 +13,13 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from markdown_it import MarkdownIt
+from markupsafe import Markup
 
+from .assignments import AssignmentService
 from .config import TutorSettings
 from .db import Database
+from .errors import TutorError
 from .jobs import EventStore, JobQueue
 from .models import LearnerContext
 from .orchestrator import TutorOrchestrator
@@ -34,6 +39,15 @@ class DashboardAuth:
             return None
         return hmac.new(
             token.encode(), b"adaptive-tutor-dashboard-session", hashlib.sha256
+        ).hexdigest()
+
+    @property
+    def csrf_value(self) -> str | None:
+        token = self.settings.api_token
+        if not token:
+            return None
+        return hmac.new(
+            token.encode(), b"adaptive-tutor-dashboard-csrf", hashlib.sha256
         ).hexdigest()
 
     def authorize(self, request: Request, *, write: bool = False) -> str:
@@ -67,6 +81,13 @@ class DashboardAuth:
             detail="Authentication required",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    def authorize_browser_write(self, request: Request, csrf: str) -> None:
+        if self.authorize(request) != "session":
+            raise HTTPException(status_code=401, detail="Dashboard session required")
+        expected = self.csrf_value
+        if not expected or not csrf or not hmac.compare_digest(expected, csrf):
+            raise HTTPException(status_code=403, detail="Invalid form token")
 
 
 def create_app(
@@ -157,16 +178,17 @@ def create_app(
         response.delete_cookie("adaptive_tutor_session")
         return response
 
-    @app.get(
-        "/",
-        response_class=HTMLResponse,
-        include_in_schema=False,
-        dependencies=[Depends(read_auth)],
-    )
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def dashboard(request: Request) -> Any:
+        try:
+            read_auth(request)
+        except HTTPException:
+            return RedirectResponse(url="/login", status_code=303)
         snapshot = status_service.get_status(
             settings.learner_id, settings.active_curriculum
         ).model_dump(mode="json")
+        action = _assignment_action(snapshot.get("active_assignment"), settings, database)
+        assessed = sum(item["assessed_concept_count"] for item in snapshot["readiness"])
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -175,6 +197,66 @@ def create_app(
                 "weekly": _period_progress(database, settings.learner_id, 7),
                 "monthly": _period_progress(database, settings.learner_id, 30),
                 "reports": reports.recent(settings.learner_id, limit=4),
+                "assignment_action": action,
+                "assignment_state": _learner_assignment_state(
+                    (snapshot.get("active_assignment") or {}).get("status")
+                ),
+                "assessed_concepts": assessed,
+                "csrf_token": auth.csrf_value,
+                "can_create": orchestrator is not None and auth.csrf_value is not None,
+            },
+        )
+
+    @app.post("/actions/create-assignment", include_in_schema=False)
+    async def create_assignment_from_dashboard(request: Request) -> RedirectResponse:
+        body = await request.body()
+        if len(body) > 4096:
+            raise HTTPException(status_code=413, detail="Form request is too large")
+        form = parse_qs(body.decode("utf-8", errors="replace"))
+        auth.authorize_browser_write(request, form.get("csrf", [""])[0])
+        if orchestrator is None:
+            raise HTTPException(status_code=503, detail="GitHub orchestration is unavailable")
+        try:
+            orchestrator.create_next_assignment(LearnerContext())
+        except (TutorError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return RedirectResponse(url="/", status_code=303)
+
+    @app.get(
+        "/assignment/{assignment_id}",
+        response_class=HTMLResponse,
+        include_in_schema=False,
+    )
+    def assignment_detail(request: Request, assignment_id: str) -> Any:
+        try:
+            read_auth(request)
+        except HTTPException:
+            return RedirectResponse(url="/login", status_code=303)
+        active = AssignmentService(database).active(settings.learner_id)
+        if active is None or active["id"] != assignment_id:
+            raise HTTPException(status_code=404, detail="Active assignment not found")
+        bundle = active.pop("bundle")
+        public_files = [
+            {"path": item.path, "role": item.role}
+            for item in bundle.files
+            if item.role not in {"reference", "evaluator", "instructions"}
+        ]
+        instructions = next(
+            (item.content for item in bundle.files if item.role == "instructions"), ""
+        )
+        return templates.TemplateResponse(
+            request,
+            "assignment.html",
+            {
+                "assignment": active,
+                "bundle": bundle.model_dump(mode="json", exclude={"hidden_evaluator"}),
+                "instructions_html": _render_assignment_instructions(
+                    instructions, str(active["title"])
+                ),
+                "public_files": public_files,
+                "assignment_action": _assignment_action(active, settings, database),
+                "assignment_state": _learner_assignment_state(str(active["status"])),
+                "workspace_path": _demo_workspace(database),
             },
         )
 
@@ -255,3 +337,74 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, list):
         return [_json_safe(item) for item in value]
     return value
+
+
+def _assignment_action(
+    assignment: dict[str, Any] | None,
+    settings: TutorSettings,
+    database: Database,
+) -> dict[str, str] | None:
+    if assignment is None:
+        return None
+    pull_number = assignment.get("pull_number")
+    if pull_number and settings.github.owner:
+        return {
+            "label": "Open pull request",
+            "url": (
+                f"https://github.com/{settings.github.owner}/"
+                f"{settings.github.workspace_repo}/pull/{pull_number}"
+            ),
+            "external": "true",
+        }
+    return {
+        "label": (
+            "Start assignment"
+            if assignment.get("status") in {"validated", "published"}
+            else "Open follow-up"
+            if assignment.get("status") == "follow_up"
+            else "Open assignment"
+        ),
+        "url": f"/assignment/{assignment['id']}",
+        "external": "false",
+    }
+
+
+def _demo_workspace(database: Database) -> str | None:
+    row = database.fetch_one(
+        "SELECT value_json FROM configuration WHERE key='demo_workspace_path'"
+    )
+    if row is None:
+        return None
+    try:
+        value = json.loads(str(row["value_json"]))
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def _learner_assignment_state(value: str | None) -> str:
+    return {
+        "validated": "Ready to start",
+        "published": "Ready to start",
+        "submitted": "Checks running",
+        "reviewing": "Review in progress",
+        "follow_up": "Follow-up ready",
+    }.get(value or "", "No active assignment")
+
+
+def _render_assignment_instructions(source: str, title: str) -> Markup:
+    renderer = MarkdownIt("commonmark", {"html": False})
+    tokens = renderer.parse(source)
+    if (
+        len(tokens) >= 3
+        and tokens[0].type == "heading_open"
+        and tokens[0].tag == "h1"
+        and tokens[1].type == "inline"
+        and tokens[1].content.strip().casefold() == title.strip().casefold()
+        and tokens[2].type == "heading_close"
+    ):
+        tokens = tokens[3:]
+    # Raw HTML is disabled above; Markup prevents Jinja from escaping renderer output twice.
+    return Markup(  # noqa: S704
+        renderer.renderer.render(tokens, renderer.options, {})
+    )

@@ -1,0 +1,70 @@
+id: framed-stream-decoder
+slug: framed-stream-decoder
+title: Harden a framed stream decoder
+summary: Repair an incremental parser so arbitrary transport chunking cannot corrupt message boundaries.
+concept_ids:
+  - networking.protocol-framing
+  - networking.transport
+  - programming.invariants
+exercise_types: [implementation, debugging, code_review, explain_the_code]
+difficulty_min: 3
+difficulty_max: 8
+expected_minutes: 50
+tags: [networking, parsing, hostile-input, python]
+files:
+  - path: README.md
+    source: README.md
+    role: instructions
+  - path: src/__init__.py
+    source: empty.py
+    role: starter
+  - path: src/framing.py
+    source: framing.py
+    role: starter
+  - path: tests/test_framing.py
+    source: test_framing.py
+    role: public_test
+  - path: reference/framing.py
+    source: reference.py
+    role: reference
+  - path: evaluator/test_hidden.py
+    source: test_hidden.py
+    role: evaluator
+  - path: REVIEW.md
+    source: REVIEW.md
+    role: starter
+hidden_evaluator:
+  reference_replacements:
+    src/framing.py: reference/framing.py
+  extra_tests:
+    tests/test_hidden.py: evaluator/test_hidden.py
+  constraints:
+    - every complete frame is emitted exactly once
+    - split headers and split payloads remain buffered
+    - multiple frames in one read are all emitted
+    - oversized declared lengths are rejected before unbounded buffering
+  hints:
+    - A stream read is not a message boundary.
+    - Keep bytes until both the full header and declared payload are present.
+    - One feed call may complete zero, one, or many frames.
+    - Parse in a loop and stop only when the next frame is incomplete.
+    - Check the declared length against the configured maximum before waiting for its payload.
+rubric:
+  correctness: 0.40
+  tests: 0.20
+  reasoning: 0.25
+  design: 0.15
+reference_expectations:
+  - The decoder preserves incomplete bytes and loops over all complete frames.
+  - Maximum frame length is enforced from the header before payload accumulation.
+  - Tests vary header, payload, and multi-frame chunk boundaries.
+stages:
+  - number: 1
+    title: Incremental correctness
+    instructions: Repair chunk handling and document the buffer invariant.
+    unlock_condition: Fragmentation and coalescing checks pass.
+  - number: 2
+    title: Adversarial input
+    instructions: Add a recovery policy for malformed or oversized frames and explain connection-level consequences.
+    unlock_condition: Stage 1 is correct and the framing invariant is explicit.
+validation_command: [python, -m, pytest, -q]

@@ -54,11 +54,13 @@ def test_prompt_injection_stays_json_quoted_untrusted_data() -> None:
 def test_untrusted_environment_removes_every_credential(tmp_path: Path) -> None:
     source = {
         "PATH": "/usr/bin",
+        "USER": "learner",
         "LANG": "C",
         "GITHUB_TOKEN": "not-for-learners",
         "ADAPTIVE_TUTOR_API_TOKEN": "private",
         "OPENAI_API_KEY": "model-secret",
         "AWS_ACCESS_KEY_ID": "cloud-secret",
+        "SSH_AUTH_SOCK": "/private/agent.sock",
     }
     untrusted = untrusted_process_environment(tmp_path, source)
     assert untrusted["HOME"] == str(tmp_path)
@@ -68,7 +70,9 @@ def test_untrusted_environment_removes_every_credential(tmp_path: Path) -> None:
     assert_credentials_absent(untrusted)
     codex = codex_worker_environment(source)
     assert codex["OPENAI_API_KEY"] == "model-secret"
+    assert codex["USER"] == "learner"
     assert "GITHUB_TOKEN" not in codex
+    assert "SSH_AUTH_SOCK" not in codex
 
 
 def test_redaction_covers_tokens_and_authorization_headers() -> None:

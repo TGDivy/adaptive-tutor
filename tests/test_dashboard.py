@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from adaptive_tutor.config import TutorSettings
-from adaptive_tutor.dashboard import create_app
+from adaptive_tutor.dashboard import DashboardAuth, create_app
 from adaptive_tutor.db import Database
 
 
@@ -36,7 +36,9 @@ def test_dashboard_and_api_require_authentication_and_secure_writes(
         assert unauthorized.status_code == 401
         assert unauthorized.headers["x-frame-options"] == "DENY"
         assert "default-src 'self'" in unauthorized.headers["content-security-policy"]
-        assert client.get("/").status_code == 401
+        anonymous_dashboard = client.get("/", follow_redirects=False)
+        assert anonymous_dashboard.status_code == 303
+        assert anonymous_dashboard.headers["location"] == "/login"
 
         bad_login = client.post(
             "/login", data={"token": "wrong"}, follow_redirects=False
@@ -48,6 +50,13 @@ def test_dashboard_and_api_require_authentication_and_secure_writes(
         dashboard = client.get("/")
         assert dashboard.status_code == 200
         assert "systems foundations" in dashboard.text
+        assert "No learner evidence yet" in dashboard.text
+        assert "Model usage" not in dashboard.text
+        assert client.post("/actions/create-assignment").status_code == 403
+        assert client.post(
+            "/actions/create-assignment",
+            data={"csrf": DashboardAuth(settings).csrf_value},
+        ).status_code == 503
 
         assert client.get("/api/v1/get_status").status_code == 200
         assert client.post("/api/v1/pause").status_code == 401

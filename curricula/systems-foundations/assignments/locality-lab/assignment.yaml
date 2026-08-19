@@ -1,0 +1,55 @@
+id: locality-lab
+slug: locality-lab
+title: Explain a locality benchmark reversal
+summary: Design a benchmark that separates algorithmic work, memory layout, page faults, and cache behavior.
+concept_ids:
+  - performance.locality
+  - performance.measurement
+  - programming.data-structures
+  - operating-systems.virtual-memory
+exercise_types: [performance_investigation, implementation, mathematics, written]
+difficulty_min: 4
+difficulty_max: 10
+expected_minutes: 55
+tags: [benchmarking, locality, memory]
+files:
+  - path: README.md
+    source: README.md
+    role: instructions
+  - path: ANALYSIS.md
+    source: ANALYSIS.md
+    role: starter
+  - path: reference/expectations.md
+    source: expectations.md
+    role: reference
+hidden_evaluator:
+  constraints:
+    - the hypothesis distinguishes asymptotic work from memory-system cost
+    - the benchmark controls warmup allocation ordering and compiler effects
+    - expected working-set sizes and access counts are calculated
+    - conclusions are bounded by the collected evidence
+  hints:
+    - Count bytes touched as well as operations performed.
+    - Separate first-touch page faults from steady-state cache behavior.
+    - Randomize trial order and keep setup outside the timed region.
+    - Calculate when each representation exceeds likely cache levels.
+    - Use hardware counters only after stating what observation would falsify the hypothesis.
+rubric:
+  reasoning: 0.25
+  evidence: 0.30
+  performance: 0.30
+  communication: 0.15
+reference_expectations:
+  - The plan computes working-set and pointer-overhead estimates for both layouts.
+  - Warmup, trial ordering, allocation, compiler optimization, and noise are controlled.
+  - At least one predicted crossover and one falsifying observation are stated before measurement.
+stages:
+  - number: 1
+    title: Measurement design
+    instructions: State the hypothesis, calculations, controls, and falsification criteria.
+    unlock_condition: The plan can distinguish locality from unrelated setup cost.
+  - number: 2
+    title: Counter-evidence
+    instructions: Explain how NUMA placement or prefetching could reverse the initial conclusion.
+    unlock_condition: Stage 1 bounds its claims to the evidence.
+validation_command: []

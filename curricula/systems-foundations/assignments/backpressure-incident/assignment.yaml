@@ -1,0 +1,57 @@
+id: backpressure-incident
+slug: backpressure-incident
+title: Diagnose a backpressure incident
+summary: Trace a production overload across transport, queues, workers, and client-visible behavior.
+concept_ids:
+  - networking.flow-control
+  - networking.transport
+  - operating-systems.scheduling
+  - concurrency.synchronization
+  - concurrency.progress
+  - reasoning.communication
+exercise_types: [written, system_design, performance_investigation, quiz, code_review]
+difficulty_min: 3
+difficulty_max: 9
+expected_minutes: 50
+tags: [backpressure, queueing, incident-analysis]
+files:
+  - path: README.md
+    source: README.md
+    role: instructions
+  - path: RESPONSE.md
+    source: RESPONSE.md
+    role: starter
+  - path: reference/expectations.md
+    source: expectations.md
+    role: reference
+hidden_evaluator:
+  constraints:
+    - the causal explanation separates transport, queueing, and scheduling
+    - proposed measurements can falsify the diagnosis
+    - overload behavior is bounded and visible to clients
+    - the design names fairness and recovery trade-offs
+  hints:
+    - Draw the path from socket receive buffer to completed response.
+    - Compare the arrival rate with the service rate over the incident window.
+    - Queue depth alone is weaker than queue residence-time distributions.
+    - Choose where admission stops and state what the client observes.
+    - A complete design bounds work, propagates pressure, and defines recovery and fairness.
+rubric:
+  reasoning: 0.30
+  evidence: 0.25
+  design: 0.30
+  communication: 0.15
+reference_expectations:
+  - Queue growth is connected quantitatively to arrival and service rates.
+  - Measurements distinguish useful work, waiting, retries, and scheduler delay.
+  - The design bounds admission and specifies client-visible overload behavior.
+stages:
+  - number: 1
+    title: Incident diagnosis
+    instructions: Build the causal chain and propose a bounded design.
+    unlock_condition: The diagnosis is supported by falsifiable evidence.
+  - number: 2
+    title: Fairness challenge
+    instructions: Revisit the design when one tenant produces half the offered load and retries aggressively.
+    unlock_condition: Stage 1 identifies an explicit admission boundary.
+validation_command: []

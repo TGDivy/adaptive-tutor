@@ -1,0 +1,2 @@
+ALTER TABLE jobs ADD COLUMN lease_token TEXT;
+ALTER TABLE jobs ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0;

@@ -5,9 +5,10 @@ import uuid
 from adaptive_tutor.assignments import (
     AssignmentService,
     AssignmentValidator,
-    TemplateAssignmentGenerator,
 )
+from adaptive_tutor.curriculum import CurriculumLoader, bundled_curriculum_path
 from adaptive_tutor.db import Database
+from adaptive_tutor.generation import CurriculumAssignmentGenerator
 from adaptive_tutor.learner import LearnerModel
 from adaptive_tutor.models import (
     AssignmentRequest,
@@ -21,18 +22,30 @@ from adaptive_tutor.models import (
 from adaptive_tutor.time import iso_now
 
 
-def setup_assignment(database: Database) -> None:
+def setup_assignment(
+    database: Database,
+    exercise_type: ExerciseType = ExerciseType.DEBUGGING,
+) -> str:
     request = AssignmentRequest(
         learner_id="learner",
         curriculum_id="systems-foundations",
         profile_id="generalist",
         target_concepts=["programming.invariants"],
         target_difficulty=4,
-        context=LearnerContext(),
+        context=LearnerContext(allowed_formats=[exercise_type]),
     )
-    bundle = TemplateAssignmentGenerator().generate(request)
+    bundle = CurriculumAssignmentGenerator(
+        CurriculumLoader().load(bundled_curriculum_path())
+    ).generate(request)
     validation = AssignmentValidator().validate(bundle, request, run_reference=False)
-    AssignmentService(database).create(request, bundle, validation)
+    return str(AssignmentService(database).create(request, bundle, validation)["id"])
+
+
+def finish_assignment(database: Database, assignment_id: str) -> None:
+    database.execute(
+        "UPDATE assignments SET status='completed', completed_at=?, updated_at=? WHERE id=?",
+        (iso_now(), iso_now(), assignment_id),
+    )
 
 
 def evaluation(
@@ -88,6 +101,7 @@ def persist_and_apply(
     value: QualitativeEvaluation,
     *,
     confidence: int,
+    assignment_id: str = "A-0001",
 ) -> tuple[str, str]:
     attempt_id = str(uuid.uuid4())
     evaluation_id = str(uuid.uuid4())
@@ -96,9 +110,15 @@ def persist_and_apply(
         """
         INSERT INTO attempts(id, assignment_id, commit_sha, learner_confidence,
             submission_source, submitted_at)
-        VALUES (?, 'A-0001', ?, ?, 'test', ?)
+        VALUES (?, ?, ?, ?, 'test', ?)
         """,
-        (attempt_id, uuid.uuid4().hex + uuid.uuid4().hex, confidence, now),
+        (
+            attempt_id,
+            assignment_id,
+            uuid.uuid4().hex + uuid.uuid4().hex,
+            confidence,
+            now,
+        ),
     )
     database.execute(
         """
@@ -118,7 +138,7 @@ def persist_and_apply(
     )
     model.apply_evaluation(
         learner_id="learner",
-        assignment_id="A-0001",
+        assignment_id=assignment_id,
         attempt_id=attempt_id,
         evaluation_id=evaluation_id,
         evaluation=value,
@@ -172,36 +192,120 @@ def test_mastery_history_spacing_and_idempotency(initialized: tuple[Database, ob
     assert model.calibration("learner")["observations"] == 2
 
 
+def test_unassessed_domains_do_not_report_prior_as_readiness(
+    initialized: tuple[Database, object],
+) -> None:
+    database, _ = initialized
+    model = LearnerModel(database)
+
+    initial = model.readiness("learner", "systems-foundations")
+
+    assert initial
+    assert all(item["readiness"] is None for item in initial)
+    assert all(item["uncertainty"] is None for item in initial)
+    assert all(item["assessed_concept_count"] == 0 for item in initial)
+    assert all(item["evidence_count"] == 0 for item in initial)
+
+    assignment_id = setup_assignment(database)
+    persist_and_apply(
+        database,
+        model,
+        evaluation(outcome="success", exercise_type=ExerciseType.DEBUGGING),
+        confidence=80,
+        assignment_id=assignment_id,
+    )
+    programming = next(
+        item
+        for item in model.readiness("learner", "systems-foundations")
+        if item["domain"] == "programming"
+    )
+    assert programming["readiness"] is not None
+    assert programming["assessed_concept_count"] == 1
+    assert programming["evidence_count"] == 1
+
+
 def test_misconception_requires_transfer_then_can_recur(
     initialized: tuple[Database, object],
 ) -> None:
     database, _ = initialized
-    setup_assignment(database)
+    first_assignment = setup_assignment(database, ExerciseType.DEBUGGING)
     model = LearnerModel(database)
-    sequence: list[tuple[QualitativeEvaluation, int]] = [
-        (evaluation(outcome="failure", exercise_type=ExerciseType.DEBUGGING, action="suspect"), 90),
-        (evaluation(outcome="failure", exercise_type=ExerciseType.DEBUGGING, action="confirm"), 70),
+    initial_sequence: list[tuple[QualitativeEvaluation, int, str]] = [
         (
             evaluation(
-                outcome="partial", exercise_type=ExerciseType.CODE_REVIEW, action="challenge"
+                outcome="failure",
+                exercise_type=ExerciseType.DEBUGGING,
+                action="suspect",
             ),
-            60,
+            90,
+            "suspected",
+        ),
+        (
+            evaluation(
+                outcome="failure",
+                exercise_type=ExerciseType.DEBUGGING,
+                action="confirm",
+            ),
+            70,
+            "active",
         ),
         (
             evaluation(
                 outcome="success",
-                exercise_type=ExerciseType.CODE_REVIEW,
+                exercise_type=ExerciseType.DEBUGGING,
                 action="resolve",
-                transfer="same review format",
+                transfer="the original queue repair",
             ),
             80,
+            "active",
         ),
     ]
-    expected = ["suspected", "active", "challenged", "challenged"]
-    for (value, confidence), status in zip(sequence, expected, strict=True):
-        persist_and_apply(database, model, value, confidence=confidence)
+    for value, confidence, status in initial_sequence:
+        persist_and_apply(
+            database,
+            model,
+            value,
+            confidence=confidence,
+            assignment_id=first_assignment,
+        )
         row = database.fetch_one("SELECT status FROM misconceptions")
         assert row == {"status": status}
+
+    finish_assignment(database, first_assignment)
+    challenge_assignment = setup_assignment(database, ExerciseType.EXPLAIN_CODE)
+    persist_and_apply(
+        database,
+        model,
+        evaluation(
+            outcome="partial",
+            exercise_type=ExerciseType.EXPLAIN_CODE,
+            action="challenge",
+            transfer="explaining the queue transition invariant",
+        ),
+        confidence=60,
+        assignment_id=challenge_assignment,
+    )
+    assert database.fetch_one("SELECT status FROM misconceptions") == {
+        "status": "challenged"
+    }
+    persist_and_apply(
+        database,
+        model,
+        evaluation(
+            outcome="success",
+            exercise_type=ExerciseType.EXPLAIN_CODE,
+            action="resolve",
+            transfer="explaining the queue transition invariant",
+        ),
+        confidence=80,
+        assignment_id=challenge_assignment,
+    )
+    assert database.fetch_one("SELECT status FROM misconceptions") == {
+        "status": "challenged"
+    }
+
+    finish_assignment(database, challenge_assignment)
+    transfer_assignment = setup_assignment(database, ExerciseType.IMPLEMENTATION)
     persist_and_apply(
         database,
         model,
@@ -209,15 +313,20 @@ def test_misconception_requires_transfer_then_can_recur(
             outcome="success",
             exercise_type=ExerciseType.IMPLEMENTATION,
             action="resolve",
-            transfer="a new implementation context",
+            transfer="implementing a framed parser state machine",
         ),
         confidence=85,
+        assignment_id=transfer_assignment,
     )
     assert database.fetch_one("SELECT status FROM misconceptions") == {"status": "resolved"}
+
+    finish_assignment(database, transfer_assignment)
+    recurrence_assignment = setup_assignment(database, ExerciseType.DEBUGGING)
     persist_and_apply(
         database,
         model,
-        evaluation(outcome="failure", exercise_type=ExerciseType.WRITTEN, action="recur"),
+        evaluation(outcome="failure", exercise_type=ExerciseType.DEBUGGING, action="recur"),
         confidence=90,
+        assignment_id=recurrence_assignment,
     )
     assert database.fetch_one("SELECT status FROM misconceptions") == {"status": "recurred"}

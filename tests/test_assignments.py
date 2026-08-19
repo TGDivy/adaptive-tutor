@@ -7,11 +7,11 @@ import pytest
 from adaptive_tutor.assignments import (
     AssignmentService,
     AssignmentValidator,
-    TemplateAssignmentGenerator,
 )
 from adaptive_tutor.db import Database
 from adaptive_tutor.errors import AssignmentValidationError, ConfigurationError
-from adaptive_tutor.models import AssignmentRequest, LearnerContext
+from adaptive_tutor.generation import CurriculumAssignmentGenerator
+from adaptive_tutor.models import AssignmentRequest, CurriculumPackage, LearnerContext
 
 
 def request() -> AssignmentRequest:
@@ -26,9 +26,10 @@ def request() -> AssignmentRequest:
 
 
 def test_reference_solution_runs_against_public_and_hidden_harness(
-    initialized: tuple[Database, object],
+    initialized: tuple[Database, CurriculumPackage],
 ) -> None:
-    generator = TemplateAssignmentGenerator()
+    _, curriculum = initialized
+    generator = CurriculumAssignmentGenerator(curriculum)
     bundle = generator.generate(request())
     result = AssignmentValidator().validate(bundle, request())
     assert result.valid
@@ -36,10 +37,10 @@ def test_reference_solution_runs_against_public_and_hidden_harness(
 
 
 def test_assignment_persistence_hides_reference_material(
-    initialized: tuple[Database, object],
+    initialized: tuple[Database, CurriculumPackage],
 ) -> None:
-    database, _ = initialized
-    bundle = TemplateAssignmentGenerator().generate(request())
+    database, curriculum = initialized
+    bundle = CurriculumAssignmentGenerator(curriculum).generate(request())
     validation = AssignmentValidator().validate(bundle, request(), run_reference=False)
     service = AssignmentService(database)
     created = service.create(request(), bundle, validation)
@@ -58,6 +59,14 @@ def test_assignment_persistence_hides_reference_material(
         "difficulty": 4,
         "expected_minutes": 45,
         "current_stage": 1,
+        "selection_reason": "",
+        "tags": [
+            "boundary-cases",
+            "implementation",
+            "programming.invariants",
+            "python",
+            "state-machines",
+        ],
     }
     assert "hidden_evaluator" not in public[".adaptive-tutor/assignment.json"]
     assert service.active("learner") is not None
@@ -65,9 +74,11 @@ def test_assignment_persistence_hides_reference_material(
         service.create(request(), bundle, validation)
 
 
-def test_progressive_hints_and_stages(initialized: tuple[Database, object]) -> None:
-    database, _ = initialized
-    bundle = TemplateAssignmentGenerator().generate(request())
+def test_progressive_hints_and_stages(
+    initialized: tuple[Database, CurriculumPackage],
+) -> None:
+    database, curriculum = initialized
+    bundle = CurriculumAssignmentGenerator(curriculum).generate(request())
     validation = AssignmentValidator().validate(bundle, request(), run_reference=False)
     service = AssignmentService(database)
     service.create(request(), bundle, validation)
@@ -78,12 +89,13 @@ def test_progressive_hints_and_stages(initialized: tuple[Database, object]) -> N
 
 
 def test_generator_avoids_and_validator_rejects_recent_problem(
-    initialized: tuple[Database, object],
+    initialized: tuple[Database, CurriculumPackage],
 ) -> None:
+    _, curriculum = initialized
     recent_request = request().model_copy(
         update={"recent_assignments": [{"slug": "bounded-work-queue"}]}
     )
-    bundle = TemplateAssignmentGenerator().generate(recent_request)
+    bundle = CurriculumAssignmentGenerator(curriculum).generate(recent_request)
     assert bundle.slug == "rolling-event-counter"
     assert AssignmentValidator().validate(
         bundle, recent_request, run_reference=False
