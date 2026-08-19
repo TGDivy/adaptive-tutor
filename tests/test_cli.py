@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import grp
 import json
+import os
+import socket
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -268,7 +272,7 @@ def test_cli_remote_assignment_result_rendering(
     assert "remains active" in existing.output
 
 
-def test_cli_grader_uses_owner_only_unix_socket(
+def test_cli_grader_prebinds_owner_only_unix_socket(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runner = CliRunner()
@@ -283,11 +287,15 @@ def test_cli_grader_uses_owner_only_unix_socket(
     socket_path.unlink()
     captured: dict[str, object] = {}
 
-    def fake_run(application: object, **options: object) -> None:
+    def fake_server(application: object, listener: socket.socket) -> None:
         captured["application"] = application
-        captured.update(options)
+        captured["listener"] = listener
+        info = socket_path.lstat()
+        assert info.st_uid == os.geteuid()
+        assert info.st_gid == os.getegid()
+        assert info.st_mode & 0o777 == 0o600
 
-    monkeypatch.setattr("adaptive_tutor.cli.uvicorn.run", fake_run)
+    monkeypatch.setattr("adaptive_tutor.cli._run_grader_server", fake_server)
     started = runner.invoke(
         app,
         [
@@ -301,6 +309,85 @@ def test_cli_grader_uses_owner_only_unix_socket(
         ],
     )
     assert started.exit_code == 0, started.output
-    assert captured["uds"] == str(socket_path.resolve())
-    assert captured["access_log"] is False
+    assert captured["listener"] is not None
     assert socket_path.parent.stat().st_mode & 0o777 == 0o700
+    assert not socket_path.exists()
+
+
+def test_cli_grader_group_socket_has_exact_connect_permissions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = CliRunner()
+    socket_path = tmp_path / "grader" / "grader.sock"
+    group = grp.getgrgid(os.getgid())
+    observed: dict[str, int] = {}
+
+    def fake_server(application: object, listener: socket.socket) -> None:
+        assert application is not None
+        directory = socket_path.parent.stat()
+        info = socket_path.lstat()
+        observed.update(
+            directory_mode=directory.st_mode & 0o777,
+            directory_gid=directory.st_gid,
+            socket_mode=info.st_mode & 0o777,
+            socket_gid=info.st_gid,
+        )
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client.connect(str(socket_path))
+            accepted, _ = listener.accept()
+            accepted.close()
+        finally:
+            client.close()
+
+    monkeypatch.setattr("adaptive_tutor.cli._run_grader_server", fake_server)
+    result = runner.invoke(
+        app,
+        [
+            "grader",
+            "--socket",
+            str(socket_path),
+            "--socket-group",
+            group.gr_name,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert observed == {
+        "directory_mode": 0o750,
+        "directory_gid": group.gr_gid,
+        "socket_mode": 0o660,
+        "socket_gid": group.gr_gid,
+    }
+    assert not socket_path.exists()
+
+
+def test_cli_grader_rejects_unavailable_group_and_symlinked_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = CliRunner()
+    unavailable_gid = max({os.getgid(), os.getegid(), *os.getgroups()}) + 10_000
+    monkeypatch.setattr(grp, "getgrnam", lambda _name: SimpleNamespace(gr_gid=unavailable_gid))
+    denied = runner.invoke(
+        app,
+        [
+            "grader",
+            "--socket",
+            str(tmp_path / "denied" / "grader.sock"),
+            "--socket-group",
+            "not-permitted",
+        ],
+    )
+    assert denied.exit_code == 1
+    assert "not a member" in denied.output
+
+    real_directory = tmp_path / "real"
+    real_directory.mkdir()
+    linked_directory = tmp_path / "linked"
+    linked_directory.symlink_to(real_directory, target_is_directory=True)
+    symlinked = runner.invoke(
+        app,
+        ["grader", "--socket", str(linked_directory / "grader.sock")],
+    )
+    assert symlinked.exit_code == 1
+    assert "must not contain symlinks" in symlinked.output

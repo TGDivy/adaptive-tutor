@@ -21,6 +21,7 @@ ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/adaptive-tutor
+InaccessiblePaths=/var/lib/adaptive-tutor-grader /etc/adaptive-tutor-grader -/run/adaptive-tutor-grader
 RestrictAddressFamilies=AF_UNIX
 RestrictNamespaces=true
 RestrictRealtime=true

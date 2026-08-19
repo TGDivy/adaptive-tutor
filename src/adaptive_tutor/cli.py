@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import socket as socket_module
+import stat
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -586,12 +588,18 @@ def grader(
     command: str = typer.Option("codex", help="Codex CLI executable."),
     model: str | None = typer.Option(None, help="Optional explicit grading model."),
     timeout_seconds: int = typer.Option(600, min=30, max=3600),
+    socket_group: str | None = typer.Option(
+        None,
+        help="Optional group allowed to connect to the grader socket.",
+    ),
 ) -> None:
     """Run the credential-bearing grader without tutor state or GitHub access."""
-    socket_path = socket.expanduser().resolve()
-    socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    socket_path.parent.chmod(0o700)
-    if socket_path.exists() or socket_path.is_symlink():
+    socket_path = socket.expanduser().absolute()
+    group_id = _resolve_socket_group(socket_group)
+    _prepare_socket_directory(socket_path.parent, group_id)
+    if socket_path.is_symlink():
+        _abort(f"Refusing to replace symlinked grader path: {socket_path}")
+    if socket_path.exists():
         if not socket_path.is_socket():
             _abort(f"Refusing to replace non-socket grader path: {socket_path}")
         socket_path.unlink()
@@ -602,18 +610,89 @@ def grader(
         enabled=True,
         sandbox="read-only",
     )
+    socket_mode = 0o660 if group_id is not None else 0o600
+    listener = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    socket_identity: tuple[int, int] | None = None
     old_umask = os.umask(0o077)
     try:
-        uvicorn.run(
-            create_grader_app(settings),
-            uds=str(socket_path),
-            log_level="info",
-            access_log=False,
-        )
+        try:
+            listener.bind(str(socket_path))
+            listener.listen(socket_module.SOMAXCONN)
+            if group_id is not None:
+                os.chown(socket_path, -1, group_id)
+            socket_path.chmod(socket_mode)
+            socket_info = socket_path.lstat()
+            expected_group = group_id if group_id is not None else os.getegid()
+            if (
+                not stat.S_ISSOCK(socket_info.st_mode)
+                or socket_info.st_uid != os.geteuid()
+                or socket_info.st_gid != expected_group
+                or stat.S_IMODE(socket_info.st_mode) != socket_mode
+            ):
+                _abort("Grader socket ownership or mode verification failed")
+            socket_identity = (socket_info.st_dev, socket_info.st_ino)
+        except OSError as exc:
+            _abort(f"Could not create protected grader socket: {exc}")
+        _run_grader_server(create_grader_app(settings), listener)
     finally:
+        listener.close()
         os.umask(old_umask)
-        if socket_path.is_socket():
-            socket_path.unlink()
+        if socket_identity is not None:
+            try:
+                current = socket_path.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                if (
+                    stat.S_ISSOCK(current.st_mode)
+                    and (current.st_dev, current.st_ino) == socket_identity
+                ):
+                    socket_path.unlink()
+
+
+def _resolve_socket_group(group_name: str | None) -> int | None:
+    if group_name is None:
+        return None
+    if os.name != "posix":
+        _abort("Group-scoped grader sockets require a POSIX host")
+    import grp
+
+    try:
+        group_id = grp.getgrnam(group_name).gr_gid
+    except KeyError:
+        _abort(f"Grader socket group does not exist: {group_name}")
+    if group_id not in {os.getgid(), os.getegid(), *os.getgroups()}:
+        _abort(f"Grader process is not a member of socket group: {group_name}")
+    return group_id
+
+
+def _prepare_socket_directory(directory: Path, group_id: int | None) -> None:
+    mode = 0o750 if group_id is not None else 0o700
+    try:
+        directory.mkdir(parents=True, exist_ok=True, mode=mode)
+        if directory.resolve(strict=True) != directory:
+            _abort(f"Grader socket directory must not contain symlinks: {directory}")
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            _abort(f"Grader socket directory must be owned by the grader: {directory}")
+        if group_id is not None:
+            os.chown(directory, -1, group_id)
+        directory.chmod(mode)
+        verified = directory.lstat()
+        expected_group = group_id if group_id is not None else verified.st_gid
+        if verified.st_gid != expected_group or stat.S_IMODE(verified.st_mode) != mode:
+            _abort("Grader socket directory ownership or mode verification failed")
+    except OSError as exc:
+        _abort(f"Could not prepare protected grader socket directory: {exc}")
+
+
+def _run_grader_server(application: Any, listener: socket_module.socket) -> None:
+    config = uvicorn.Config(
+        application,
+        log_level="info",
+        access_log=False,
+    )
+    uvicorn.Server(config).run(sockets=[listener])
 
 
 @app.command(hidden=True)

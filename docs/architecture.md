@@ -89,7 +89,9 @@ for a private self-hosted tutor.
 ## Deployment boundaries
 
 - The persistent host runs the dashboard, event worker, SQLite, and an isolated
-  Unix-socket grader in separate container/systemd filesystem boundaries.
+  Unix-socket grader in separate container/systemd filesystem boundaries. The
+  native grader has its own UID and root-owned configuration; only worker and
+  grader receive the socket's connect group.
 - Learner code runs only in credential-free ephemeral CI.
 - GitHub-write credentials are available only to tutor/worker processes; model
   credentials are available only to the grader. Neither reaches learner code.

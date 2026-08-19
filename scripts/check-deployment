@@ -100,6 +100,28 @@ def validate_compose(payload: dict[str, Any], failures: list[str]) -> None:
         "worker cannot reach grader socket",
         failures,
     )
+    worker_socket_mounts = [
+        str(volume)
+        for volume in worker_volumes
+        if ":/run/adaptive-tutor-grader" in str(volume)
+    ]
+    grader_socket_mounts = [
+        str(volume)
+        for volume in grader_volumes
+        if ":/run/adaptive-tutor-grader" in str(volume)
+    ]
+    require(
+        len(worker_socket_mounts) == 1
+        and worker_socket_mounts[0].endswith(":/run/adaptive-tutor-grader:ro"),
+        "worker grader socket volume must be read-only",
+        failures,
+    )
+    require(
+        len(grader_socket_mounts) == 1
+        and grader_socket_mounts[0].endswith(":/run/adaptive-tutor-grader"),
+        "grader socket volume must remain writable",
+        failures,
+    )
     require(
         all("codex" not in target for target in worker_targets),
         "worker can read model credentials",
@@ -160,11 +182,64 @@ def validate_systemd(failures: list[str]) -> None:
     timer = (unit_root / "adaptive-tutor-backup.timer").read_text(encoding="utf-8")
     require("Persistent=true" in timer, "backup timer must catch up after downtime", failures)
     grader = (unit_root / "adaptive-tutor-grader.service").read_text(encoding="utf-8")
+    worker = (unit_root / "adaptive-tutor-worker.service").read_text(encoding="utf-8")
+    tutor = (unit_root / "adaptive-tutor.service").read_text(encoding="utf-8")
+    backup = (unit_root / "adaptive-tutor-backup.service").read_text(encoding="utf-8")
+    require("User=adaptive-tutor-grader" in grader, "grader must use its own UID", failures)
+    require("Group=adaptive-tutor-grader" in grader, "grader must use its private group", failures)
     require(
-        "InaccessiblePaths=/var/lib/adaptive-tutor /etc/adaptive-tutor" in grader,
+        "SupplementaryGroups=adaptive-tutor-grader-socket" in grader,
+        "grader must join only the shared socket group",
+        failures,
+    )
+    require(
+        "EnvironmentFile=-/etc/adaptive-tutor-grader/grader.env" in grader,
+        "grader credential file must be outside tutor-controlled configuration",
+        failures,
+    )
+    require("RuntimeDirectoryMode=0750" in grader, "grader socket directory must be 0750", failures)
+    require(
+        "--socket-group adaptive-tutor-grader-socket" in grader,
+        "grader must create a group-scoped socket",
+        failures,
+    )
+    require(
+        "InaccessiblePaths=/var/lib/adaptive-tutor /etc/adaptive-tutor "
+        "/etc/adaptive-tutor-grader" in grader,
         "grader must not see tutor state or configuration",
         failures,
     )
+    require(
+        "SupplementaryGroups=adaptive-tutor-grader-socket" in worker,
+        "worker must join the grader socket group",
+        failures,
+    )
+    worker_write_paths = next(
+        (line for line in worker.splitlines() if line.startswith("ReadWritePaths=")), ""
+    )
+    require(
+        "/run/adaptive-tutor-grader" not in worker_write_paths,
+        "worker must not be able to alter the grader socket directory",
+        failures,
+    )
+    require(
+        "InaccessiblePaths=/var/lib/adaptive-tutor-grader /etc/adaptive-tutor-grader"
+        in worker,
+        "worker must not see grader credentials or Codex state",
+        failures,
+    )
+    for name, content in (("tutor", tutor), ("backup", backup)):
+        require(
+            "SupplementaryGroups=adaptive-tutor-grader-socket" not in content,
+            f"{name} must not join the grader socket group",
+            failures,
+        )
+        require(
+            "InaccessiblePaths=/var/lib/adaptive-tutor-grader "
+            "/etc/adaptive-tutor-grader -/run/adaptive-tutor-grader" in content,
+            f"{name} must not see grader state, credentials, or socket",
+            failures,
+        )
 
 
 def validate_operations(failures: list[str]) -> None:

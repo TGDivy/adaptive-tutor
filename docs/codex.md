@@ -6,9 +6,9 @@ is not the scheduler, state store, or authority for learner evidence.
 ## Isolation boundary
 
 The stateful worker never launches Codex. It sends a bounded trusted prompt to
-an owner-only Unix socket and receives a schema-valid response. A separate
-`grader` service owns that socket and is the only service given model
-authentication or a writable `CODEX_HOME`.
+a group-scoped Unix socket and receives a schema-valid response. A separate
+`adaptive-tutor-grader` UID owns that socket and is the only identity given
+model authentication or a writable `CODEX_HOME`.
 
 The grader has no mount for:
 
@@ -19,8 +19,12 @@ The grader has no mount for:
 
 Compose enforces this with separate mounts and environment files. The systemd
 grader uses a private mount namespace with `/var/lib/adaptive-tutor` and
-`/etc/adaptive-tutor` inaccessible. The socket is mode-restricted by an
-owner-only runtime directory and is never exposed on TCP.
+`/etc/adaptive-tutor` inaccessible. Its root-owned environment file is outside
+the state account's writable tree. The grader pre-binds a `0660` socket owned by
+`adaptive-tutor-grader:adaptive-tutor-grader-socket` inside a `0750` runtime
+directory. Only the worker and grader units receive that supplementary group;
+the worker can connect but cannot replace the socket. It is never exposed on
+TCP.
 
 ## Process contract
 
@@ -60,7 +64,7 @@ responses never update learner evidence.
 For unattended operation, put a dedicated model API key only in:
 
 - Compose: `runtime/grader.env`; or
-- systemd: `/etc/adaptive-tutor/grader.env`.
+- systemd: `/etc/adaptive-tutor-grader/grader.env` (root-owned, mode `0600`).
 
 Never put a model key in `tutor.env`, `worker.env`, YAML, curriculum prompts,
 assignment repositories, or evaluation Actions. Interactive account state may
@@ -82,7 +86,9 @@ For systemd:
 ```bash
 systemctl status adaptive-tutor-grader.service
 journalctl -u adaptive-tutor-grader.service --since today
-sudo -u adaptive-tutor codex --version
+sudo -u adaptive-tutor-grader codex --version
+stat -c '%U:%G %a %n' /run/adaptive-tutor-grader \
+  /run/adaptive-tutor-grader/grader.sock
 ```
 
 The doctor reports whether the Unix socket exists and answers its health probe.

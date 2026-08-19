@@ -62,12 +62,16 @@ docker compose exec worker adaptive-tutor doctor --offline
 ```
 
 For systemd, inspect `adaptive-tutor-grader.service` and confirm the worker has
-`ADAPTIVE_TUTOR_GRADER_SOCKET=/run/adaptive-tutor-grader/grader.sock`. Verify
-the Codex executable, model access, API key in the grader-only environment,
-CA/proxy settings, and write access to the grader Codex home. Never solve a
-socket failure by copying the model key into the worker. Timeouts are
-retryable; malformed final output is a schema failure and is not learner
-evidence. See the official [Codex CLI documentation](https://developers.openai.com/codex/cli/)
+`ADAPTIVE_TUTOR_GRADER_SOCKET=/run/adaptive-tutor-grader/grader.sock`. The
+runtime directory must be `adaptive-tutor-grader:adaptive-tutor-grader-socket`
+mode `0750`, and the socket must have the same ownership with mode `0660`.
+Confirm only worker and grader units receive the socket group. Verify the Codex
+executable, model access, root-owned mode-`0600`
+`/etc/adaptive-tutor-grader/grader.env`, CA/proxy settings, and grader-UID write
+access to its Codex home. Never solve a socket failure with `0777`, by adding the
+tutor service to the group, or by copying the model key into the worker.
+Timeouts are retryable; malformed final output is a schema failure and is not
+learner evidence. See the official [Codex CLI documentation](https://developers.openai.com/codex/cli/)
 for installation and authentication.
 
 ## GitHub repository check fails

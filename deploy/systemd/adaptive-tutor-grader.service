@@ -6,16 +6,17 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=adaptive-tutor
-Group=adaptive-tutor
+User=adaptive-tutor-grader
+Group=adaptive-tutor-grader
+SupplementaryGroups=adaptive-tutor-grader-socket
 WorkingDirectory=/var/lib/adaptive-tutor-grader
 Environment=HOME=/var/lib/adaptive-tutor-grader
 Environment=CODEX_HOME=/var/lib/adaptive-tutor-grader/codex
 Environment=PATH=/opt/adaptive-tutor/bin:/usr/local/bin:/usr/bin
-EnvironmentFile=-/etc/adaptive-tutor/grader.env
+EnvironmentFile=-/etc/adaptive-tutor-grader/grader.env
 RuntimeDirectory=adaptive-tutor-grader
-RuntimeDirectoryMode=0700
-ExecStart=/opt/adaptive-tutor/bin/adaptive-tutor grader --socket /run/adaptive-tutor-grader/grader.sock
+RuntimeDirectoryMode=0750
+ExecStart=/opt/adaptive-tutor/bin/adaptive-tutor grader --socket /run/adaptive-tutor-grader/grader.sock --socket-group adaptive-tutor-grader-socket
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
@@ -30,7 +31,7 @@ ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/adaptive-tutor-grader /run/adaptive-tutor-grader
-InaccessiblePaths=/var/lib/adaptive-tutor /etc/adaptive-tutor
+InaccessiblePaths=/var/lib/adaptive-tutor /etc/adaptive-tutor /etc/adaptive-tutor-grader
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
 RestrictRealtime=true

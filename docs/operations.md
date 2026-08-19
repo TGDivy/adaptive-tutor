@@ -57,7 +57,8 @@ Put the model API key only in `runtime/grader.env` under the
 editor; do not echo it through shell history.
 
 Set `codex.enabled: true` in `runtime/config/config.yaml` after the grader is
-configured. Compose injects the owner-only socket path into the worker. The
+configured. Compose injects the owner-only socket path into the worker through
+a read-only bind; only the grader can modify the shared socket directory. The
 grader receives no tutor config, state, GitHub key, dashboard secret, learner
 checkout, or TCP port. The image pins Codex CLI and each request uses a
 read-only sandbox, no approvals, and an ephemeral session. See the official
@@ -138,22 +139,30 @@ future storage changes dangerous.
 
 ### Install
 
-Create a locked service account and directories:
+Create separate state and model trust-domain accounts plus a socket-only group.
+Do not add `adaptive-tutor` to the group in `/etc/group`; only the worker unit
+receives it through `SupplementaryGroups=`:
 
 ```bash
+sudo groupadd --system adaptive-tutor-grader-socket
 sudo useradd --system --home-dir /var/lib/adaptive-tutor \
-  --create-home --shell /usr/sbin/nologin adaptive-tutor
+  --create-home --user-group --shell /usr/sbin/nologin adaptive-tutor
+sudo useradd --system --home-dir /var/lib/adaptive-tutor-grader \
+  --create-home --user-group --groups adaptive-tutor-grader-socket \
+  --shell /usr/sbin/nologin adaptive-tutor-grader
 sudo install -d -m 0700 -o adaptive-tutor -g adaptive-tutor \
-  /etc/adaptive-tutor /var/lib/adaptive-tutor \
+  /etc/adaptive-tutor /var/lib/adaptive-tutor
+sudo install -d -m 0700 -o adaptive-tutor-grader -g adaptive-tutor-grader \
   /var/lib/adaptive-tutor-grader /var/lib/adaptive-tutor-grader/codex
+sudo install -d -m 0700 -o root -g root /etc/adaptive-tutor-grader
 sudo python3 -m venv /opt/adaptive-tutor
 sudo /opt/adaptive-tutor/bin/pip install /path/to/adaptive_tutor-release.whl
 ```
 
 Install Codex CLI using the current
 [official Codex CLI instructions](https://developers.openai.com/codex/cli/),
-then make its executable available to the service account. Initialize the
-application:
+then make its executable available to `adaptive-tutor-grader`. Initialize the
+application as the state-owning account:
 
 ```bash
 sudo -u adaptive-tutor /opt/adaptive-tutor/bin/adaptive-tutor \
@@ -166,12 +175,15 @@ sudo -u adaptive-tutor /opt/adaptive-tutor/bin/adaptive-tutor \
 Configure the GitHub App in `/etc/adaptive-tutor/config.yaml` and set
 `codex.enabled: true`. Put dashboard and webhook variables in
 `/etc/adaptive-tutor/tutor.env`, worker-only GitHub variables in
-`/etc/adaptive-tutor/worker.env`, and the model key only in
-`/etc/adaptive-tutor/grader.env`. Make all files owner-readable only:
+`/etc/adaptive-tutor/worker.env`, and the model key only in the root-owned
+`/etc/adaptive-tutor-grader/grader.env`. The state account must not be able to
+replace the grader environment file:
 
 ```bash
 sudo chown adaptive-tutor:adaptive-tutor /etc/adaptive-tutor/*.env
 sudo chmod 0600 /etc/adaptive-tutor/*.env
+sudo chown root:root /etc/adaptive-tutor-grader/grader.env
+sudo chmod 0600 /etc/adaptive-tutor-grader/grader.env
 ```
 
 Install and enable the units:
@@ -210,9 +222,15 @@ journalctl -u adaptive-tutor-worker.service --follow
 
 The units use an empty capability set, strict filesystem protection,
 owner-only state, private temporary directories, namespace restrictions, and
-automatic restart after process failure. The grader mount namespace makes
-`/var/lib/adaptive-tutor` and `/etc/adaptive-tutor` inaccessible. The backup
-timer is persistent, so a missed backup runs after the next boot.
+automatic restart after process failure. Tutor state and grader/Codex state
+have different UIDs. Only worker and grader receive
+`adaptive-tutor-grader-socket`; the tutor and backup cannot traverse the
+runtime directory. The grader pre-binds the socket as
+`adaptive-tutor-grader:adaptive-tutor-grader-socket` with mode `0660` inside a
+`0750` directory, while the worker has no directory write permission. The
+grader cannot see tutor state or configuration, and tutor processes cannot see
+grader configuration or state. The backup timer is persistent, so a missed
+backup runs after the next boot.
 
 ## Backup and restore
 
@@ -281,10 +299,48 @@ sudo systemctl start adaptive-tutor.service adaptive-tutor-grader.service \
   adaptive-tutor-worker.service
 ```
 
+When upgrading an older same-UID systemd installation to the split grader
+identity, install the identity boundary and compatible binary/units as one
+stopped operation:
+
+```bash
+sudo systemctl stop adaptive-tutor-worker.service adaptive-tutor-grader.service \
+  adaptive-tutor.service
+getent group adaptive-tutor-grader-socket >/dev/null || \
+  sudo groupadd --system adaptive-tutor-grader-socket
+id adaptive-tutor-grader >/dev/null 2>&1 || \
+  sudo useradd --system --home-dir /var/lib/adaptive-tutor-grader \
+    --user-group --groups adaptive-tutor-grader-socket \
+    --shell /usr/sbin/nologin adaptive-tutor-grader
+sudo usermod --append --groups adaptive-tutor-grader-socket adaptive-tutor-grader
+sudo install -d -m 0700 -o root -g root /etc/adaptive-tutor-grader
+sudo install -m 0600 -o root -g root /etc/adaptive-tutor/grader.env \
+  /etc/adaptive-tutor-grader/grader.env
+sudo rm -f /etc/adaptive-tutor/grader.env
+sudo chown -R adaptive-tutor-grader:adaptive-tutor-grader \
+  /var/lib/adaptive-tutor-grader
+sudo /opt/adaptive-tutor/bin/pip install --upgrade /path/to/new-release.whl
+sudo install -m 0644 deploy/systemd/adaptive-tutor*.service \
+  deploy/systemd/adaptive-tutor-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl start adaptive-tutor-grader.service adaptive-tutor.service
+sudo systemctl start adaptive-tutor-worker.service
+```
+
+Rotate the model credential during this transition: the previous shared UID
+could historically read it, and changing ownership cannot disprove prior
+exposure. Verify the shared socket group owns nothing under
+`/etc/adaptive-tutor-grader` or `/var/lib/adaptive-tutor-grader`.
+
 Migrations are forward-only. Rollback therefore means restoring both the prior
 application release and the pre-upgrade database snapshot. Do not run an older
 binary against a database migrated by a newer release unless that release's
-notes explicitly declare compatibility.
+notes explicitly declare compatibility. Rolling back across the identity split
+also requires stopping all units, restoring the old unit set, moving
+`grader.env` back to `/etc/adaptive-tutor` with owner `adaptive-tutor`, and
+returning grader-state ownership to that account before startup. Treat that
+rollback as renewed credential exposure and rotate the model credential again
+after returning to a separated release.
 
 ## Failure recovery
 

@@ -9,6 +9,7 @@ Requires=adaptive-tutor.service adaptive-tutor-grader.service
 Type=simple
 User=adaptive-tutor
 Group=adaptive-tutor
+SupplementaryGroups=adaptive-tutor-grader-socket
 WorkingDirectory=/var/lib/adaptive-tutor
 Environment=ADAPTIVE_TUTOR_CONFIG=/etc/adaptive-tutor/config.yaml
 Environment=HOME=/var/lib/adaptive-tutor
@@ -29,7 +30,8 @@ ProtectHome=true
 ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/adaptive-tutor /run/adaptive-tutor-grader
+ReadWritePaths=/var/lib/adaptive-tutor
+InaccessiblePaths=/var/lib/adaptive-tutor-grader /etc/adaptive-tutor-grader
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
 RestrictRealtime=true

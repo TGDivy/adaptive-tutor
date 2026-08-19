@@ -41,8 +41,20 @@ def test_compose_is_loopback_rootless_and_credential_separated() -> None:
         not str(volume).endswith(":/etc/adaptive-tutor:ro")
         for volume in grader["volumes"]
     )
-    assert "/run/adaptive-tutor-grader" in str(grader["volumes"])
-    assert "/run/adaptive-tutor-grader" in str(worker["volumes"])
+    worker_socket_mounts = [
+        str(volume)
+        for volume in worker["volumes"]
+        if ":/run/adaptive-tutor-grader" in str(volume)
+    ]
+    grader_socket_mounts = [
+        str(volume)
+        for volume in grader["volumes"]
+        if ":/run/adaptive-tutor-grader" in str(volume)
+    ]
+    assert len(worker_socket_mounts) == 1
+    assert worker_socket_mounts[0].endswith(":/run/adaptive-tutor-grader:ro")
+    assert len(grader_socket_mounts) == 1
+    assert grader_socket_mounts[0].endswith(":/run/adaptive-tutor-grader")
     assert "/var/lib/adaptive-tutor-grader" in str(grader["volumes"])
     assert "codex" not in str(worker["volumes"])
     assert worker["profiles"] == ["remote"]
@@ -60,11 +72,34 @@ def test_systemd_units_restart_and_harden_services() -> None:
         assert "ReadWritePaths=/var/lib/adaptive-tutor" in content
     grader = (unit_root / "adaptive-tutor-grader.service").read_text(encoding="utf-8")
     assert "Restart=on-failure" in grader
-    assert "InaccessiblePaths=/var/lib/adaptive-tutor /etc/adaptive-tutor" in grader
+    assert "User=adaptive-tutor-grader" in grader
+    assert "Group=adaptive-tutor-grader" in grader
+    assert "SupplementaryGroups=adaptive-tutor-grader-socket" in grader
+    assert "EnvironmentFile=-/etc/adaptive-tutor-grader/grader.env" in grader
+    assert "RuntimeDirectoryMode=0750" in grader
+    assert "--socket-group adaptive-tutor-grader-socket" in grader
+    assert (
+        "InaccessiblePaths=/var/lib/adaptive-tutor /etc/adaptive-tutor "
+        "/etc/adaptive-tutor-grader" in grader
+    )
     assert "ReadWritePaths=/var/lib/adaptive-tutor-grader" in grader
     worker = (unit_root / "adaptive-tutor-worker.service").read_text(encoding="utf-8")
     assert "Requires=adaptive-tutor.service adaptive-tutor-grader.service" in worker
     assert "ADAPTIVE_TUTOR_GRADER_SOCKET=" in worker
+    assert "SupplementaryGroups=adaptive-tutor-grader-socket" in worker
+    assert "ReadWritePaths=/var/lib/adaptive-tutor\n" in worker
+    assert "/run/adaptive-tutor-grader" not in next(
+        line for line in worker.splitlines() if line.startswith("ReadWritePaths=")
+    )
+    assert "InaccessiblePaths=/var/lib/adaptive-tutor-grader /etc/adaptive-tutor-grader" in worker
+    tutor = (unit_root / "adaptive-tutor.service").read_text(encoding="utf-8")
+    backup = (unit_root / "adaptive-tutor-backup.service").read_text(encoding="utf-8")
+    for content in (tutor, backup):
+        assert "SupplementaryGroups=adaptive-tutor-grader-socket" not in content
+        assert (
+            "InaccessiblePaths=/var/lib/adaptive-tutor-grader "
+            "/etc/adaptive-tutor-grader -/run/adaptive-tutor-grader" in content
+        )
     timer = (unit_root / "adaptive-tutor-backup.timer").read_text(encoding="utf-8")
     assert "OnCalendar=daily" in timer
     assert "Persistent=true" in timer

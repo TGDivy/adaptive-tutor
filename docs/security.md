@@ -52,12 +52,15 @@ are delimited untrusted data. They cannot change grading instructions, request
 tools, reveal secrets, or override the output schema. Injection-like patterns
 are surfaced as flags, not followed.
 
-The stateful worker cannot launch Codex directly. It talks over an owner-only
-Unix socket to a separate grader service. That service has the model credential
-and Codex home, but no tutor state, configuration, GitHub credential, learner
-checkout, or TCP listener. The Codex subprocess uses a read-only sandbox, no
-approvals, an ephemeral session, and an empty working directory containing only
-the schema/output contract.
+The stateful worker cannot launch Codex directly. It talks over a group-scoped
+Unix socket to a grader running under a distinct UID. The model environment is
+root-owned outside tutor-controlled configuration, and Codex state belongs only
+to the grader UID. The shared socket group grants connection access to worker
+and grader units but no write access to the runtime directory; tutor and backup
+receive no such group. The grader has no tutor state, configuration, GitHub
+credential, learner checkout, or TCP listener. The Codex subprocess uses a
+read-only sandbox, no approvals, an ephemeral session, and an empty working
+directory containing only the schema/output contract.
 
 ## Web and API
 
