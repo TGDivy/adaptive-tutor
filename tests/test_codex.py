@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -16,7 +16,7 @@ from adaptive_tutor.models import QualitativeEvaluation
 
 def fixture_payload() -> dict[str, Any]:
     path = Path("curricula/systems-foundations/fixtures/demo-evaluation.json")
-    return json.loads(path.read_text(encoding="utf-8"))
+    return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
 
 
 def test_codex_runner_uses_ephemeral_read_only_schema_contract(

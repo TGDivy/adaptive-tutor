@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Literal
 
 from adaptive_tutor.assignments import (
     AssignmentService,
@@ -50,9 +51,9 @@ def finish_assignment(database: Database, assignment_id: str) -> None:
 
 def evaluation(
     *,
-    outcome: str,
+    outcome: Literal["success", "partial", "failure", "not_observed"],
     exercise_type: ExerciseType,
-    action: str | None = None,
+    action: Literal["suspect", "confirm", "challenge", "resolve", "recur"] | None = None,
     transfer: str | None = None,
 ) -> QualitativeEvaluation:
     finding = []
