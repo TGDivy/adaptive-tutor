@@ -130,15 +130,16 @@ band from protected tutor state, never from the learner branch or an Actions
 artifact.
 
 The workflow checks both files and modes, checks out the exact input commit
-without retained credentials, invokes the hidden `adaptive-tutor evaluate`
-command with an empty environment, writes evidence outside the checkout, and
-uploads exactly `adaptive-tutor-evidence.json`. The evaluator authenticates the
-signature and requires the envelope assignment, branch, commit, expiry, and
-digest to match the public assignment manifest before it consumes the staged
-files and starts learner tests in a scrubbed, resource-limited temporary
-directory. A
-missing, substituted, replayed, symlinked, or broadly readable envelope fails
-closed.
+without retained credentials, verifies Bubblewrap is present, invokes the
+hidden `adaptive-tutor evaluate` command with an empty environment, writes
+evidence outside the checkout, and uploads exactly
+`adaptive-tutor-evidence.json`. The evaluator authenticates the signature and
+requires the envelope assignment, branch, commit, expiry, and digest to match
+the public assignment manifest before it consumes the staged files. Signed
+public and hidden tests then run under a separate trusted controller in a
+read-only, networkless namespace; raw output stays quarantined. A missing,
+substituted, replayed, symlinked, broadly readable, or incompletely supervised
+evaluation fails closed.
 
 The tutor accepts a run only when its workflow ID and path, repository, head
 repository, `workflow_dispatch` event, typed run identity, default branch, and

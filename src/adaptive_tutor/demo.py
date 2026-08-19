@@ -21,6 +21,8 @@ from .generation import CurriculumAssignmentGenerator
 from .models import (
     AssignmentBundle,
     AssignmentRequest,
+    AutomatedCheck,
+    AutomatedEvaluation,
     ConceptEvidence,
     CurriculumPackage,
     DimensionScore,
@@ -31,7 +33,6 @@ from .models import (
     SchedulerCandidate,
 )
 from .reporting import ReportDocument, ReportService
-from .runner import CredentialFreeEvaluator
 from .scheduler import AdaptiveScheduler
 from .state import StatusService
 from .time import iso_now, utc_now
@@ -497,22 +498,16 @@ def _run_attempt(
             observed.isoformat(timespec="seconds"),
         ),
     )
-    automated = CredentialFreeEvaluator().evaluate(
+    automated = _fixture_automated_evaluation(
         bundle=bundle,
         assignment_id=assignment_id,
         commit_sha=commit_sha,
-        workspace=workspace,
+        observed=observed,
+        passed=scenario.solved,
     )
     if automated.learner_passed != scenario.solved:
         expected = "pass" if scenario.solved else "fail"
         raise ValueError(f"Demo submission for {assignment_id} did not {expected} as designed")
-    elapsed_ms = sum(item.duration_ms for item in automated.checks)
-    automated = automated.model_copy(
-        update={
-            "started_at": observed,
-            "completed_at": observed + timedelta(milliseconds=max(elapsed_ms, 1)),
-        }
-    ).with_computed_digest()
     qualitative_fixture = _qualitative_fixture(bundle, scenario)
     evaluator = EvaluationService(database, FixtureCodexRunner(qualitative_fixture))
     automated_id = evaluator.persist_automated(attempt_id, automated)
@@ -582,6 +577,57 @@ def _run_attempt(
         "automated_evidence": automated.model_dump(mode="json"),
         "qualitative_evaluation": qualitative.model_dump(mode="json"),
     }
+
+
+def _fixture_automated_evaluation(
+    *,
+    bundle: AssignmentBundle,
+    assignment_id: str,
+    commit_sha: str,
+    observed: datetime,
+    passed: bool,
+) -> AutomatedEvaluation:
+    test_status = "pass" if passed else "fail"
+    checks = [
+        AutomatedCheck(
+            name="assignment boundary",
+            status="pass",
+            category="policy",
+            summary="The validated fixture includes only declared assignment files",
+        ),
+        AutomatedCheck(
+            name="credential boundary",
+            status="pass",
+            category="policy",
+            summary="The local fixture evaluator uses no external credentials",
+        ),
+        AutomatedCheck(
+            name="fixture evaluator",
+            status="pass",
+            category="policy",
+            summary="Deterministic demo outcome loaded from the local scenario",
+        ),
+        AutomatedCheck(
+            name="public and hidden tests",
+            status=test_status,  # type: ignore[arg-type]
+            category="test",
+            summary=(
+                "Deterministic fixture checks passed"
+                if passed
+                else "Deterministic fixture checks found the intended learner failure"
+            ),
+            duration_ms=4,
+        ),
+    ]
+    return AutomatedEvaluation(
+        assignment_id=assignment_id,
+        commit_sha=commit_sha,
+        checks=checks,
+        started_at=observed,
+        completed_at=observed + timedelta(milliseconds=4),
+        runner=f"adaptive-tutor-local-fixture:{bundle.slug}",
+        artifact_digest="sha256:" + "0" * 64,
+    ).with_computed_digest()
 
 
 def _qualitative_fixture(

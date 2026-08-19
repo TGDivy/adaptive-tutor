@@ -30,6 +30,10 @@ class ConfigurationError(TutorError):
     pass
 
 
+class InfrastructureError(TutorError):
+    pass
+
+
 class SecurityError(TutorError):
     kind = FailureKind.SECURITY
 

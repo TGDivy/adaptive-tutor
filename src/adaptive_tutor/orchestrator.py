@@ -15,7 +15,7 @@ from .assignments import (
 from .config import TutorSettings
 from .curriculum import CurriculumLoader
 from .db import Database
-from .errors import ExternalServiceError, SecurityError
+from .errors import ExternalServiceError, InfrastructureError, SecurityError
 from .evaluation import EvaluationService, EvidenceNormalizer, render_review
 from .generation import CurriculumAssignmentGenerator
 from .github import GitHubClient
@@ -321,6 +321,10 @@ class TutorOrchestrator:
                 or evidence.evaluator_key_id != trusted_envelope.key_id
             ):
                 raise SecurityError("Actions evidence does not match the trusted evaluator")
+            if evidence.has_operational_error:
+                raise InfrastructureError(
+                    "Evaluator reported an operational failure", retryable=True
+                )
             automated_id = self.evaluations.persist_automated(str(attempt["id"]), evidence)
             submission = self._submission_files(bundle, commit_sha)
             prompt = self.database.fetch_one(

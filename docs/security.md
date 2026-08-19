@@ -29,9 +29,17 @@ separation: untrusted execution never shares a credentialed process boundary.
 ## Untrusted execution
 
 Never run a learner checkout, pull request script, build system, or arbitrary
-test command on the persistent tutor host. The private workspace workflow must
-use an ephemeral hosted runner and a credential-free isolated process/container
-with no network where practical.
+test command on the persistent tutor host. The private workspace workflow uses
+a one-job ephemeral runner and a credential-free Bubblewrap namespace with no
+network or host procfs, a read-only evaluation tree, private temporary storage,
+bounded resources, and process-tree cleanup.
+
+The signed public tests are authoritative; edits to test files in a learner
+checkout are ignored. Learner imports execute only in xdist workers, while a
+separate trusted controller requires a nonce-bound completion record and a
+complete set of passing test reports. Raw test output is quarantined and never
+copied into the evidence artifact, preventing hidden evaluator text or terminal
+control data from reaching later grading stages.
 
 Checkout actions must not persist credentials. Job permissions must be
 read-only. Do not reference secrets in a job that later invokes learner code,

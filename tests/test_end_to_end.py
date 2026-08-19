@@ -11,7 +11,7 @@ import pytest
 from adaptive_tutor.codex import FixtureCodexRunner
 from adaptive_tutor.config import GitHubSettings, TutorSettings
 from adaptive_tutor.db import Database
-from adaptive_tutor.errors import ExternalServiceError, SecurityError
+from adaptive_tutor.errors import ExternalServiceError, InfrastructureError, SecurityError
 from adaptive_tutor.evaluation import EvaluationService
 from adaptive_tutor.models import (
     AutomatedCheck,
@@ -34,6 +34,7 @@ class ControlledGitHub:
         self.trusted_spool: Path | None = None
         self.dispatches: list[dict[str, str]] = []
         self.tamper_evaluator_binding = False
+        self.evaluator_error = False
 
     def publish_assignment(self, **kwargs: Any) -> dict[str, Any]:
         metadata = json.loads(kwargs["files"][".adaptive-tutor/assignment.json"])
@@ -68,9 +69,13 @@ class ControlledGitHub:
             checks=[
                 AutomatedCheck(
                     name="unit and hidden tests",
-                    status="pass",
+                    status="error" if self.evaluator_error else "pass",
                     category="test",
-                    summary="all checks passed",
+                    summary=(
+                        "isolated evaluator unavailable"
+                        if self.evaluator_error
+                        else "all checks passed"
+                    ),
                 )
             ],
             started_at=now,
@@ -290,6 +295,48 @@ def test_ci_evidence_must_match_the_trusted_spool_identity(
     assert database.fetch_one("SELECT COUNT(*) count FROM automated_evaluations") == {
         "count": 0
     }
+    assert database.fetch_one("SELECT COUNT(*) count FROM mastery_evidence") == {"count": 0}
+
+
+def test_evaluator_operational_error_never_becomes_learner_evidence(
+    initialized: tuple[Database, object], tmp_path: Path
+) -> None:
+    database, _ = initialized
+    github = ControlledGitHub()
+    settings = TutorSettings(
+        data_dir=tmp_path,
+        learner_id="learner",
+        github=GitHubSettings(owner="owner", workspace_repo="learning-workspace"),
+    )
+    github.trusted_spool = settings.data_dir / "trusted-evaluators" / "spool"
+    orchestrator = TutorOrchestrator(
+        settings,
+        database,
+        github,  # type: ignore[arg-type]
+        EvaluationService(database, FixtureCodexRunner(fixture())),
+    )
+    created = orchestrator.create_next_assignment(LearnerContext())
+    branch = str(created["branch_name"])
+    orchestrator.record_submission(
+        {
+            "ref": f"refs/heads/{branch}",
+            "after": "a" * 40,
+            "head_commit": {"message": "solution"},
+        }
+    )
+    github.evaluator_error = True
+
+    with pytest.raises(InfrastructureError, match="operational failure") as raised:
+        orchestrator.process_ci_result(
+            {
+                "action": "completed",
+                "workflow_run": {"id": 700, "conclusion": "failure"},
+            }
+        )
+
+    assert raised.value.retryable is True
+    assert database.fetch_one("SELECT COUNT(*) count FROM automated_evaluations") == {"count": 0}
+    assert database.fetch_one("SELECT COUNT(*) count FROM qualitative_evaluations") == {"count": 0}
     assert database.fetch_one("SELECT COUNT(*) count FROM mastery_evidence") == {"count": 0}
 
 

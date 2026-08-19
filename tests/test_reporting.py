@@ -31,7 +31,12 @@ def test_local_demo_covers_evaluation_state_and_reporting(tmp_path: Path) -> Non
     }
     assert len({item["exercise_type"] for item in result.journey}) >= 5
     assert sum(bool(item["automated_passed"]) for item in result.journey) == 3
-    assert len(result.automated_evidence["checks"]) == 3
+    assert len(result.automated_evidence["checks"]) == 4
+    assert {check["name"] for check in result.automated_evidence["checks"]} >= {
+        "fixture evaluator",
+        "public and hidden tests",
+    }
+    assert result.automated_evidence["runner"].startswith("adaptive-tutor-local-fixture:")
     assert result.qualitative_evaluation["overall_score"] > 0
     assert result.report.data["study_activity"]["assignments"] >= 3
     assert result.report.data["study_activity"]["attempts"] == 3

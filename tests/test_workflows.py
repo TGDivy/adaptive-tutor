@@ -72,6 +72,8 @@ def test_workspace_evaluator_is_ephemeral_credential_free_and_uploads_contract()
         "assignment-bundle.json",
         "evaluator-signing.pub",
         "stat -c '%a'",
+        "command -v bwrap",
+        "bwrap --version",
         "workflow_dispatch:",
         "ref: ${{ inputs.commit_sha }}",
         '--branch "${ASSIGNMENT_BRANCH}"',

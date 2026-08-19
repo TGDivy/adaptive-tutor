@@ -40,6 +40,12 @@ jobs:
           ref: ${{ inputs.commit_sha }}
           persist-credentials: false
           clean: true
+      - name: Verify evaluator isolation runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v bwrap
+          bwrap --version
       - name: Run trusted evaluator
         shell: bash
         run: |

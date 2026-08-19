@@ -5,11 +5,17 @@ from __future__ import annotations
 import json
 import os
 import resource
+import secrets
+import shutil
+import signal
 import stat
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import time
+from contextlib import suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -21,6 +27,18 @@ from .trusted_bundles import TrustedBundleEnvelope, read_provisioned_envelope
 MAX_SUBMISSION_BYTES = 5 * 1024 * 1024
 MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 MAX_ASSIGNMENT_METADATA_BYTES = 64 * 1024
+MAX_SUPERVISOR_RECORD_BYTES = 16 * 1024
+EVALUATION_TIMEOUT_SECONDS = 90
+SANDBOX_ROOT = Path("/evaluation")
+SANDBOX_PACKAGE_ROOT = Path("/runtime/adaptive-tutor")
+SANDBOX_TMP = Path("/tmp")  # noqa: S108 - a private tmpfs inside the sandbox
+SANDBOX_HOME = SANDBOX_TMP / "home"
+
+
+@dataclass(frozen=True)
+class _SupervisedResult:
+    status: str
+    summary: str
 
 
 def evaluate_workspace_to_file(
@@ -113,33 +131,16 @@ class CredentialFreeEvaluator:
         started_clock = time.monotonic()
         with tempfile.TemporaryDirectory(prefix="adaptive-tutor-evaluation-") as temporary:
             root = Path(temporary)
-            self._copy_submission(bundle, workspace.resolve(), root)
-            self._install_hidden_tests(bundle, root)
-            environment = untrusted_process_environment(root)
-            environment["PYTHONPATH"] = str(root)
-            (root / "tmp").mkdir(mode=0o700)
+            submission = root / "submission"
+            public_tests = root / "trusted-tests" / "public"
+            hidden_tests = root / "trusted-tests" / "hidden"
+            self._copy_submission(bundle, workspace.resolve(), submission, public_tests)
+            self._install_hidden_tests(bundle, hidden_tests)
+            environment = untrusted_process_environment(SANDBOX_HOME)
             assert_credentials_absent(environment)
-            command = self._command(bundle)
+            self._validate_command(bundle)
             output_path = root / "evaluation-output.txt"
-            status = "error"
-            summary = "Evaluator did not run"
-            try:
-                with output_path.open("wb") as output:
-                    completed = subprocess.run(  # noqa: S603 - fixed interpreter and pytest module
-                        command,
-                        cwd=root,
-                        env=environment,
-                        stdout=output,
-                        stderr=subprocess.STDOUT,
-                        timeout=90,
-                        check=False,
-                        preexec_fn=_resource_limits if os.name == "posix" else None,
-                    )
-                status = "pass" if completed.returncode == 0 else "fail"
-                summary = _bounded_output(output_path)
-            except subprocess.TimeoutExpired:
-                status = "error"
-                summary = "Evaluation exceeded the 90 second limit"
+            supervised = _run_supervised_tests(root, output_path, environment)
             duration = int((time.monotonic() - started_clock) * 1000)
             checks = [
                 AutomatedCheck(
@@ -155,10 +156,21 @@ class CredentialFreeEvaluator:
                     summary="Evaluator environment contains no credential-like variables",
                 ),
                 AutomatedCheck(
+                    name="ephemeral sandbox",
+                    status="pass" if supervised.status != "error" else "error",
+                    category="policy",
+                    summary=(
+                        "Tests ran in a read-only, networkless PID namespace under a trusted "
+                        "supervisor"
+                        if supervised.status != "error"
+                        else supervised.summary
+                    ),
+                ),
+                AutomatedCheck(
                     name="public and hidden tests",
-                    status=status,  # type: ignore[arg-type]
+                    status=supervised.status,  # type: ignore[arg-type]
                     category="test",
-                    summary=summary or ("Checks passed" if status == "pass" else "Checks failed"),
+                    summary=supervised.summary,
                     duration_ms=duration,
                 ),
             ]
@@ -176,26 +188,38 @@ class CredentialFreeEvaluator:
             return evidence.with_computed_digest()
 
     @staticmethod
-    def _copy_submission(bundle: AssignmentBundle, workspace: Path, root: Path) -> None:
+    def _copy_submission(
+        bundle: AssignmentBundle,
+        workspace: Path,
+        submission: Path,
+        public_tests: Path,
+    ) -> None:
         total = 0
         for item in bundle.files:
-            if item.role not in {"instructions", "starter", "public_test"}:
+            if item.role == "starter":
+                content = _read_workspace_file(
+                    workspace,
+                    item.path,
+                    maximum=MAX_SUBMISSION_BYTES - total,
+                    label="Submission file",
+                )
+                total += len(content)
+                if total > MAX_SUBMISSION_BYTES:
+                    raise SecurityError("Submission exceeds the evaluator size limit")
+                target = _safe_path(submission, item.path)
+            elif item.role == "instructions":
+                content = item.content.encode()
+                target = _safe_path(submission, item.path)
+            elif item.role == "public_test":
+                content = item.content.encode()
+                target = _safe_path(public_tests, item.path)
+            else:
                 continue
-            content = _read_workspace_file(
-                workspace,
-                item.path,
-                maximum=MAX_SUBMISSION_BYTES - total,
-                label="Submission file",
-            )
-            total += len(content)
-            if total > MAX_SUBMISSION_BYTES:
-                raise SecurityError("Submission exceeds the evaluator size limit")
-            target = _safe_path(root, item.path)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
 
     @staticmethod
-    def _install_hidden_tests(bundle: AssignmentBundle, root: Path) -> None:
+    def _install_hidden_tests(bundle: AssignmentBundle, hidden_tests: Path) -> None:
         by_path = {item.path: item for item in bundle.files}
         extras = bundle.hidden_evaluator.get("extra_tests", {})
         if not isinstance(extras, dict):
@@ -204,17 +228,276 @@ class CredentialFreeEvaluator:
             source = by_path.get(str(source_name))
             if source is None or source.role != "evaluator":
                 raise AssignmentValidationError(f"Missing trusted evaluator: {source_name}")
-            target = _safe_path(root, str(target_name))
+            target = _safe_path(hidden_tests, str(target_name))
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(source.content, encoding="utf-8")
 
     @staticmethod
-    def _command(bundle: AssignmentBundle) -> list[str]:
+    def _validate_command(bundle: AssignmentBundle) -> None:
         if bundle.validation_command[:3] != ["python", "-m", "pytest"] or any(
             argument not in {"-q"} for argument in bundle.validation_command[3:]
         ):
             raise AssignmentValidationError("Only the fixed Python pytest harness is supported")
-        return [sys.executable, *bundle.validation_command[1:]]
+
+
+def _run_supervised_tests(
+    root: Path,
+    output_path: Path,
+    environment: dict[str, str],
+) -> _SupervisedResult:
+    bubblewrap = shutil.which("bwrap")
+    if os.name != "posix" or bubblewrap is None:
+        raise SecurityError("Bubblewrap is required for credential-free evaluator isolation")
+
+    nonce = secrets.token_hex(32)
+    read_fd, write_fd = os.pipe()
+    nonce_read_fd, nonce_write_fd = os.pipe()
+    os.write(nonce_write_fd, nonce.encode("ascii"))
+    os.close(nonce_write_fd)
+    command = _bubblewrap_command(
+        bubblewrap=bubblewrap,
+        root=root,
+        status_fd=write_fd,
+        nonce_fd=nonce_read_fd,
+    )
+    process: subprocess.Popen[bytes] | None = None
+    timed_out = False
+    try:
+        with output_path.open("wb") as output:
+            process = subprocess.Popen(  # noqa: S603 - fixed sandbox and supervisor command
+                command,
+                cwd=root,
+                env=environment,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                pass_fds=(write_fd, nonce_read_fd),
+                start_new_session=True,
+                preexec_fn=_resource_limits,
+            )
+            os.close(write_fd)
+            write_fd = -1
+            os.close(nonce_read_fd)
+            nonce_read_fd = -1
+            try:
+                process.wait(timeout=EVALUATION_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _kill_process_group(process.pid)
+                process.wait()
+            finally:
+                _kill_process_group(process.pid)
+        record_bytes = _read_supervisor_record(read_fd)
+    finally:
+        if process is not None and process.poll() is None:
+            _kill_process_group(process.pid)
+            process.wait()
+        if write_fd >= 0:
+            os.close(write_fd)
+        if nonce_read_fd >= 0:
+            os.close(nonce_read_fd)
+        os.close(read_fd)
+
+    if timed_out:
+        return _SupervisedResult(
+            status="error",
+            summary=f"Evaluation exceeded the {EVALUATION_TIMEOUT_SECONDS} second limit",
+        )
+    if process is None or process.returncode != 0:
+        return _SupervisedResult(
+            status="error",
+            summary="The isolated evaluator terminated without trusted completion",
+        )
+    return _interpret_supervisor_record(record_bytes, nonce)
+
+
+def _bubblewrap_command(
+    *,
+    bubblewrap: str,
+    root: Path,
+    status_fd: int,
+    nonce_fd: int,
+) -> list[str]:
+    package_root = Path(__file__).resolve().parents[1]
+    python_path = [str(SANDBOX_PACKAGE_ROOT)]
+    for path_name in ("purelib", "platlib"):
+        configured = sysconfig.get_path(path_name)
+        if configured and configured not in python_path:
+            python_path.append(configured)
+    python_path.append(str(SANDBOX_ROOT / "submission"))
+    command = [
+        bubblewrap,
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--cap-drop",
+        "ALL",
+    ]
+    for source, destination in _runtime_mounts(package_root):
+        command.extend(("--ro-bind", str(source), str(destination)))
+    command.extend(
+        (
+            "--ro-bind",
+            str(root),
+            str(SANDBOX_ROOT),
+            "--tmpfs",
+            str(SANDBOX_TMP),
+            "--dev",
+            "/dev",
+            "--dir",
+            str(SANDBOX_HOME),
+            "--setenv",
+            "HOME",
+            str(SANDBOX_HOME),
+            "--setenv",
+            "TMPDIR",
+            str(SANDBOX_TMP),
+            "--setenv",
+            "PYTHONPATH",
+            os.pathsep.join(python_path),
+            "--setenv",
+            "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+            "1",
+            "--chdir",
+            "/",
+            str(Path(sys.executable).resolve()),
+            "-m",
+            "adaptive_tutor._evaluator_supervisor",
+            "--status-fd",
+            str(status_fd),
+            "--nonce-fd",
+            str(nonce_fd),
+            "--workdir",
+            str(SANDBOX_ROOT / "submission"),
+            "--public-tests",
+            str(SANDBOX_ROOT / "trusted-tests" / "public"),
+            "--hidden-tests",
+            str(SANDBOX_ROOT / "trusted-tests" / "hidden"),
+        )
+    )
+    return command
+
+
+def _runtime_mounts(package_root: Path) -> list[tuple[Path, Path]]:
+    candidates: list[tuple[Path, Path]] = [
+        (Path(sys.prefix), Path(sys.prefix)),
+        (package_root, SANDBOX_PACKAGE_ROOT),
+        (Path(sys.executable).resolve(), Path(sys.executable).resolve()),
+    ]
+    for configured in (
+        sysconfig.get_path("stdlib"),
+        sysconfig.get_path("platstdlib"),
+        sysconfig.get_config_var("LIBDIR"),
+        str(Path(sys.base_prefix) / "lib"),
+        str(Path(sys.base_prefix) / "lib64"),
+        "/lib",
+        "/lib64",
+        "/usr/lib",
+        "/usr/lib64",
+        "/etc/ld.so.cache",
+    ):
+        if configured:
+            path = Path(configured)
+            candidates.append((path, path))
+
+    mounts: list[tuple[Path, Path]] = []
+    seen_destinations: set[Path] = set()
+    for source, destination in candidates:
+        if not source.exists() or destination in seen_destinations:
+            continue
+        if source == destination and any(
+            parent_destination != destination and parent_destination in destination.parents
+            for _, parent_destination in mounts
+        ):
+            continue
+        mounts.append((source, destination))
+        seen_destinations.add(destination)
+    return mounts
+
+
+def _read_supervisor_record(file_descriptor: int) -> bytes:
+    os.set_blocking(file_descriptor, False)
+    content = bytearray()
+    while len(content) <= MAX_SUPERVISOR_RECORD_BYTES:
+        try:
+            chunk = os.read(file_descriptor, MAX_SUPERVISOR_RECORD_BYTES + 1 - len(content))
+        except BlockingIOError:
+            break
+        if not chunk:
+            break
+        content.extend(chunk)
+    return bytes(content)
+
+
+def _interpret_supervisor_record(payload: bytes, nonce: str) -> _SupervisedResult:
+    try:
+        record = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return _SupervisedResult("error", "The evaluator completion record was missing or invalid")
+    expected_fields = {
+        "schema_version",
+        "nonce",
+        "exit_code",
+        "collected",
+        "passed",
+        "failed",
+        "skipped",
+        "internal_errors",
+        "worker_crashes",
+        "supervisor_error",
+    }
+    if not isinstance(record, dict) or set(record) != expected_fields:
+        return _SupervisedResult("error", "The evaluator completion record had an invalid schema")
+    numeric_fields = (
+        "exit_code",
+        "collected",
+        "passed",
+        "failed",
+        "skipped",
+        "internal_errors",
+        "worker_crashes",
+    )
+    if (
+        record["schema_version"] != "1.0"
+        or not secrets.compare_digest(str(record["nonce"]), nonce)
+        or any(type(record[field]) is not int or record[field] < 0 for field in numeric_fields)
+        or type(record["supervisor_error"]) is not bool
+    ):
+        return _SupervisedResult("error", "The evaluator completion record failed validation")
+
+    collected = record["collected"]
+    passed = record["passed"]
+    failed = record["failed"]
+    skipped = record["skipped"]
+    reported = passed + failed + skipped
+    if record["worker_crashes"] > 0 and not record["supervisor_error"]:
+        return _SupervisedResult(
+            "fail", "An isolated test worker terminated before completing its test set"
+        )
+    if (
+        record["exit_code"] == 0
+        and not record["supervisor_error"]
+        and record["internal_errors"] == 0
+        and collected > 0
+        and reported == collected
+        and passed == collected
+    ):
+        return _SupervisedResult("pass", f"{passed} isolated tests passed")
+    if collected > 0 and reported <= collected and record["exit_code"] in {0, 1}:
+        unsuccessful = collected - passed
+        return _SupervisedResult(
+            "fail",
+            f"{passed} of {collected} isolated tests passed; {unsuccessful} did not pass",
+        )
+    return _SupervisedResult("error", "The isolated test harness did not complete normally")
+
+
+def _kill_process_group(process_id: int) -> None:
+    with suppress(ProcessLookupError):
+        os.killpg(process_id, signal.SIGKILL)
 
 
 def _safe_path(root: Path, relative: str) -> Path:
@@ -303,17 +586,11 @@ def _is_within(path: Path, root: Path) -> bool:
 def _resource_limits() -> None:
     resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
     resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES))
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     if hasattr(resource, "RLIMIT_AS"):
         resource.setrlimit(resource.RLIMIT_AS, (1024**3, 1024**3))
     if hasattr(resource, "RLIMIT_NPROC"):
         resource.setrlimit(resource.RLIMIT_NPROC, (128, 128))
-
-
-def _bounded_output(path: Path) -> str:
-    with path.open("rb") as source:
-        content = source.read(MAX_OUTPUT_BYTES + 1)
-    if len(content) > MAX_OUTPUT_BYTES:
-        content = content[:MAX_OUTPUT_BYTES]
-    text = content.decode("utf-8", errors="replace").strip()
-    lines = [line for line in text.splitlines() if line.strip()]
-    return " | ".join(lines[-8:])[-3000:]
+    if hasattr(resource, "RLIMIT_NOFILE"):
+        maximum = min(256, resource.getrlimit(resource.RLIMIT_NOFILE)[1])
+        resource.setrlimit(resource.RLIMIT_NOFILE, (maximum, maximum))

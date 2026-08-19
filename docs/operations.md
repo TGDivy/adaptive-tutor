@@ -101,6 +101,14 @@ succeeds, allow one job, and destroy the runner plus its temporary storage
 afterward. Never place either staged file in the workspace repository, runner
 image, cache, logs, or an Actions artifact.
 
+The ephemeral runner image must provide Bubblewrap (`bwrap`) with user, PID,
+network, IPC, and UTS namespace support. Install the locked `adaptive-tutor`
+package, which includes pytest-xdist, before accepting work. The protected
+workflow runs `command -v bwrap` and `bwrap --version` before consuming the
+envelope; a missing isolation runtime is an infrastructure failure. Validate
+namespace support in the image build, keep unprivileged user namespaces enabled
+where Bubblewrap requires them, and never fall back to unsandboxed pytest.
+
 ### Lifecycle commands
 
 ```bash

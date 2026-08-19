@@ -75,12 +75,24 @@ The trusted envelope, verification key, and evidence destination must be
 outside the untrusted checkout. The evaluator requires owner-only, non-symlink
 files; authenticates the Ed25519 signature; enforces the short validity window;
 recomputes both digests; and matches the assignment, branch, commit, and public
-binding. It consumes the staged envelope and key before learner code starts,
-then copies only declared learner-visible files into a new temporary
-directory, adds trusted hidden tests there, strips credential-like environment
-variables, applies CPU/output/address-space/process limits, and runs the fixed
-Python pytest harness without a shell. It writes the artifact atomically with
-mode `0600`, including a canonical SHA-256 digest over the normalized contract.
+binding. It consumes the staged envelope and key before learner code starts.
+
+Only declared starter files enter the submission tree. Public tests are copied
+from the signed bundle rather than the learner checkout, and hidden tests come
+from the same authenticated bundle. A trusted xdist controller runs outside the
+learner test process and accepts success only after every collected test reports
+passing and a nonce-bound completion record arrives over a descriptor that test
+workers never inherit. `os._exit(0)`, a worker crash, missing tests, skipped
+tests, or a forged process code therefore cannot manufacture a pass.
+
+Bubblewrap gives the test group a read-only filesystem, private user/PID/IPC/UTS
+namespaces, no procfs, no network, a minimal device tree, and a private writable
+tmpfs. The supervisor also strips credential-like environment variables,
+applies CPU/output/address-space/process/descriptor limits, and kills the whole
+process group after every outcome. Raw pytest and learner output remains in a
+bounded temporary file and never enters normalized evidence; the artifact
+contains only aggregate counts and fixed policy text. The artifact is written
+atomically outside the sandbox with mode `0600` and a canonical SHA-256 digest.
 
 ## Trust-separated review prompt
 

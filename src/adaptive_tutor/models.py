@@ -265,6 +265,10 @@ class AutomatedEvaluation(StrictModel):
         relevant = [check for check in self.checks if check.status != "skipped"]
         return bool(relevant) and all(check.status == "pass" for check in relevant)
 
+    @property
+    def has_operational_error(self) -> bool:
+        return any(check.status == "error" for check in self.checks)
+
     def computed_digest(self) -> str:
         payload = self.model_dump(mode="json", exclude={"artifact_digest"})
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
