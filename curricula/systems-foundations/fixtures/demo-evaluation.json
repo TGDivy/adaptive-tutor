@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0",
+  "overall_score": 86,
+  "dimensions": [
+    {"dimension": "correctness", "score": 92, "rationale": "All deterministic checks pass."},
+    {"dimension": "reasoning", "score": 84, "rationale": "The invariant and failure path are explicit."},
+    {"dimension": "communication", "score": 82, "rationale": "The explanation is concise and testable."}
+  ],
+  "grader_confidence": 0.94,
+  "concept_evidence": [
+    {
+      "concept_id": "programming.invariants",
+      "outcome": "success",
+      "strength": 0.9,
+      "difficulty": 4,
+      "exercise_type": "debugging",
+      "rationale": "The fix restores the stated state invariant.",
+      "transfer_context": "repairing a bounded work queue"
+    }
+  ],
+  "misconceptions": [],
+  "feedback_summary": "Correct repair with a clear invariant and useful regression coverage.",
+  "feedback_details": [
+    "The empty/full distinction is now preserved across wraparound.",
+    "The regression test covers the boundary that originally failed."
+  ],
+  "classification": "correct",
+  "follow_up": "new_assignment",
+  "follow_up_reason": "Use the same invariant in a different representation.",
+  "escalation_recommended": false
+}

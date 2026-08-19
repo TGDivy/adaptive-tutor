@@ -1,0 +1,13 @@
+id: systems-foundations
+name: Systems Foundations
+version: 1.0.0
+description: >-
+  A practical curriculum for reliable programs, operating-system interfaces,
+  networking fundamentals, concurrency, performance, and technical reasoning.
+default_profile: generalist
+generation_guidance: >-
+  Prefer realistic maintenance tasks with observable behavior, bounded scope,
+  and more than one opportunity to explain a trade-off.
+grading_guidance: >-
+  Separate correctness from reasoning and style. Accept valid alternatives when
+  the learner identifies constraints and supports the design with evidence.

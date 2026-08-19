@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Independent product completion gate."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def run(name: str, command: list[str]) -> bool:
+    print(f"\n[{name}] {' '.join(command)}")
+    result = subprocess.run(command, cwd=ROOT, check=False)
+    if result.returncode:
+        print(f"FAIL: {name} (exit {result.returncode})")
+        return False
+    print(f"PASS: {name}")
+    return True
+
+
+def ledger_complete() -> bool:
+    path = ROOT / "implementation" / "completion.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"FAIL: completion ledger is unreadable: {exc}")
+        return False
+    requirements = payload.get("requirements", [])
+    identifiers = [item.get("id") for item in requirements]
+    if len(requirements) < 20 or len(identifiers) != len(set(identifiers)):
+        print("FAIL: completion ledger is incomplete or has duplicate identifiers")
+        return False
+    incomplete = [item["id"] for item in requirements if item.get("status") != "complete"]
+    weak = [
+        item["id"]
+        for item in requirements
+        if item.get("status") == "complete" and not item.get("evidence")
+    ]
+    if incomplete:
+        print("Incomplete requirements: " + ", ".join(incomplete))
+    if weak:
+        print("Completed entries without evidence: " + ", ".join(weak))
+    return not incomplete and not weak
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--quick", action="store_true", help="run the lightweight agent stop gate")
+    args = parser.parse_args()
+    outcomes = [
+        run("public boundary", [sys.executable, "scripts/check-public-boundary"]),
+        ledger_complete(),
+    ]
+    if not args.quick:
+        required = [
+            "README.md",
+            "SPEC.md",
+            "AGENTS.md",
+            "pyproject.toml",
+            "implementation/completion.json",
+            "docs/index.md",
+            "mkdocs.yml",
+            "deploy/compose.yaml",
+            "tests/test_end_to_end.py",
+        ]
+        missing = [path for path in required if not (ROOT / path).exists()]
+        if missing:
+            print("Missing required artifacts: " + ", ".join(missing))
+            outcomes.append(False)
+    if all(outcomes):
+        print("\nAdaptive Tutor completion gate: PASS")
+        return 0
+    print("\nAdaptive Tutor completion gate: INCOMPLETE")
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

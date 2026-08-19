@@ -1,0 +1,95 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "adaptive-tutor"
+version = "0.1.0"
+description = "A self-hosted, Git-native adaptive learning engine"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Adaptive Tutor contributors" }]
+keywords = ["education", "adaptive-learning", "github", "tutoring", "codex"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Framework :: FastAPI",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Education",
+]
+dependencies = [
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "jinja2>=3.1,<4",
+  "platformdirs>=4.3,<5",
+  "pydantic>=2.11,<3",
+  "pyjwt[crypto]>=2.10,<3",
+  "pyyaml>=6.0,<7",
+  "rich>=14.0,<15",
+  "typer>=0.16,<1",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2,<2",
+  "mkdocs-material>=9.6,<10",
+  "mypy>=1.17,<2",
+  "pip-audit>=2.9,<3",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "pytest-cov>=6.2,<7",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+adaptive-tutor = "adaptive_tutor.cli:app"
+
+[project.urls]
+Documentation = "https://tgdivy.github.io/adaptive-tutor/"
+Issues = "https://github.com/tgdivy/adaptive-tutor/issues"
+Repository = "https://github.com/tgdivy/adaptive-tutor"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/adaptive_tutor"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"curricula" = "adaptive_tutor/bundled_curricula"
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+markers = [
+  "e2e: controlled end-to-end tests",
+  "external: tests requiring GitHub or another external service",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["adaptive_tutor"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "S", "RUF"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S108"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["adaptive_tutor"]

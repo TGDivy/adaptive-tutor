@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+set -eu
+
+if ./scripts/check-completion --quick; then
+  exit 0
+fi
+
+printf '%s\n' 'The product completion gate is still incomplete. Read SPEC.md and implementation/completion.json, then continue with the reported gaps.' >&2
+exit 2

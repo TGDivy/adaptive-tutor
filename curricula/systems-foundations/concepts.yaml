@@ -1,0 +1,123 @@
+concepts:
+  - id: programming.resource-lifetime
+    name: Resource lifetime
+    domain: programming
+    description: Acquire, transfer, and release resources safely on all control-flow paths.
+    importance: 1.4
+    base_difficulty: 3
+    exercise_types: [implementation, debugging, code_review, refactoring]
+    reference_files: [resource-lifetime.md]
+    generation_guidance: Include early returns or exceptional paths.
+    grading_guidance: Reward explicit ownership and deterministic cleanup.
+  - id: programming.data-structures
+    name: Data structure selection
+    domain: programming
+    description: Select and implement data structures from workload and complexity constraints.
+    importance: 1.2
+    base_difficulty: 4
+    exercise_types: [implementation, code_review, performance_investigation]
+    reference_files: [measurement.md]
+  - id: programming.invariants
+    name: Program invariants
+    domain: programming
+    description: State, preserve, and test invariants across APIs and state transitions.
+    importance: 1.5
+    base_difficulty: 4
+    exercise_types: [debugging, code_review, explain_the_code, written]
+    reference_files: [resource-lifetime.md]
+  - id: operating-systems.processes
+    name: Processes and isolation
+    domain: operating-systems
+    description: Explain process boundaries, lifecycle, descriptors, and isolation guarantees.
+    importance: 1.1
+    base_difficulty: 3
+    exercise_types: [written, debugging, system_design, explain_the_code]
+    reference_files: [operating-systems.md]
+  - id: operating-systems.virtual-memory
+    name: Virtual memory
+    domain: operating-systems
+    description: Reason about mappings, page faults, locality, and memory protection.
+    importance: 1.3
+    base_difficulty: 5
+    exercise_types: [written, debugging, performance_investigation, system_design]
+    reference_files: [operating-systems.md, measurement.md]
+  - id: operating-systems.scheduling
+    name: Scheduling and latency
+    domain: operating-systems
+    description: Connect scheduling, contention, and workload shape to latency behavior.
+    importance: 1.2
+    base_difficulty: 5
+    exercise_types: [written, performance_investigation, system_design, code_review]
+    reference_files: [operating-systems.md, measurement.md]
+  - id: concurrency.synchronization
+    name: Synchronization
+    domain: concurrency
+    description: Protect shared state while making progress and shutdown behavior explicit.
+    importance: 1.5
+    base_difficulty: 5
+    exercise_types: [implementation, debugging, code_review, system_design]
+    reference_files: [concurrency.md]
+  - id: concurrency.condition-coordination
+    name: Condition coordination
+    domain: concurrency
+    description: Coordinate state changes without missed notifications or invalid assumptions.
+    importance: 1.2
+    base_difficulty: 5
+    exercise_types: [implementation, debugging, code_review, explain_the_code]
+    reference_files: [concurrency.md]
+  - id: concurrency.progress
+    name: Progress and contention
+    domain: concurrency
+    description: Analyze deadlock, starvation, fairness, and contention under realistic schedules.
+    importance: 1.3
+    base_difficulty: 6
+    exercise_types: [debugging, code_review, performance_investigation, written]
+    reference_files: [concurrency.md, measurement.md]
+  - id: networking.transport
+    name: Transport behavior
+    domain: networking
+    description: Reason about reliable streams, datagrams, loss, ordering, and backpressure.
+    importance: 1.4
+    base_difficulty: 4
+    exercise_types: [written, debugging, system_design, quiz]
+    reference_files: [networking.md]
+  - id: networking.protocol-framing
+    name: Protocol framing
+    domain: networking
+    description: Design and parse messages correctly across arbitrary transport boundaries.
+    importance: 1.3
+    base_difficulty: 5
+    exercise_types: [implementation, debugging, code_review, system_design]
+    reference_files: [networking.md]
+  - id: networking.flow-control
+    name: Flow control and buffering
+    domain: networking
+    description: Bound queues and propagate pressure across clients, servers, and transports.
+    importance: 1.2
+    base_difficulty: 6
+    exercise_types: [system_design, performance_investigation, written, code_review]
+    reference_files: [networking.md, measurement.md]
+  - id: performance.measurement
+    name: Performance measurement
+    domain: performance
+    description: Form hypotheses and collect repeatable measurements without common benchmark bias.
+    importance: 1.5
+    base_difficulty: 4
+    exercise_types: [performance_investigation, code_review, written, refactoring]
+    reference_files: [measurement.md]
+  - id: performance.locality
+    name: Data locality
+    domain: performance
+    description: Connect access patterns and representation to cache and memory-system costs.
+    importance: 1.2
+    base_difficulty: 6
+    exercise_types: [performance_investigation, implementation, code_review, written]
+    reference_files: [measurement.md]
+  - id: reasoning.communication
+    name: Technical communication
+    domain: reasoning
+    description: Explain assumptions, evidence, alternatives, and trade-offs with precision.
+    importance: 1.3
+    base_difficulty: 3
+    exercise_types: [written, code_review, system_design, interviewer_follow_up]
+    reference_files: [communication.md]

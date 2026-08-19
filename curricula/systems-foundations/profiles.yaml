@@ -1,0 +1,25 @@
+profiles:
+  - id: generalist
+    name: Systems generalist
+    description: Balanced practical systems-programming preparation.
+    domain_weights:
+      programming: 1.1
+      operating-systems: 1.0
+      concurrency: 1.1
+      networking: 1.0
+      performance: 1.0
+      reasoning: 1.0
+    concept_weights: {}
+  - id: service-engineer
+    name: Service engineer
+    description: Emphasizes network services, operability, and concurrency.
+    domain_weights:
+      programming: 1.0
+      operating-systems: 1.1
+      concurrency: 1.2
+      networking: 1.3
+      performance: 1.0
+      reasoning: 1.1
+    concept_weights:
+      networking.flow-control: 1.3
+      networking.protocol-framing: 1.2

@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "updated_at": "2026-08-19",
+  "policy": "Evidence is verified by scripts/check-completion; status is descriptive only.",
+  "requirements": [
+    {"id": "cli", "status": "in_progress", "evidence": []},
+    {"id": "demo", "status": "in_progress", "evidence": []},
+    {"id": "dashboard_api", "status": "pending", "evidence": []},
+    {"id": "curriculum_loading", "status": "in_progress", "evidence": ["curricula/systems-foundations"]},
+    {"id": "learner_model", "status": "in_progress", "evidence": ["src/adaptive_tutor/learner.py"]},
+    {"id": "adaptive_scheduler", "status": "in_progress", "evidence": ["src/adaptive_tutor/scheduler.py"]},
+    {"id": "assignment_generation_validation", "status": "in_progress", "evidence": ["src/adaptive_tutor/assignments.py"]},
+    {"id": "deterministic_evaluation", "status": "pending", "evidence": []},
+    {"id": "qualitative_evaluation", "status": "pending", "evidence": []},
+    {"id": "appeals_hints", "status": "in_progress", "evidence": ["src/adaptive_tutor/assignments.py"]},
+    {"id": "github_integration", "status": "pending", "evidence": []},
+    {"id": "webhook_jobs", "status": "pending", "evidence": []},
+    {"id": "persistent_storage", "status": "in_progress", "evidence": ["src/adaptive_tutor/migrations"]},
+    {"id": "reporting", "status": "pending", "evidence": []},
+    {"id": "security_boundary", "status": "in_progress", "evidence": ["scripts/check-public-boundary"]},
+    {"id": "deployment_operations", "status": "pending", "evidence": []},
+    {"id": "documentation", "status": "in_progress", "evidence": ["README.md", "SPEC.md"]},
+    {"id": "screenshots", "status": "pending", "evidence": []},
+    {"id": "automated_tests", "status": "pending", "evidence": []},
+    {"id": "controlled_end_to_end", "status": "pending", "evidence": []},
+    {"id": "public_repository", "status": "pending", "evidence": []},
+    {"id": "private_repositories", "status": "pending", "evidence": []},
+    {"id": "deployed_runtime", "status": "pending", "evidence": []}
+  ]
+}

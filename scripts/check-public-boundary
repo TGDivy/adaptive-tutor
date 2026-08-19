@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Reject sensitive, private, or workstation-specific material in tracked files."""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+def tracked_files() -> list[Path]:
+    result = subprocess.run(
+        ["git", "ls-files", "-z"], capture_output=True, check=True
+    )
+    return [Path(item.decode()) for item in result.stdout.split(b"\0") if item]
+
+
+def forbidden_patterns() -> dict[str, re.Pattern[bytes]]:
+    private_subject = b"".join((b"h", b"f", b"t"))
+    internal_brand = b"".join((b"bloom", b"berg"))
+    enterprise_host = b"".join((b"bb", b"github"))
+    return {
+        "private subject acronym": re.compile(rb"\b" + private_subject + rb"\b", re.I),
+        "private preparation phrase": re.compile(rb"quant(?:itative)?[ -]+trading", re.I),
+        "internal organization reference": re.compile(internal_brand, re.I),
+        "enterprise source host": re.compile(enterprise_host, re.I),
+        "internal absolute path": re.compile(rb"/opt/" + b"b" + b"b" + rb"/", re.I),
+        "private key": re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+        "GitHub token": re.compile(rb"\bgh[opsu]_[A-Za-z0-9]{20,}\b"),
+        "OpenAI key": re.compile(rb"\bsk-[A-Za-z0-9_-]{20,}\b"),
+    }
+
+
+def main() -> int:
+    failures: list[str] = []
+    files = tracked_files()
+    if Path("spec.md") in files:
+        failures.append("the private lowercase source brief is tracked")
+    patterns = forbidden_patterns()
+    for path in files:
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            failures.append(f"cannot inspect {path}: {exc}")
+            continue
+        for label, pattern in patterns.items():
+            if pattern.search(content) or pattern.search(path.as_posix().encode()):
+                failures.append(f"{path}: {label}")
+    if failures:
+        print("Public-boundary check failed:", file=sys.stderr)
+        for failure in failures:
+            print(f"  - {failure}", file=sys.stderr)
+        return 1
+    print(f"Public boundary: PASS ({len(files)} tracked files inspected)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
