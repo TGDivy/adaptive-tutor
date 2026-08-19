@@ -78,7 +78,7 @@ preserving these observable constraints:
 Add at least one focused regression test. Run `python -m pytest -q`.
 
 In `ANSWER.md`, state the invariant that distinguishes empty from full, explain
-why the original representation loses it, and report confidence from 0–100.
+why the original representation loses it, and report confidence from 0-100.
 
 Target concept: `{primary}`. Expected time: {minutes} minutes. Difficulty:
 {request.target_difficulty}/10.
@@ -191,10 +191,12 @@ def test_wraparound_and_repeated_cycles() -> None:
                 AssignmentFile(
                     path="reference/bounded_queue.py", content=reference, role="reference"
                 ),
-                AssignmentFile(path="evaluator/test_hidden.py", content=hidden_test, role="evaluator"),
+                AssignmentFile(
+                    path="evaluator/test_hidden.py", content=hidden_test, role="evaluator"
+                ),
                 AssignmentFile(
                     path="ANSWER.md",
-                    content="# Analysis\n\nInvariant:\n\nCause:\n\nConfidence (0–100):\n",
+                    content="# Analysis\n\nInvariant:\n\nCause:\n\nConfidence (0-100):\n",
                     role="starter",
                 ),
             ],
@@ -268,7 +270,7 @@ Produce `RESPONSE.md` with:
 2. three measurements that would confirm or falsify the explanation;
 3. a bounded design with explicit overload behavior;
 4. the strongest trade-off or failure mode introduced by that design;
-5. confidence from 0–100.
+5. confidence from 0-100.
 
 Target concept: `{primary}`. Format: `{exercise_type.value}`. Difficulty:
 {request.target_difficulty}/10. Keep the response below 900 words.
@@ -285,7 +287,10 @@ Target concept: `{primary}`. Format: `{exercise_type.value}`. Difficulty:
                 AssignmentFile(path="README.md", content=instructions, role="instructions"),
                 AssignmentFile(
                     path="RESPONSE.md",
-                    content="# Diagnosis\n\n# Evidence\n\n# Design\n\n# Trade-off\n\nConfidence (0–100):\n",
+                    content=(
+                        "# Diagnosis\n\n# Evidence\n\n# Design\n\n# Trade-off\n\n"
+                        "Confidence (0-100):\n"
+                    ),
                     role="starter",
                 ),
                 AssignmentFile(
@@ -431,7 +436,9 @@ class AssignmentValidator:
                 "PYTHONPATH": str(root),
                 "PYTHONDONTWRITEBYTECODE": "1",
             }
-            result = subprocess.run(
+            # The command is an argv array, the executable is resolved from a
+            # narrow tool name, no shell is used, and the environment is scrubbed.
+            result = subprocess.run(  # noqa: S603
                 command,
                 cwd=root,
                 env=safe_env,

@@ -79,7 +79,9 @@ class CurriculumLoader:
         with database.transaction() as connection:
             connection.execute(
                 """
-                INSERT INTO curricula(id, name, version, description, source_path, content_digest, loaded_at)
+                INSERT INTO curricula(
+                    id, name, version, description, source_path, content_digest, loaded_at
+                )
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name=excluded.name,

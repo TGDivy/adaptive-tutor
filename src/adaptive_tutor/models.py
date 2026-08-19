@@ -124,9 +124,17 @@ class AssignmentRequest(StrictModel):
 
 
 class AssignmentFile(StrictModel):
-    path: str = Field(pattern=r"^(?!/)(?!.*\.\.)[A-Za-z0-9_.\-/]+$")
+    path: str = Field(pattern=r"^[A-Za-z0-9_.\-/]+$")
     content: str
     role: Literal["instructions", "starter", "public_test", "reference", "evaluator"]
+
+    @field_validator("path")
+    @classmethod
+    def safe_relative_path(cls, value: str) -> str:
+        path = Path(value)
+        if path.is_absolute() or not value or any(part in {"", ".", ".."} for part in path.parts):
+            raise ValueError("assignment file paths must be normalized relative paths")
+        return value
 
 
 class AssignmentStage(StrictModel):
@@ -153,7 +161,7 @@ class AssignmentBundle(StrictModel):
     validation_command: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def weights_and_files_are_coherent(self) -> "AssignmentBundle":
+    def weights_and_files_are_coherent(self) -> AssignmentBundle:
         if abs(sum(self.rubric.values()) - 1.0) > 0.001:
             raise ValueError("rubric weights must sum to 1.0")
         paths = [item.path for item in self.files]

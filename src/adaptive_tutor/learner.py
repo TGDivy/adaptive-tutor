@@ -13,12 +13,11 @@ from typing import Any
 from .db import Database
 from .models import (
     ConceptEvidence,
-    ExerciseType,
     MisconceptionFinding,
     MisconceptionStatus,
     QualitativeEvaluation,
 )
-from .time import iso_now, utc_now
+from .time import utc_now
 
 OUTCOME_VALUE = {"success": 1.0, "partial": 0.5, "failure": 0.0}
 

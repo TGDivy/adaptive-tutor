@@ -59,7 +59,8 @@ class Database:
             }
             migration_root = resources.files("adaptive_tutor.migrations")
             migrations = sorted(
-                item for item in migration_root.iterdir() if item.name.endswith(".sql")
+                (item for item in migration_root.iterdir() if item.name.endswith(".sql")),
+                key=lambda item: item.name,
             )
             for migration in migrations:
                 version = migration.name.split("_", 1)[0]

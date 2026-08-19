@@ -30,8 +30,8 @@ class GitHubSettings(StrictModel):
     app_id: int | None = None
     installation_id: int | None = None
     private_key_path: Path | None = None
-    token_env: str = "ADAPTIVE_TUTOR_GITHUB_TOKEN"
-    webhook_secret_env: str = "ADAPTIVE_TUTOR_WEBHOOK_SECRET"
+    token_env: str = "ADAPTIVE_TUTOR_GITHUB_TOKEN"  # noqa: S105 - environment name
+    webhook_secret_env: str = "ADAPTIVE_TUTOR_WEBHOOK_SECRET"  # noqa: S105
 
     @field_validator("api_url")
     @classmethod
@@ -62,7 +62,7 @@ class CodexSettings(StrictModel):
 class ServerSettings(StrictModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8765, ge=1, le=65535)
-    api_token_env: str = "ADAPTIVE_TUTOR_API_TOKEN"
+    api_token_env: str = "ADAPTIVE_TUTOR_API_TOKEN"  # noqa: S105 - environment name
     allow_unauthenticated_loopback: bool = True
     workers: int = Field(default=2, ge=1, le=16)
     lease_seconds: int = Field(default=900, ge=30, le=7200)

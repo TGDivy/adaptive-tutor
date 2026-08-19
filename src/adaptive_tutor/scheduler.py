@@ -34,17 +34,17 @@ class AdaptiveScheduler:
         current = now or utc_now()
         if current.tzinfo is None:
             current = current.replace(tzinfo=UTC)
-        profile = self.database.fetch_one(
+        profile_row = self.database.fetch_one(
             """
             SELECT domain_weights_json, concept_weights_json FROM profiles
             WHERE curriculum_id=? AND id=?
             """,
             (curriculum_id, profile_id),
         )
-        if profile is None:
+        if profile_row is None:
             raise ValueError(f"Unknown curriculum profile: {curriculum_id}/{profile_id}")
-        domain_weights = json.loads(profile["domain_weights_json"])
-        concept_weights = json.loads(profile["concept_weights_json"])
+        domain_weights = json.loads(profile_row["domain_weights_json"])
+        concept_weights = json.loads(profile_row["concept_weights_json"])
         rows = self.database.fetch_all(
             """
             SELECT c.*, m.mastery_estimate, m.uncertainty, m.evidence_count,
@@ -118,7 +118,9 @@ class AdaptiveScheduler:
                 frequency = float(misconception["frequency"])
                 recurrence = 0.3 if "recurred" in str(misconception["statuses"]) else 0.0
                 misconception_factor = 1.0 + severity * 0.16 + min(frequency, 4) * 0.08 + recurrence
-            profile = float(concept_weights.get(concept_id, domain_weights.get(row["domain"], 1.0)))
+            profile_factor = float(
+                concept_weights.get(concept_id, domain_weights.get(row["domain"], 1.0))
+            )
             repeated_concept = concept_recency[concept_id]
             diversity = _clamp(1.0 - repeated_concept * 0.16, 0.42, 1.0)
             confidence = self._confidence_factor(last_by_concept.get(concept_id))
@@ -138,7 +140,7 @@ class AdaptiveScheduler:
                     forgetting,
                     uncertainty,
                     misconception_factor,
-                    profile,
+                    profile_factor,
                     diversity,
                     confidence,
                     prerequisite,
@@ -159,7 +161,7 @@ class AdaptiveScheduler:
                 "forgetting": round(forgetting, 3),
                 "uncertainty": round(uncertainty, 3),
                 "misconception": round(misconception_factor, 3),
-                "profile": round(profile, 3),
+                "profile": round(profile_factor, 3),
                 "diversity": round(diversity, 3),
                 "confidence": round(confidence, 3),
                 "prerequisite": round(prerequisite, 3),
