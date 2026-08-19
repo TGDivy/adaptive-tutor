@@ -74,7 +74,7 @@ jobs:
           uv run --locked python scripts/check-public-boundary
           uv run --locked python scripts/check-deployment
       - name: Build strict documentation
-        run: ./scripts/check-docs
+        run: uv run --locked python scripts/check-docs
       - name: Build distributions
         run: uv build
       - name: Smoke-test installed wheel

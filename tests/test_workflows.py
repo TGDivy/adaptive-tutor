@@ -34,7 +34,7 @@ def test_ci_exercises_package_docs_container_and_privacy() -> None:
         "pytest",
         "check-public-boundary",
         "uv run --locked python scripts/check-deployment",
-        "check-docs",
+        "uv run --locked python scripts/check-docs",
         "uv build",
         "adaptive-tutor demo",
         "docker build",
@@ -51,3 +51,10 @@ def test_workflow_yaml_and_dependabot_are_parseable() -> None:
     )
     ecosystems = {item["package-ecosystem"] for item in dependabot["updates"]}
     assert ecosystems == {"uv", "docker", "github-actions"}
+
+
+def test_python_validation_scripts_run_inside_the_locked_environment() -> None:
+    for workflow_name in ("ci.yml", "docs.yml"):
+        content = (WORKFLOW_ROOT / workflow_name).read_text(encoding="utf-8")
+        assert "./scripts/check-docs" not in content
+        assert "uv run --locked python scripts/check-docs" in content

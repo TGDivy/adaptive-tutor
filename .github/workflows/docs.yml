@@ -46,7 +46,7 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - name: Build strict site
-        run: ./scripts/check-docs
+        run: uv run --locked python scripts/check-docs
       - name: Render Pages artifact
         run: uv run --locked mkdocs build --strict
       - name: Upload Pages artifact
