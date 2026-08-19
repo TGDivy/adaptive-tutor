@@ -93,3 +93,37 @@ def test_repository_scope_must_be_private_and_writable() -> None:
     )
     with pytest.raises(SecurityError, match="must be private"):
         client.verify_private_repository()
+
+
+def test_webhook_status_reports_matching_hook_health() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/owner/learning-workspace/hooks"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 17,
+                    "active": True,
+                    "events": ["push", "pull_request"],
+                    "config": {"url": "https://tutor.example.test/webhooks/github"},
+                    "last_response": {"code": 200, "status": "active"},
+                }
+            ],
+        )
+
+    client = GitHubClient(
+        GitHubSettings(owner="owner"),
+        auth=StaticAuth(),  # type: ignore[arg-type]
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        status = client.webhook_status("https://tutor.example.test/webhooks/github")
+        assert status == {
+            "id": 17,
+            "active": True,
+            "events": ["push", "pull_request"],
+            "last_response": {"code": 200, "status": "active"},
+        }
+        assert client.webhook_status("https://other.example.test/webhooks/github") is None
+    finally:
+        client.close()

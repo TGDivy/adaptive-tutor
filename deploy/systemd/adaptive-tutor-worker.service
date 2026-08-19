@@ -1,0 +1,43 @@
+[Unit]
+Description=Adaptive Tutor durable event worker
+Documentation=https://tgdivy.github.io/adaptive-tutor/operations/
+Wants=network-online.target
+After=network-online.target adaptive-tutor.service
+Requires=adaptive-tutor.service
+
+[Service]
+Type=simple
+User=adaptive-tutor
+Group=adaptive-tutor
+WorkingDirectory=/var/lib/adaptive-tutor
+Environment=ADAPTIVE_TUTOR_CONFIG=/etc/adaptive-tutor/config.yaml
+Environment=HOME=/var/lib/adaptive-tutor
+Environment=CODEX_HOME=/var/lib/adaptive-tutor/codex
+Environment=PATH=/var/lib/adaptive-tutor/.local/bin:/opt/adaptive-tutor/bin:/usr/local/bin:/usr/bin
+EnvironmentFile=-/etc/adaptive-tutor/worker.env
+ExecStart=/opt/adaptive-tutor/bin/adaptive-tutor worker
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/adaptive-tutor
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

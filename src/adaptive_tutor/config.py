@@ -156,6 +156,7 @@ def write_initial_config(
     installation_id: int | None = None,
     private_key_path: Path | None = None,
     webhook_url: str | None = None,
+    server_host: str = "127.0.0.1",
 ) -> tuple[Path, Path]:
     config_path = (path or DEFAULT_CONFIG_PATH).expanduser()
     target_data_dir = (data_dir or DEFAULT_DATA_DIR).expanduser().resolve()
@@ -185,7 +186,7 @@ def write_initial_config(
         },
         "codex": {"command": "codex", "enabled": True, "sandbox": "read-only"},
         "server": {
-            "host": "127.0.0.1",
+            "host": server_host,
             "port": 8765,
             "api_token_env": "ADAPTIVE_TUTOR_API_TOKEN",
             "allow_unauthenticated_loopback": False,

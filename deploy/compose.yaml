@@ -1,0 +1,88 @@
+name: adaptive-tutor
+
+x-runtime: &runtime
+  image: adaptive-tutor:local
+  build:
+    context: ..
+    dockerfile: Dockerfile
+    args:
+      SOURCE_REVISION: ${SOURCE_REVISION:-local}
+  user: "${TUTOR_UID:-1000}:${TUTOR_GID:-1000}"
+  environment:
+    ADAPTIVE_TUTOR_CONFIG: /etc/adaptive-tutor/config.yaml
+    HOME: /var/lib/adaptive-tutor
+    CODEX_HOME: /var/lib/adaptive-tutor-codex
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  init: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777
+  pids_limit: 256
+  restart: unless-stopped
+  stop_grace_period: 30s
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  tutor:
+    <<: *runtime
+    command: ["serve"]
+    env_file:
+      - path: ${TUTOR_RUNTIME_DIR:-./runtime}/tutor.env
+        required: false
+    volumes:
+      - ${TUTOR_RUNTIME_DIR:-./runtime}/config:/etc/adaptive-tutor:ro
+      - ${TUTOR_RUNTIME_DIR:-./runtime}/state:/var/lib/adaptive-tutor
+    ports:
+      - "127.0.0.1:${TUTOR_PORT:-8765}:8765"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8765/readyz', timeout=3).read()
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    <<: *runtime
+    profiles: ["remote"]
+    command: ["worker"]
+    env_file:
+      - path: ${TUTOR_RUNTIME_DIR:-./runtime}/worker.env
+        required: false
+    volumes:
+      - ${TUTOR_RUNTIME_DIR:-./runtime}/config:/etc/adaptive-tutor:ro
+      - ${TUTOR_RUNTIME_DIR:-./runtime}/state:/var/lib/adaptive-tutor
+      - ${TUTOR_RUNTIME_DIR:-./runtime}/codex:/var/lib/adaptive-tutor-codex
+    depends_on:
+      tutor:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+
+  initializer:
+    <<: *runtime
+    profiles: ["tools"]
+    command:
+      - init
+      - --data-dir
+      - /var/lib/adaptive-tutor
+      - --server-host
+      - 0.0.0.0
+    volumes:
+      - ${TUTOR_RUNTIME_DIR:-./runtime}/config:/etc/adaptive-tutor
+      - ${TUTOR_RUNTIME_DIR:-./runtime}/state:/var/lib/adaptive-tutor
+    restart: "no"
+    healthcheck:
+      disable: true

@@ -29,6 +29,7 @@ def test_initial_config_keeps_generated_secrets_out_of_yaml(
         app_id=123,
         installation_id=456,
         webhook_url="https://tutor.example.test/",
+        server_host="0.0.0.0",  # noqa: S104 - validates container configuration output
     )
 
     assert written_config == config_path
@@ -41,6 +42,7 @@ def test_initial_config_keeps_generated_secrets_out_of_yaml(
     assert raw["github"]["owner"] == "example-owner"
     assert raw["github"]["webhook_url"] == "https://tutor.example.test/"
     assert raw["server"]["allow_unauthenticated_loopback"] is False
+    assert raw["server"]["host"] == "0.0.0.0"  # noqa: S104 - expected container bind
     secrets_text = secrets_path.read_text(encoding="utf-8")
     assert "ADAPTIVE_TUTOR_API_TOKEN=" in secrets_text
     assert "ADAPTIVE_TUTOR_WEBHOOK_SECRET=" in secrets_text

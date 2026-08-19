@@ -91,6 +91,10 @@ def init_command(
     installation_id: int | None = typer.Option(None, help="GitHub App installation identifier."),
     private_key: Path | None = typer.Option(None, help="Owner-only GitHub App private-key file."),
     webhook_url: str | None = typer.Option(None, help="Public HTTPS service base URL."),
+    server_host: str = typer.Option(
+        "127.0.0.1",
+        help="Dashboard bind host; use 0.0.0.0 only behind a loopback-bound container port.",
+    ),
     force: bool = typer.Option(False, "--force", help="Replace an existing configuration."),
 ) -> None:
     """Create secure defaults, migrate SQLite, and load the demo curriculum."""
@@ -108,6 +112,7 @@ def init_command(
             installation_id=installation_id,
             private_key_path=private_key,
             webhook_url=webhook_url,
+            server_host=server_host,
         )
         settings = load_settings(config_path, require_file=True)
         database = _bootstrap(settings, force_load=True)

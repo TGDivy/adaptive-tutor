@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up Adaptive Tutor daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30m
+Unit=adaptive-tutor-backup.service
+
+[Install]
+WantedBy=timers.target

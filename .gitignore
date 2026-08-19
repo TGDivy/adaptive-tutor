@@ -21,4 +21,6 @@
 /artifacts/
 /playwright-report/
 /test-results/
+/deploy/runtime/
+/deploy/.env
 .DS_Store

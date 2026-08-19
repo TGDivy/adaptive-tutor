@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+.mypy_cache
+.pytest_cache
+.ruff_cache
+artifacts
+build
+deploy/runtime
+dist
+htmlcov
+site
+test-results
+tests
+*.sqlite3
+*.sqlite3-*
+.coverage

@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Validate deployment artifacts without starting persistent services."""
+
+from __future__ import annotations
+
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def require(condition: bool, message: str, failures: list[str]) -> None:
+    if not condition:
+        failures.append(message)
+
+
+def load_compose(failures: list[str]) -> dict[str, Any]:
+    path = ROOT / "deploy" / "compose.yaml"
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        failures.append(f"compose file is unreadable: {exc}")
+        return {}
+    if not isinstance(payload, dict):
+        failures.append("compose file must contain a mapping")
+        return {}
+    return payload
+
+
+def validate_compose(payload: dict[str, Any], failures: list[str]) -> None:
+    services = payload.get("services")
+    require(isinstance(services, dict), "compose services are missing", failures)
+    if not isinstance(services, dict):
+        return
+    require(
+        {"tutor", "worker", "initializer"}.issubset(services),
+        "compose must define tutor, worker, and initializer services",
+        failures,
+    )
+    for name in ("tutor", "worker", "initializer"):
+        service = services.get(name, {})
+        if not isinstance(service, dict):
+            failures.append(f"compose service {name} is invalid")
+            continue
+        require(service.get("read_only") is True, f"{name} root must be read-only", failures)
+        require(service.get("cap_drop") == ["ALL"], f"{name} must drop capabilities", failures)
+        require(
+            "no-new-privileges:true" in service.get("security_opt", []),
+            f"{name} must disable privilege escalation",
+            failures,
+        )
+    tutor = services.get("tutor", {})
+    ports = tutor.get("ports", []) if isinstance(tutor, dict) else []
+    require(
+        bool(ports) and all(str(item).startswith("127.0.0.1:") for item in ports),
+        "dashboard ports must be loopback-bound",
+        failures,
+    )
+    worker = services.get("worker", {})
+    require(
+        isinstance(worker, dict) and "remote" in worker.get("profiles", []),
+        "remote worker must be explicitly profile-gated",
+        failures,
+    )
+    tutor_env = str(tutor.get("env_file", "")) if isinstance(tutor, dict) else ""
+    worker_env = str(worker.get("env_file", "")) if isinstance(worker, dict) else ""
+    require("worker.env" not in tutor_env, "model credentials reached tutor service", failures)
+    require("worker.env" in worker_env, "worker-only environment file is missing", failures)
+
+
+def validate_dockerfile(failures: list[str]) -> None:
+    path = ROOT / "Dockerfile"
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        failures.append(f"Dockerfile is unreadable: {exc}")
+        return
+    from_lines = [line for line in content.splitlines() if line.startswith("FROM ")]
+    require(bool(from_lines), "Dockerfile has no build stages", failures)
+    require(
+        all("@sha256:" in line for line in from_lines),
+        "every container base image must be digest-pinned",
+        failures,
+    )
+    require("USER 10001:10001" in content, "container must run as a non-root user", failures)
+    require("uv sync --locked" in content, "container dependencies must use uv.lock", failures)
+    require("@openai/codex@${CODEX_VERSION}" in content, "Codex CLI must be pinned", failures)
+
+
+def validate_systemd(failures: list[str]) -> None:
+    unit_root = ROOT / "deploy" / "systemd"
+    required = {
+        "adaptive-tutor.service",
+        "adaptive-tutor-worker.service",
+        "adaptive-tutor-backup.service",
+        "adaptive-tutor-backup.timer",
+    }
+    present = {path.name for path in unit_root.glob("adaptive-tutor*")}
+    require(required.issubset(present), "systemd service/timer set is incomplete", failures)
+    for name in required - {"adaptive-tutor-backup.timer"}:
+        content = (unit_root / name).read_text(encoding="utf-8")
+        for directive in (
+            "NoNewPrivileges=true",
+            "ProtectSystem=strict",
+            "PrivateTmp=true",
+            "CapabilityBoundingSet=",
+            "Restart=on-failure" if name != "adaptive-tutor-backup.service" else "Type=oneshot",
+        ):
+            require(directive in content, f"{name} is missing {directive}", failures)
+    timer = (unit_root / "adaptive-tutor-backup.timer").read_text(encoding="utf-8")
+    require("Persistent=true" in timer, "backup timer must catch up after downtime", failures)
+
+
+def validate_operations(failures: list[str]) -> None:
+    path = ROOT / "docs" / "operations.md"
+    try:
+        content = path.read_text(encoding="utf-8").lower()
+    except OSError as exc:
+        failures.append(f"operations guide is unreadable: {exc}")
+        return
+    for topic in (
+        "install",
+        "configure",
+        "start",
+        "stop",
+        "restart",
+        "status",
+        "logs",
+        "backup",
+        "restore",
+        "upgrade",
+        "rollback",
+        "failure recovery",
+    ):
+        require(topic in content, f"operations guide does not cover {topic}", failures)
+
+
+def validate_with_tools(failures: list[str]) -> None:
+    prepare = ROOT / "deploy" / "prepare-compose.sh"
+    shell_path = shutil.which("sh")
+    require(shell_path is not None, "POSIX shell is unavailable", failures)
+    if shell_path is None:
+        return
+    shell = subprocess.run(  # noqa: S603 - resolved trusted executable and fixed arguments
+        [shell_path, "-n", str(prepare)], check=False
+    )
+    require(shell.returncode == 0, "prepare-compose.sh has invalid shell syntax", failures)
+    docker_path = shutil.which("docker")
+    if docker_path:
+        compose = subprocess.run(  # noqa: S603 - resolved executable and fixed arguments
+            [docker_path, "compose", "-f", "deploy/compose.yaml", "config", "--quiet"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        require(
+            compose.returncode == 0,
+            "docker compose rejected deploy/compose.yaml: " + compose.stderr.strip(),
+            failures,
+        )
+
+
+def main() -> int:
+    failures: list[str] = []
+    payload = load_compose(failures)
+    validate_compose(payload, failures)
+    validate_dockerfile(failures)
+    validate_systemd(failures)
+    validate_operations(failures)
+    validate_with_tools(failures)
+    if failures:
+        print("Deployment validation failed:", file=sys.stderr)
+        for failure in failures:
+            print(f"  - {failure}", file=sys.stderr)
+        return 1
+    print("Deployment validation: PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
