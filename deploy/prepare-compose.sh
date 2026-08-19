@@ -9,11 +9,13 @@ umask 077
 mkdir -p \
     "${runtime_dir}/codex" \
     "${runtime_dir}/config" \
+    "${runtime_dir}/grader-run" \
     "${runtime_dir}/state"
 chmod 0700 \
     "${runtime_dir}" \
     "${runtime_dir}/codex" \
     "${runtime_dir}/config" \
+    "${runtime_dir}/grader-run" \
     "${runtime_dir}/state"
 
 if [ ! -e "${runtime_dir}/tutor.env" ]; then
@@ -22,7 +24,13 @@ fi
 if [ ! -e "${runtime_dir}/worker.env" ]; then
     : > "${runtime_dir}/worker.env"
 fi
-chmod 0600 "${runtime_dir}/tutor.env" "${runtime_dir}/worker.env"
+if [ ! -e "${runtime_dir}/grader.env" ]; then
+    : > "${runtime_dir}/grader.env"
+fi
+chmod 0600 \
+    "${runtime_dir}/tutor.env" \
+    "${runtime_dir}/worker.env" \
+    "${runtime_dir}/grader.env"
 
 if [ -e "${compose_env}" ]; then
     echo "Preserving existing ${compose_env}"

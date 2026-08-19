@@ -1,9 +1,10 @@
 # Operations
 
 Adaptive Tutor supports a hardened Docker Compose deployment and native
-systemd services. Both paths keep SQLite on persistent storage, restart the
-webhook service and durable worker after a crash or reboot, and run learner
-code only on ephemeral GitHub-hosted evaluators—not on the tutor host.
+systemd services. Both paths keep SQLite on persistent storage and restart the
+webhook service, durable worker, and isolated grader after a crash or reboot.
+Learner code runs only on credential-free ephemeral evaluators, never on the
+tutor host.
 
 ## Docker Compose
 
@@ -18,11 +19,11 @@ docker compose build
 docker compose --profile tools run --rm initializer
 ```
 
-`prepare-compose.sh` creates owner-only `runtime/config`, `runtime/state`, and
-`runtime/codex` directories, two mode-0600 environment files, and a local
-Compose UID/GID mapping. Initialization writes `runtime/config/config.yaml`, a
-mode-0600 token file, the migrated SQLite database, and the bundled neutral
-curriculum.
+`prepare-compose.sh` creates owner-only `runtime/config`, `runtime/state`,
+`runtime/codex`, and `runtime/grader-run` directories, three mode-0600
+environment files, and a local Compose UID/GID mapping. Initialization writes
+`runtime/config/config.yaml`, a mode-0600 token file, the migrated SQLite
+database, and the bundled neutral curriculum.
 
 The container binds to `0.0.0.0` internally, but Compose publishes it only on
 host loopback at `127.0.0.1:8765`. The dashboard still requires the generated
@@ -51,22 +52,23 @@ container starts with `/etc/adaptive-tutor/`. A development token, when
 temporarily needed, belongs only in `runtime/tutor.env` and
 `runtime/worker.env`, never in YAML.
 
-Put the model API key only in `runtime/worker.env` under the
+Put the model API key only in `runtime/grader.env` under the
 `OPENAI_API_KEY` variable. Enter the assigned value directly in an owner-only
 editor; do not echo it through shell history.
 
-The official OpenAI documentation recommends API-key authentication for
-automation and documents schema-constrained `codex exec` workflows in
-[Codex non-interactive mode](https://learn.chatgpt.com/docs/codex/non-interactive-mode).
-The Docker image pins the Codex CLI package version, runs each grader with a
-read-only sandbox and no approvals, and does not pass GitHub or dashboard
-credentials into the grader environment.
+Set `codex.enabled: true` in `runtime/config/config.yaml` after the grader is
+configured. Compose injects the owner-only socket path into the worker. The
+grader receives no tutor config, state, GitHub key, dashboard secret, learner
+checkout, or TCP port. The image pins Codex CLI and each request uses a
+read-only sandbox, no approvals, and an ephemeral session. See the official
+[Codex CLI documentation](https://developers.openai.com/codex/cli/) for current
+authentication guidance.
 
 Start the remote worker profile and reconcile the webhook:
 
 ```bash
 docker compose --profile remote up -d
-docker compose exec tutor adaptive-tutor doctor
+docker compose exec worker adaptive-tutor doctor
 docker compose exec tutor adaptive-tutor webhook-setup
 docker compose ps
 ```
@@ -88,8 +90,8 @@ docker compose ps
 docker compose exec tutor adaptive-tutor status
 
 # Logs
-docker compose logs --since=30m tutor worker
-docker compose logs --follow worker
+docker compose logs --since=30m tutor worker grader
+docker compose logs --follow worker grader
 ```
 
 Never use `docker compose down --volumes` as an operational shortcut. The
@@ -106,13 +108,14 @@ Create a locked service account and directories:
 sudo useradd --system --home-dir /var/lib/adaptive-tutor \
   --create-home --shell /usr/sbin/nologin adaptive-tutor
 sudo install -d -m 0700 -o adaptive-tutor -g adaptive-tutor \
-  /etc/adaptive-tutor /var/lib/adaptive-tutor /var/lib/adaptive-tutor/codex
+  /etc/adaptive-tutor /var/lib/adaptive-tutor \
+  /var/lib/adaptive-tutor-grader /var/lib/adaptive-tutor-grader/codex
 sudo python3 -m venv /opt/adaptive-tutor
 sudo /opt/adaptive-tutor/bin/pip install /path/to/adaptive_tutor-release.whl
 ```
 
 Install Codex CLI using the current
-[official Codex CLI instructions](https://learn.chatgpt.com/docs/codex/cli),
+[official Codex CLI instructions](https://developers.openai.com/codex/cli/),
 then make its executable available to the service account. Initialize the
 application:
 
@@ -124,10 +127,11 @@ sudo -u adaptive-tutor /opt/adaptive-tutor/bin/adaptive-tutor \
   --config /etc/adaptive-tutor/config.yaml doctor --offline
 ```
 
-Configure the GitHub App in `/etc/adaptive-tutor/config.yaml`. Put dashboard
-and webhook variables in `/etc/adaptive-tutor/tutor.env`; put the model key and
-any worker-only integration variable in `/etc/adaptive-tutor/worker.env`. Make
-both files owner-readable only:
+Configure the GitHub App in `/etc/adaptive-tutor/config.yaml` and set
+`codex.enabled: true`. Put dashboard and webhook variables in
+`/etc/adaptive-tutor/tutor.env`, worker-only GitHub variables in
+`/etc/adaptive-tutor/worker.env`, and the model key only in
+`/etc/adaptive-tutor/grader.env`. Make all files owner-readable only:
 
 ```bash
 sudo chown adaptive-tutor:adaptive-tutor /etc/adaptive-tutor/*.env
@@ -139,10 +143,12 @@ Install and enable the units:
 ```bash
 sudo install -m 0644 deploy/systemd/adaptive-tutor.service \
   deploy/systemd/adaptive-tutor-worker.service \
+  deploy/systemd/adaptive-tutor-grader.service \
   deploy/systemd/adaptive-tutor-backup.service \
   deploy/systemd/adaptive-tutor-backup.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now adaptive-tutor.service adaptive-tutor-worker.service
+sudo systemctl enable --now adaptive-tutor.service adaptive-tutor-grader.service \
+  adaptive-tutor-worker.service
 sudo systemctl enable --now adaptive-tutor-backup.timer
 ```
 
@@ -150,21 +156,27 @@ sudo systemctl enable --now adaptive-tutor-backup.timer
 
 ```bash
 # Start, stop, and restart
-sudo systemctl start adaptive-tutor.service adaptive-tutor-worker.service
-sudo systemctl stop adaptive-tutor-worker.service adaptive-tutor.service
-sudo systemctl restart adaptive-tutor.service adaptive-tutor-worker.service
+sudo systemctl start adaptive-tutor.service adaptive-tutor-grader.service \
+  adaptive-tutor-worker.service
+sudo systemctl stop adaptive-tutor-worker.service adaptive-tutor-grader.service \
+  adaptive-tutor.service
+sudo systemctl restart adaptive-tutor.service adaptive-tutor-grader.service \
+  adaptive-tutor-worker.service
 
 # Status, readiness, and logs
-systemctl status adaptive-tutor.service adaptive-tutor-worker.service
+systemctl status adaptive-tutor.service adaptive-tutor-grader.service \
+  adaptive-tutor-worker.service
 curl --fail http://127.0.0.1:8765/readyz
-journalctl -u adaptive-tutor.service -u adaptive-tutor-worker.service --since today
+journalctl -u adaptive-tutor.service -u adaptive-tutor-grader.service \
+  -u adaptive-tutor-worker.service --since today
 journalctl -u adaptive-tutor-worker.service --follow
 ```
 
 The units use an empty capability set, strict filesystem protection,
 owner-only state, private temporary directories, namespace restrictions, and
-automatic restart after process failure. The backup timer is persistent, so a
-missed backup runs after the next boot.
+automatic restart after process failure. The grader mount namespace makes
+`/var/lib/adaptive-tutor` and `/etc/adaptive-tutor` inaccessible. The backup
+timer is persistent, so a missed backup runs after the next boot.
 
 ## Backup and restore
 
@@ -190,16 +202,18 @@ Restore is intentionally explicit. Stop both writers, retain a copy of the
 current database, and restore a verified snapshot:
 
 ```bash
-sudo systemctl stop adaptive-tutor-worker.service adaptive-tutor.service
+sudo systemctl stop adaptive-tutor-worker.service adaptive-tutor-grader.service \
+  adaptive-tutor.service
 sudo -u adaptive-tutor /opt/adaptive-tutor/bin/adaptive-tutor \
   --config /etc/adaptive-tutor/config.yaml restore \
   /secure/path/tutor-backup.sqlite3 --yes
 sudo -u adaptive-tutor /opt/adaptive-tutor/bin/adaptive-tutor \
   --config /etc/adaptive-tutor/config.yaml doctor --offline
-sudo systemctl start adaptive-tutor.service adaptive-tutor-worker.service
+sudo systemctl start adaptive-tutor.service adaptive-tutor-grader.service \
+  adaptive-tutor-worker.service
 ```
 
-For Compose, stop `worker` and `tutor`, place the snapshot in
+For Compose, stop `worker`, `grader`, and `tutor`, place the snapshot in
 `runtime/state/backups`, and run the restore through the tools profile before
 starting services again.
 
@@ -213,14 +227,16 @@ release, run the migration/doctor check, and restart:
 docker compose exec tutor adaptive-tutor backup
 docker compose build --pull
 docker compose --profile remote up -d
-docker compose exec tutor adaptive-tutor doctor
+docker compose exec worker adaptive-tutor doctor
 
 # systemd
-sudo systemctl stop adaptive-tutor-worker.service adaptive-tutor.service
+sudo systemctl stop adaptive-tutor-worker.service adaptive-tutor-grader.service \
+  adaptive-tutor.service
 sudo /opt/adaptive-tutor/bin/pip install --upgrade /path/to/new-release.whl
 sudo -u adaptive-tutor /opt/adaptive-tutor/bin/adaptive-tutor \
   --config /etc/adaptive-tutor/config.yaml doctor --offline
-sudo systemctl start adaptive-tutor.service adaptive-tutor-worker.service
+sudo systemctl start adaptive-tutor.service adaptive-tutor-grader.service \
+  adaptive-tutor-worker.service
 ```
 
 Migrations are forward-only. Rollback therefore means restoring both the prior
@@ -236,9 +252,9 @@ notes explicitly declare compatibility.
 - **Network outage:** webhook deliveries can be retried by GitHub; queued jobs
   persist, use classified exponential retries, and retain dead-letter
   diagnostics after the retry limit.
-- **Terminated model worker:** the short-lived grader leaves no learner-state
-  mutation unless valid schema-constrained output completed. Its durable job is
-  retried after the lease expires.
+- **Terminated grader:** the worker records a retryable transport/model failure
+  and leaves learner state unchanged. Restart the isolated grader; the durable
+  job retries after its lease expires.
 - **Database corruption or host loss:** provision a clean host, install the same
   release, restore the newest tested off-host snapshot, run `doctor --offline`,
   then start the service and worker.

@@ -58,6 +58,7 @@ class CodexSettings(StrictModel):
     timeout_seconds: int = Field(default=600, ge=30, le=3600)
     enabled: bool = True
     sandbox: str = "read-only"
+    socket_path: Path | None = None
     usd_per_million_input_tokens: float = Field(default=0.0, ge=0)
     usd_per_million_output_tokens: float = Field(default=0.0, ge=0)
 
@@ -132,7 +133,7 @@ def load_settings(path: Path | None = None, *, require_file: bool = False) -> Tu
         settings.ensure_runtime_dirs()
         if settings.secrets_file and settings.secrets_file.is_file():
             _load_secrets_file(settings.secrets_file)
-        return settings
+        return _apply_runtime_overrides(settings)
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         settings = TutorSettings.model_validate(raw)
@@ -141,7 +142,7 @@ def load_settings(path: Path | None = None, *, require_file: bool = False) -> Tu
     settings.ensure_runtime_dirs()
     if settings.secrets_file and settings.secrets_file.is_file():
         _load_secrets_file(settings.secrets_file)
-    return settings
+    return _apply_runtime_overrides(settings)
 
 
 def write_initial_config(
@@ -184,7 +185,7 @@ def write_initial_config(
             else None,
             "webhook_url": webhook_url,
         },
-        "codex": {"command": "codex", "enabled": True, "sandbox": "read-only"},
+        "codex": {"command": "codex", "enabled": False, "sandbox": "read-only"},
         "server": {
             "host": server_host,
             "port": 8765,
@@ -227,3 +228,10 @@ def _load_secrets_file(path: Path) -> None:
         if not name.startswith("ADAPTIVE_TUTOR_") or not name.replace("_", "").isalnum():
             raise ConfigurationError(f"Invalid secret variable name on line {line_number}")
         os.environ.setdefault(name, value.strip())
+
+
+def _apply_runtime_overrides(settings: TutorSettings) -> TutorSettings:
+    grader_socket = os.environ.get("ADAPTIVE_TUTOR_GRADER_SOCKET")
+    if grader_socket:
+        settings.codex.socket_path = Path(grader_socket).expanduser().resolve()
+    return settings

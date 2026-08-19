@@ -34,7 +34,7 @@ def test_offline_doctor_reports_actionable_local_state(
     assert checks["Database"].status == "pass"
     assert checks["Configuration"].status == "pass"
     assert checks["Filesystem permissions"].status == "pass"
-    assert checks["Codex CLI"].status == "warn"
+    assert checks["Codex grader"].status == "warn"
     assert checks["GitHub App configuration"].status == "warn"
     assert checks["GitHub connectivity"].status == "warn"
     assert checks["Service health"].status == "warn"
@@ -139,6 +139,11 @@ def test_doctor_codex_tooling_and_github_configuration_branches(
     assert doctor._codex().status == "fail"
     assert doctor._tooling().status == "fail"
 
+    settings.codex.socket_path = tmp_path / "grader.sock"
+    monkeypatch.setattr(
+        "adaptive_tutor.doctor.grader_health",
+        lambda _path: (True, "isolated grader is reachable"),
+    )
     monkeypatch.setattr(
         "adaptive_tutor.doctor.shutil.which",
         lambda name: f"/usr/bin/{name}" if name in {"codex-test", "git", "python"} else None,

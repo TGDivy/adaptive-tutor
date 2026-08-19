@@ -12,7 +12,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Protocol
 
-from pydantic import ValidationError
+import httpx
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .config import CodexSettings
 from .db import Database
@@ -20,6 +21,36 @@ from .errors import ModelError, ModelSchemaError
 from .models import QualitativeEvaluation
 from .security import codex_worker_environment, redact, sha256_digest
 from .time import iso_now
+
+MAX_GRADER_PROMPT_BYTES = 2 * 1024 * 1024
+
+
+class GraderRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prompt: str = Field(min_length=1, max_length=MAX_GRADER_PROMPT_BYTES)
+
+
+class GraderUsage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+
+
+class GraderResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evaluation: QualitativeEvaluation
+    usage: GraderUsage
+
+
+class GraderFailure(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str
+    detail: str
+    retryable: bool = False
 
 
 class QualitativeGrader(Protocol):
@@ -82,6 +113,85 @@ class CodexRunner:
         return result
 
     def _invoke(self, prompt: str) -> tuple[QualitativeEvaluation, dict[str, int]]:
+        if not self.settings.enabled:
+            raise ModelError("Codex qualitative grading is disabled")
+        socket_path = self.settings.socket_path
+        if socket_path is None:
+            raise ModelError(
+                "An isolated Codex grader socket is not configured. Start the grader service "
+                "and set ADAPTIVE_TUTOR_GRADER_SOCKET."
+            )
+        socket_path = socket_path.expanduser().resolve()
+        try:
+            socket_available = socket_path.is_socket()
+        except OSError as exc:
+            raise ModelError(
+                f"Cannot inspect isolated Codex grader socket: {redact(str(exc))}",
+                retryable=True,
+            ) from exc
+        if not socket_available:
+            raise ModelError(
+                f"Isolated Codex grader socket is unavailable: {socket_path}", retryable=True
+            )
+        try:
+            request = GraderRequest(prompt=prompt)
+        except ValidationError as exc:
+            raise ModelSchemaError(f"Grader prompt failed size/schema validation: {exc}") from exc
+        try:
+            transport = httpx.HTTPTransport(uds=str(socket_path))
+            with httpx.Client(
+                transport=transport,
+                base_url="http://adaptive-tutor-grader",
+                timeout=self.settings.timeout_seconds + 5,
+            ) as client:
+                response = client.post("/v1/grade", json=request.model_dump())
+        except httpx.HTTPError as exc:
+            raise ModelError(
+                f"Isolated Codex grader request failed: {redact(str(exc))}", retryable=True
+            ) from exc
+        if response.status_code != 200:
+            try:
+                failure = GraderFailure.model_validate(response.json())
+            except (ValidationError, ValueError):
+                failure = GraderFailure(
+                    kind="model_failure",
+                    detail=f"grader returned HTTP {response.status_code}",
+                    retryable=response.status_code >= 500,
+                )
+            error_type = ModelSchemaError if failure.kind == "schema_failure" else ModelError
+            raise error_type(redact(failure.detail)[:4000], retryable=failure.retryable)
+        try:
+            result = GraderResponse.model_validate(response.json())
+        except (ValidationError, ValueError) as exc:
+            raise ModelSchemaError(
+                f"Isolated Codex grader returned an invalid response: {exc}"
+            ) from exc
+        return result.evaluation, result.usage.model_dump()
+
+    def _record_failure(self, invocation_id: str, error: Exception, started: float) -> None:
+        kind = "schema_failure" if isinstance(error, ModelSchemaError) else "model_failure"
+        self.database.execute(
+            """
+            UPDATE model_invocations SET status='failed', failure_kind=?, completed_at=?,
+                duration_ms=?, error=? WHERE id=?
+            """,
+            (
+                kind,
+                iso_now(),
+                int((time.monotonic() - started) * 1000),
+                redact(str(error))[:4000],
+                invocation_id,
+            ),
+        )
+
+
+class CodexProcess:
+    """Direct Codex execution used only inside the isolated grader service."""
+
+    def __init__(self, settings: CodexSettings) -> None:
+        self.settings = settings
+
+    def invoke(self, prompt: str) -> tuple[QualitativeEvaluation, dict[str, int]]:
         executable = shutil.which(self.settings.command)
         if executable is None:
             raise ModelError(
@@ -126,6 +236,7 @@ class CodexRunner:
                     timeout=self.settings.timeout_seconds,
                     env=codex_worker_environment(),
                     check=False,
+                    start_new_session=True,
                 )
             except subprocess.TimeoutExpired as exc:
                 raise ModelError(
@@ -153,21 +264,24 @@ class CodexRunner:
                 raise ModelSchemaError(f"Codex output failed schema validation: {exc}") from exc
             return evaluation, _parse_usage(completed.stdout)
 
-    def _record_failure(self, invocation_id: str, error: Exception, started: float) -> None:
-        kind = "schema_failure" if isinstance(error, ModelSchemaError) else "model_failure"
-        self.database.execute(
-            """
-            UPDATE model_invocations SET status='failed', failure_kind=?, completed_at=?,
-                duration_ms=?, error=? WHERE id=?
-            """,
-            (
-                kind,
-                iso_now(),
-                int((time.monotonic() - started) * 1000),
-                redact(str(error))[:4000],
-                invocation_id,
-            ),
-        )
+
+def grader_health(socket_path: Path, *, timeout: float = 1.5) -> tuple[bool, str]:
+    path = socket_path.expanduser().resolve()
+    if not path.is_socket():
+        return False, f"grader socket is unavailable: {path}"
+    try:
+        transport = httpx.HTTPTransport(uds=str(path))
+        with httpx.Client(
+            transport=transport,
+            base_url="http://adaptive-tutor-grader",
+            timeout=timeout,
+        ) as client:
+            response = client.get("/healthz")
+    except httpx.HTTPError as exc:
+        return False, f"grader is unreachable: {redact(str(exc))}"
+    if response.status_code != 200:
+        return False, f"grader health returned HTTP {response.status_code}"
+    return True, "isolated grader is reachable"
 
 
 class FixtureCodexRunner:

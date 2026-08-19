@@ -23,6 +23,7 @@ separation: untrusted execution never shares a credentialed process boundary.
 | CI artifact | Untrusted until contract/digest validation | Become deterministic evidence, never instructions. |
 | Codex output | Untrusted until schema validation | Become qualitative evidence only after validation. |
 | Tutor/worker | Trusted | GitHub orchestration and transactional state updates. |
+| Isolated grader | Trusted but credential-minimal | Receive one bounded prompt and return one schema-valid review. |
 
 ## Untrusted execution
 
@@ -42,9 +43,12 @@ are delimited untrusted data. They cannot change grading instructions, request
 tools, reveal secrets, or override the output schema. Injection-like patterns
 are surfaced as flags, not followed.
 
-The Codex subprocess receives no GitHub-write, dashboard, webhook, or agent
-credential. Its sandbox is read-only, approvals are disabled, the session is
-ephemeral, and the working directory contains only the schema/output contract.
+The stateful worker cannot launch Codex directly. It talks over an owner-only
+Unix socket to a separate grader service. That service has the model credential
+and Codex home, but no tutor state, configuration, GitHub credential, learner
+checkout, or TCP listener. The Codex subprocess uses a read-only sandbox, no
+approvals, an ephemeral session, and an empty working directory containing only
+the schema/output contract.
 
 ## Web and API
 

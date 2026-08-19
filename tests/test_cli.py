@@ -266,3 +266,41 @@ def test_cli_remote_assignment_result_rendering(
     existing = runner.invoke(app, [*prefix, "next"])
     assert existing.exit_code == 0, existing.output
     assert "remains active" in existing.output
+
+
+def test_cli_grader_uses_owner_only_unix_socket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = CliRunner()
+    socket_path = tmp_path / "grader" / "grader.sock"
+    socket_path.parent.mkdir()
+    socket_path.write_text("do not replace", encoding="utf-8")
+
+    refused = runner.invoke(app, ["grader", "--socket", str(socket_path)])
+    assert refused.exit_code == 1
+    assert "Refusing to replace non-socket" in refused.output
+
+    socket_path.unlink()
+    captured: dict[str, object] = {}
+
+    def fake_run(application: object, **options: object) -> None:
+        captured["application"] = application
+        captured.update(options)
+
+    monkeypatch.setattr("adaptive_tutor.cli.uvicorn.run", fake_run)
+    started = runner.invoke(
+        app,
+        [
+            "grader",
+            "--socket",
+            str(socket_path),
+            "--model",
+            "test-model",
+            "--timeout-seconds",
+            "45",
+        ],
+    )
+    assert started.exit_code == 0, started.output
+    assert captured["uds"] == str(socket_path.resolve())
+    assert captured["access_log"] is False
+    assert socket_path.parent.stat().st_mode & 0o777 == 0o700

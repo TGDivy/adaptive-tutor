@@ -51,21 +51,24 @@ adaptive-tutor doctor --offline
 The loader reports a missing file, invalid schema, cyclic prerequisite,
 unknown profile weight, or escaped reference path explicitly.
 
-## Codex CLI unavailable or grading fails
+## Isolated grader unavailable or grading fails
 
-Run these as the same Unix/container user as the worker:
+Check the grader and worker sides of the Unix socket:
 
 ```bash
-codex --version
-adaptive-tutor doctor --offline
+docker compose --profile remote ps
+docker compose logs --tail=100 grader worker
+docker compose exec worker adaptive-tutor doctor --offline
 ```
 
-Verify `PATH`, `HOME`, `CODEX_HOME`, model access, API-key presence in the
-worker-only environment, CA/proxy settings, and write access to the Codex home.
-Timeouts are retryable; malformed final output is a schema failure and is not
-learner evidence. The official [Codex CLI](https://learn.chatgpt.com/docs/codex/cli)
-and [non-interactive mode](https://learn.chatgpt.com/docs/codex/non-interactive-mode)
-pages document installation and automation authentication.
+For systemd, inspect `adaptive-tutor-grader.service` and confirm the worker has
+`ADAPTIVE_TUTOR_GRADER_SOCKET=/run/adaptive-tutor-grader/grader.sock`. Verify
+the Codex executable, model access, API key in the grader-only environment,
+CA/proxy settings, and write access to the grader Codex home. Never solve a
+socket failure by copying the model key into the worker. Timeouts are
+retryable; malformed final output is a schema failure and is not learner
+evidence. See the official [Codex CLI documentation](https://developers.openai.com/codex/cli/)
+for installation and authentication.
 
 ## GitHub repository check fails
 

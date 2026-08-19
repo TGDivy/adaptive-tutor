@@ -58,16 +58,39 @@ services:
     <<: *runtime
     profiles: ["remote"]
     command: ["worker"]
+    environment:
+      ADAPTIVE_TUTOR_CONFIG: /etc/adaptive-tutor/config.yaml
+      ADAPTIVE_TUTOR_GRADER_SOCKET: /run/adaptive-tutor-grader/grader.sock
+      HOME: /var/lib/adaptive-tutor
     env_file:
       - path: ${TUTOR_RUNTIME_DIR:-./runtime}/worker.env
         required: false
     volumes:
       - ${TUTOR_RUNTIME_DIR:-./runtime}/config:/etc/adaptive-tutor:ro
       - ${TUTOR_RUNTIME_DIR:-./runtime}/state:/var/lib/adaptive-tutor
-      - ${TUTOR_RUNTIME_DIR:-./runtime}/codex:/var/lib/adaptive-tutor-codex
+      - ${TUTOR_RUNTIME_DIR:-./runtime}/grader-run:/run/adaptive-tutor-grader
     depends_on:
       tutor:
         condition: service_healthy
+      grader:
+        condition: service_started
+    healthcheck:
+      disable: true
+
+  grader:
+    <<: *runtime
+    profiles: ["remote"]
+    command: ["grader", "--socket", "/run/adaptive-tutor-grader/grader.sock"]
+    working_dir: /var/lib/adaptive-tutor-grader
+    environment:
+      HOME: /var/lib/adaptive-tutor-grader
+      CODEX_HOME: /var/lib/adaptive-tutor-grader/codex
+    env_file:
+      - path: ${TUTOR_RUNTIME_DIR:-./runtime}/grader.env
+        required: false
+    volumes:
+      - ${TUTOR_RUNTIME_DIR:-./runtime}/codex:/var/lib/adaptive-tutor-grader
+      - ${TUTOR_RUNTIME_DIR:-./runtime}/grader-run:/run/adaptive-tutor-grader
     healthcheck:
       disable: true
 

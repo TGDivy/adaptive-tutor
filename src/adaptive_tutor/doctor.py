@@ -9,6 +9,7 @@ from typing import Literal
 
 import httpx
 
+from .codex import grader_health
 from .config import TutorSettings
 from .db import Database
 from .github import GitHubAuth, GitHubClient
@@ -113,19 +114,28 @@ class Doctor:
     def _codex(self) -> DoctorCheck:
         if not self.settings.codex.enabled:
             return DoctorCheck(
-                "Codex CLI",
+                "Codex grader",
                 "warn",
                 "Qualitative grading is disabled",
                 "Enable codex after installing and authenticating the CLI.",
             )
-        if not shutil.which(self.settings.codex.command):
+        socket_path = self.settings.codex.socket_path
+        if socket_path is None:
             return DoctorCheck(
-                "Codex CLI",
+                "Codex grader",
                 "fail",
-                f"'{self.settings.codex.command}' is not on PATH",
-                "Install Codex CLI and complete its authentication flow.",
+                "The isolated grader socket is not configured",
+                "Start the isolated grader and set ADAPTIVE_TUTOR_GRADER_SOCKET.",
             )
-        return DoctorCheck("Codex CLI", "pass", "available for short-lived grading workers")
+        healthy, detail = grader_health(socket_path)
+        if not healthy:
+            return DoctorCheck(
+                "Codex grader",
+                "fail",
+                detail,
+                "Check the grader service, socket mount, model credential, and logs.",
+            )
+        return DoctorCheck("Codex grader", "pass", detail)
 
     @staticmethod
     def _tooling() -> DoctorCheck:

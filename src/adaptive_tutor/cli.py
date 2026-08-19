@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from .assignments import AssignmentService
 from .codex import CodexRunner
 from .config import (
     DEFAULT_CONFIG_PATH,
+    CodexSettings,
     TutorSettings,
     load_settings,
     write_initial_config,
@@ -34,6 +36,7 @@ from .doctor import Doctor
 from .errors import TutorError
 from .evaluation import EvaluationService
 from .github import GitHubClient
+from .grader import create_grader_app
 from .jobs import JobQueue, Worker
 from .learner import LearnerModel
 from .models import LearnerContext
@@ -571,6 +574,45 @@ def serve(ctx: typer.Context) -> None:
         log_level="info",
         access_log=False,
     )
+
+
+@app.command(hidden=True)
+def grader(
+    socket: Path = typer.Option(
+        Path("/run/adaptive-tutor-grader/grader.sock"),
+        help="Owner-only Unix socket shared with the durable worker.",
+    ),
+    command: str = typer.Option("codex", help="Codex CLI executable."),
+    model: str | None = typer.Option(None, help="Optional explicit grading model."),
+    timeout_seconds: int = typer.Option(600, min=30, max=3600),
+) -> None:
+    """Run the credential-bearing grader without tutor state or GitHub access."""
+    socket_path = socket.expanduser().resolve()
+    socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    socket_path.parent.chmod(0o700)
+    if socket_path.exists() or socket_path.is_symlink():
+        if not socket_path.is_socket():
+            _abort(f"Refusing to replace non-socket grader path: {socket_path}")
+        socket_path.unlink()
+    settings = CodexSettings(
+        command=command,
+        model=model,
+        timeout_seconds=timeout_seconds,
+        enabled=True,
+        sandbox="read-only",
+    )
+    old_umask = os.umask(0o077)
+    try:
+        uvicorn.run(
+            create_grader_app(settings),
+            uds=str(socket_path),
+            log_level="info",
+            access_log=False,
+        )
+    finally:
+        os.umask(old_umask)
+        if socket_path.is_socket():
+            socket_path.unlink()
 
 
 @app.command(hidden=True)

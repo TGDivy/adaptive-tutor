@@ -19,7 +19,9 @@ GitHub webhook ── HMAC verify ──► events ──► durable jobs
                                       │             │
                            GitHub reads/writes       │ delimited prompt
                                       │             ▼
-                                      │     short-lived Codex worker
+                                      │     owner-only Unix socket
+                                      │             │
+                                      │     isolated Codex grader
                                       │       read-only + schema
                                       └──────┬──────┘
                                              ▼
@@ -56,8 +58,10 @@ renew through retries, and retain classified failure diagnostics.
 ### Evaluator
 
 Deterministic evidence and untrusted submission content stay separate from
-trusted instructions, rubric, and references. The Codex process is ephemeral;
-its final message must satisfy the exact Pydantic-derived JSON Schema.
+trusted instructions, rubric, and references. The stateful worker sends one
+bounded prompt to a Unix-socket grader that cannot see SQLite, configuration,
+GitHub credentials, or a learner checkout. Its ephemeral Codex process must
+return the exact Pydantic-derived JSON Schema.
 
 ### Learner model
 
@@ -79,11 +83,11 @@ for a private self-hosted tutor.
 
 ## Deployment boundaries
 
-- The persistent host runs the dashboard, event worker, SQLite, and read-only
-  Codex subprocesses.
+- The persistent host runs the dashboard, event worker, SQLite, and an isolated
+  Unix-socket grader in separate container/systemd filesystem boundaries.
 - Learner code runs only in credential-free ephemeral CI.
-- GitHub-write and model credentials are available only to trusted integration
-  processes and are filtered before child execution.
+- GitHub-write credentials are available only to tutor/worker processes; model
+  credentials are available only to the grader. Neither reaches learner code.
 - Public product source contains no private curriculum or learner repository.
 
 See [Security](security.md) for threat assumptions and

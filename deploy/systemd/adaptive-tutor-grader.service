@@ -1,0 +1,44 @@
+[Unit]
+Description=Adaptive Tutor isolated Codex grader
+Documentation=https://tgdivy.github.io/adaptive-tutor/operations/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=adaptive-tutor
+Group=adaptive-tutor
+WorkingDirectory=/var/lib/adaptive-tutor-grader
+Environment=HOME=/var/lib/adaptive-tutor-grader
+Environment=CODEX_HOME=/var/lib/adaptive-tutor-grader/codex
+Environment=PATH=/opt/adaptive-tutor/bin:/usr/local/bin:/usr/bin
+EnvironmentFile=-/etc/adaptive-tutor/grader.env
+RuntimeDirectory=adaptive-tutor-grader
+RuntimeDirectoryMode=0700
+ExecStart=/opt/adaptive-tutor/bin/adaptive-tutor grader --socket /run/adaptive-tutor-grader/grader.sock
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/adaptive-tutor-grader /run/adaptive-tutor-grader
+InaccessiblePaths=/var/lib/adaptive-tutor /etc/adaptive-tutor
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

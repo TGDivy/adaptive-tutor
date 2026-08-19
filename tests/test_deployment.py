@@ -23,6 +23,7 @@ def test_compose_is_loopback_rootless_and_credential_separated() -> None:
     payload = yaml.safe_load((ROOT / "deploy" / "compose.yaml").read_text(encoding="utf-8"))
     tutor = payload["services"]["tutor"]
     worker = payload["services"]["worker"]
+    grader = payload["services"]["grader"]
 
     assert tutor["ports"] == ["127.0.0.1:${TUTOR_PORT:-8765}:8765"]
     assert tutor["read_only"] is True
@@ -30,7 +31,22 @@ def test_compose_is_loopback_rootless_and_credential_separated() -> None:
     assert tutor["user"] == "${TUTOR_UID:-1000}:${TUTOR_GID:-1000}"
     assert "worker.env" not in str(tutor["env_file"])
     assert "worker.env" in str(worker["env_file"])
+    assert "grader.env" not in str(worker["env_file"])
+    assert "grader.env" in str(grader["env_file"])
+    assert all(
+        not str(volume).endswith(":/var/lib/adaptive-tutor")
+        for volume in grader["volumes"]
+    )
+    assert all(
+        not str(volume).endswith(":/etc/adaptive-tutor:ro")
+        for volume in grader["volumes"]
+    )
+    assert "/run/adaptive-tutor-grader" in str(grader["volumes"])
+    assert "/run/adaptive-tutor-grader" in str(worker["volumes"])
+    assert "/var/lib/adaptive-tutor-grader" in str(grader["volumes"])
+    assert "codex" not in str(worker["volumes"])
     assert worker["profiles"] == ["remote"]
+    assert grader["profiles"] == ["remote"]
 
 
 def test_systemd_units_restart_and_harden_services() -> None:
@@ -42,6 +58,13 @@ def test_systemd_units_restart_and_harden_services() -> None:
         assert "ProtectSystem=strict" in content
         assert "CapabilityBoundingSet=\n" in content
         assert "ReadWritePaths=/var/lib/adaptive-tutor" in content
+    grader = (unit_root / "adaptive-tutor-grader.service").read_text(encoding="utf-8")
+    assert "Restart=on-failure" in grader
+    assert "InaccessiblePaths=/var/lib/adaptive-tutor /etc/adaptive-tutor" in grader
+    assert "ReadWritePaths=/var/lib/adaptive-tutor-grader" in grader
+    worker = (unit_root / "adaptive-tutor-worker.service").read_text(encoding="utf-8")
+    assert "Requires=adaptive-tutor.service adaptive-tutor-grader.service" in worker
+    assert "ADAPTIVE_TUTOR_GRADER_SOCKET=" in worker
     timer = (unit_root / "adaptive-tutor-backup.timer").read_text(encoding="utf-8")
     assert "OnCalendar=daily" in timer
     assert "Persistent=true" in timer

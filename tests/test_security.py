@@ -72,6 +72,7 @@ def test_untrusted_environment_removes_every_credential(tmp_path: Path) -> None:
     assert codex["OPENAI_API_KEY"] == "model-secret"
     assert codex["USER"] == "learner"
     assert "GITHUB_TOKEN" not in codex
+    assert "ADAPTIVE_TUTOR_CONFIG" not in codex
     assert "SSH_AUTH_SOCK" not in codex
 
 

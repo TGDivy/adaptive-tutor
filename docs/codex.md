@@ -1,18 +1,31 @@
-# Codex worker
+# Codex grader
 
-Adaptive Tutor uses Codex as a short-lived qualitative grader, not as its state
-store or scheduler. The worker receives one bounded prompt and must produce one
-schema-valid final response.
+Adaptive Tutor uses Codex for one bounded qualitative review at a time. Codex
+is not the scheduler, state store, or authority for learner evidence.
 
-## Supported interface
+## Isolation boundary
 
-The implementation follows the official OpenAI documentation for
-[Codex CLI](https://learn.chatgpt.com/docs/codex/cli) and
-[non-interactive `codex exec`](https://learn.chatgpt.com/docs/codex/non-interactive-mode).
-Those docs describe repeatable pipeline use, explicit sandbox settings,
-`--output-schema`, ephemeral runs, and API-key authentication for automation.
+The stateful worker never launches Codex. It sends a bounded trusted prompt to
+an owner-only Unix socket and receives a schema-valid response. A separate
+`grader` service owns that socket and is the only service given model
+authentication or a writable `CODEX_HOME`.
 
-The effective invocation uses:
+The grader has no mount for:
+
+- the tutor configuration or SQLite database;
+- GitHub App keys or development tokens;
+- learner repositories or CI artifacts; or
+- dashboard and webhook secrets.
+
+Compose enforces this with separate mounts and environment files. The systemd
+grader uses a private mount namespace with `/var/lib/adaptive-tutor` and
+`/etc/adaptive-tutor` inaccessible. The socket is mode-restricted by an
+owner-only runtime directory and is never exposed on TCP.
+
+## Process contract
+
+Inside the isolated service, each request starts one ephemeral Codex process in
+a new empty temporary directory. The verified invocation surface is:
 
 ```text
 codex --ask-for-approval never exec \
@@ -24,51 +37,54 @@ codex --ask-for-approval never exec \
   --output-last-message evaluation.json -
 ```
 
-The prompt arrives on standard input rather than a shell-expanded argument. A
-configured model is passed as an explicit argument; otherwise the authenticated
-Codex installation chooses its configured default.
+The prompt arrives on standard input, not through a shell-expanded argument.
+The process receives only locale, model authentication, Codex home,
+certificate, and proxy variables. Its session is ephemeral, approvals are
+disabled, and its working directory contains only the output schema and final
+response path. See the official [Codex CLI documentation](https://developers.openai.com/codex/cli/)
+for current installation and authentication guidance.
+
+## Socket protocol
+
+`POST /v1/grade` accepts only `{"prompt": "..."}`. The request and UTF-8
+prompt are independently limited to 2 MiB. Successful responses contain one
+`QualitativeEvaluation` plus non-negative token counts. Errors use a bounded,
+redacted `model_failure` or `schema_failure` contract.
+
+The stateful worker validates the response again before recording output
+digests, usage, cost, status, and duration. Invalid or unavailable grader
+responses never update learner evidence.
 
 ## Authentication
 
-For unattended workers, use a dedicated, scoped API key available only to the
-worker process. Docker Compose reads it only from `runtime/worker.env`; the
-systemd worker reads only `/etc/adaptive-tutor/worker.env`. Interactive Codex
-account authentication can live in an owner-only `CODEX_HOME`, but API keys are
-the simpler rotation path for automation.
+For unattended operation, put a dedicated model API key only in:
 
-Never place a model key in curriculum prompts, assignment repositories,
-dashboard configuration, CI evidence, or GitHub Actions that execute learner
-code.
+- Compose: `runtime/grader.env`; or
+- systemd: `/etc/adaptive-tutor/grader.env`.
 
-## Environment filtering
-
-The child receives a small allowlist: locale, timezone, home, Codex home, model
-authentication, certificate, and proxy variables. Repository-write,
-dashboard, webhook, and personal-agent variables are excluded. Git interactive
-credential prompts and system Git configuration are disabled.
-
-The worker runs in a new temporary directory, with an ephemeral Codex session
-and read-only sandbox. It has no learner repository checkout to modify.
-
-## Output and usage
-
-JSON-lines process events are used only to collect token usage. The final
-structured output file is validated against `QualitativeEvaluation` before
-being persisted. Model invocation rows record purpose, model, prompt version,
-input/output digests, token counts, configured cost, status, duration, and a
-redacted bounded error when applicable.
-
-Prompts and model outputs are not trusted merely because they came from a model.
-The application schema and transaction boundary remain authoritative.
+Never put a model key in `tutor.env`, `worker.env`, YAML, curriculum prompts,
+assignment repositories, or evaluation Actions. Interactive account state may
+instead live in the grader's owner-only Codex home, but it must remain isolated
+from tutor state.
 
 ## Diagnostics
 
+For Compose:
+
 ```bash
-codex --version
-adaptive-tutor doctor --offline
-adaptive-tutor worker --once
+docker compose --profile remote ps
+docker compose logs --tail=100 grader
+docker compose exec worker adaptive-tutor doctor --offline
 ```
 
-If grading times out, verify CLI authentication under the service account,
-certificate/proxy settings, `CODEX_HOME` permissions, model access, and the
-configured timeout. See [Troubleshooting](troubleshooting.md).
+For systemd:
+
+```bash
+systemctl status adaptive-tutor-grader.service
+journalctl -u adaptive-tutor-grader.service --since today
+sudo -u adaptive-tutor codex --version
+```
+
+The doctor reports whether the Unix socket exists and answers its health probe.
+Timeouts and transport outages are retryable; malformed model output is a
+non-evidence schema failure.

@@ -44,7 +44,9 @@ RUN apt-get update \
     && useradd --uid 10001 --gid adaptive-tutor --home-dir /var/lib/adaptive-tutor \
         --shell /usr/sbin/nologin adaptive-tutor \
     && install -d -m 0700 -o adaptive-tutor -g adaptive-tutor \
-        /etc/adaptive-tutor /var/lib/adaptive-tutor /var/lib/adaptive-tutor-codex
+        /etc/adaptive-tutor /var/lib/adaptive-tutor /var/lib/adaptive-tutor-codex \
+        /var/lib/adaptive-tutor-grader /var/lib/adaptive-tutor-grader/codex \
+        /run/adaptive-tutor-grader
 
 USER 10001:10001
 WORKDIR /var/lib/adaptive-tutor

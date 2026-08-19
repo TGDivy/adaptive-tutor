@@ -39,11 +39,11 @@ def validate_compose(payload: dict[str, Any], failures: list[str]) -> None:
     if not isinstance(services, dict):
         return
     require(
-        {"tutor", "worker", "initializer"}.issubset(services),
-        "compose must define tutor, worker, and initializer services",
+        {"tutor", "worker", "grader", "initializer"}.issubset(services),
+        "compose must define tutor, worker, grader, and initializer services",
         failures,
     )
-    for name in ("tutor", "worker", "initializer"):
+    for name in ("tutor", "worker", "grader", "initializer"):
         service = services.get(name, {})
         if not isinstance(service, dict):
             failures.append(f"compose service {name} is invalid")
@@ -63,6 +63,7 @@ def validate_compose(payload: dict[str, Any], failures: list[str]) -> None:
         failures,
     )
     worker = services.get("worker", {})
+    grader = services.get("grader", {})
     require(
         isinstance(worker, dict) and "remote" in worker.get("profiles", []),
         "remote worker must be explicitly profile-gated",
@@ -70,8 +71,40 @@ def validate_compose(payload: dict[str, Any], failures: list[str]) -> None:
     )
     tutor_env = str(tutor.get("env_file", "")) if isinstance(tutor, dict) else ""
     worker_env = str(worker.get("env_file", "")) if isinstance(worker, dict) else ""
+    grader_env = str(grader.get("env_file", "")) if isinstance(grader, dict) else ""
     require("worker.env" not in tutor_env, "model credentials reached tutor service", failures)
-    require("worker.env" in worker_env, "worker-only environment file is missing", failures)
+    require("worker.env" in worker_env, "worker environment file is missing", failures)
+    require("grader.env" not in worker_env, "model credentials reached worker service", failures)
+    require("grader.env" in grader_env, "grader-only environment file is missing", failures)
+    grader_volumes = grader.get("volumes", []) if isinstance(grader, dict) else []
+    worker_volumes = worker.get("volumes", []) if isinstance(worker, dict) else []
+    grader_targets = _volume_targets(grader_volumes)
+    worker_targets = _volume_targets(worker_volumes)
+    require(
+        "/var/lib/adaptive-tutor" not in grader_targets,
+        "grader can read tutor state",
+        failures,
+    )
+    require(
+        "/etc/adaptive-tutor" not in grader_targets,
+        "grader can read tutor config",
+        failures,
+    )
+    require(
+        "/run/adaptive-tutor-grader" in grader_targets,
+        "grader socket volume is missing",
+        failures,
+    )
+    require(
+        "/run/adaptive-tutor-grader" in worker_targets,
+        "worker cannot reach grader socket",
+        failures,
+    )
+    require(
+        all("codex" not in target for target in worker_targets),
+        "worker can read model credentials",
+        failures,
+    )
 
 
 def validate_dockerfile(failures: list[str]) -> None:
@@ -93,11 +126,22 @@ def validate_dockerfile(failures: list[str]) -> None:
     require("@openai/codex@${CODEX_VERSION}" in content, "Codex CLI must be pinned", failures)
 
 
+def _volume_targets(volumes: list[Any]) -> set[str]:
+    targets: set[str] = set()
+    for item in volumes:
+        value = str(item)
+        if value.endswith((":ro", ":rw")):
+            value = value.rsplit(":", 1)[0]
+        targets.add(value.rsplit(":", 1)[-1])
+    return targets
+
+
 def validate_systemd(failures: list[str]) -> None:
     unit_root = ROOT / "deploy" / "systemd"
     required = {
         "adaptive-tutor.service",
         "adaptive-tutor-worker.service",
+        "adaptive-tutor-grader.service",
         "adaptive-tutor-backup.service",
         "adaptive-tutor-backup.timer",
     }
@@ -115,6 +159,12 @@ def validate_systemd(failures: list[str]) -> None:
             require(directive in content, f"{name} is missing {directive}", failures)
     timer = (unit_root / "adaptive-tutor-backup.timer").read_text(encoding="utf-8")
     require("Persistent=true" in timer, "backup timer must catch up after downtime", failures)
+    grader = (unit_root / "adaptive-tutor-grader.service").read_text(encoding="utf-8")
+    require(
+        "InaccessiblePaths=/var/lib/adaptive-tutor /etc/adaptive-tutor" in grader,
+        "grader must not see tutor state or configuration",
+        failures,
+    )
 
 
 def validate_operations(failures: list[str]) -> None:

@@ -43,6 +43,7 @@ def test_initial_config_keeps_generated_secrets_out_of_yaml(
     assert raw["github"]["webhook_url"] == "https://tutor.example.test/"
     assert raw["server"]["allow_unauthenticated_loopback"] is False
     assert raw["server"]["host"] == "0.0.0.0"  # noqa: S104 - expected container bind
+    assert raw["codex"]["enabled"] is False
     secrets_text = secrets_path.read_text(encoding="utf-8")
     assert "ADAPTIVE_TUTOR_API_TOKEN=" in secrets_text
     assert "ADAPTIVE_TUTOR_WEBHOOK_SECRET=" in secrets_text
@@ -52,6 +53,11 @@ def test_initial_config_keeps_generated_secrets_out_of_yaml(
     assert settings.api_token
     assert settings.webhook_secret
     assert settings.github.webhook_url == "https://tutor.example.test"
+
+    socket_path = tmp_path / "grader" / "grader.sock"
+    monkeypatch.setenv("ADAPTIVE_TUTOR_GRADER_SOCKET", str(socket_path))
+    overridden = load_settings(config_path, require_file=True)
+    assert overridden.codex.socket_path == socket_path.resolve()
 
 
 def test_initial_config_refuses_overwrite_without_force(tmp_path: Path) -> None:

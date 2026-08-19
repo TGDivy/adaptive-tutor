@@ -67,7 +67,10 @@ GitHub webhook ──► durable event/job queue ──► evaluator orchestrati
                                                         │
 credential-free Actions ──► normalized evidence ────────┤
                                                         ▼
-                                                bounded Codex worker
+                                                durable state worker
+                                                        │ Unix socket
+                                                        ▼
+                                                isolated Codex grader
                                                         │
                                                         ▼
                          SQLite learner model ◄── validated transaction
@@ -77,7 +80,8 @@ credential-free Actions ──► normalized evidence ────────�
 
 The webhook request only authenticates, persists, and enqueues. Learner code
 runs in ephemeral CI without tutor credentials. Qualitative review runs as a
-short-lived, read-only worker; SQLite—not model history—is the system of record.
+short-lived, read-only process in a service that cannot see tutor state or
+GitHub credentials; SQLite—not model history—is the system of record.
 
 ## Security model
 
@@ -97,7 +101,7 @@ before enabling GitHub or model credentials.
 ## Deploy
 
 Hardened Docker Compose and systemd paths include non-root/read-only services,
-worker-only model credentials, health checks, restart recovery, daily online
+a grader-only model credential, health checks, restart recovery, daily online
 backups, upgrade/rollback, and disaster recovery procedures.
 
 ```bash
