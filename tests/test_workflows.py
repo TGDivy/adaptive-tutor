@@ -39,6 +39,9 @@ def test_ci_exercises_package_docs_container_and_privacy() -> None:
         "adaptive-tutor demo",
         "docker build",
         "--network none",
+        "bubblewrap",
+        "apparmor_restrict_unprivileged_userns",
+        "bwrap --die-with-parent --unshare-all",
     ):
         assert required in content
 
