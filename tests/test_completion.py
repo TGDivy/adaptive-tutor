@@ -32,7 +32,6 @@ def test_completion_ledger_has_tracked_independent_evidence() -> None:
         "screenshots",
         "controlled_end_to_end",
         "private_repositories",
-        "deployed_runtime",
     ]
 
 

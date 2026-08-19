@@ -39,6 +39,25 @@ curl --fail http://127.0.0.1:8765/readyz
 docker compose logs --tail=100 tutor
 ```
 
+### Verify a deployed runtime
+
+The repository includes a destructive-to-itself, disposable Compose proof. It
+builds the current image, initializes temporary state, verifies health and API
+authorization, inspects runtime hardening and loopback publication, terminates
+the service process to prove automatic restart and state recovery, creates an
+integrity-checked backup, writes sanitized evidence, and removes the temporary
+project:
+
+```bash
+./scripts/prove-deployed-runtime
+./scripts/check-operational-evidence
+```
+
+Run it from a clean release checkout with a working Docker daemon. The
+`--skip-build` option is only for a locally prepared `adaptive-tutor:local`
+image; the prover rejects that image unless its source-revision label exactly
+matches the checkout.
+
 Use an SSH tunnel or authenticated private reverse proxy for remote access.
 Keep the published Compose port loopback-bound. If TLS terminates at a proxy,
 allow only trusted users and preserve the service's security headers.

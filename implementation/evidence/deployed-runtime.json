@@ -1,0 +1,44 @@
+{
+  "assertions": {
+    "authenticated_api": true,
+    "authorization_enforced": true,
+    "backup_integrity": true,
+    "capabilities_dropped": true,
+    "crash_restart_recovered": true,
+    "image_revision_matches": true,
+    "immutable_root_filesystem": true,
+    "loopback_binding": true,
+    "migrations_applied": true,
+    "no_privilege_escalation": true,
+    "non_root_runtime": true,
+    "persistent_state_recovered": true,
+    "readiness_healthy": true
+  },
+  "deployment_path": "docker_compose",
+  "evidence_kind": "deployed_runtime",
+  "generated_at": "2026-08-19T23:00:50+00:00",
+  "observations": {
+    "authenticated_status": 200,
+    "backup_integrity": "ok",
+    "migration_count": 7,
+    "readiness_status": 200,
+    "restart_count": 1,
+    "unauthenticated_status": 401
+  },
+  "runtime": "disposable_local_container",
+  "sanitized": true,
+  "schema_version": "1.0",
+  "source_digest": "sha256:79a4ea4e1efc712fea52551223487134d6e8478180a2b947aea7f637b9fe5823",
+  "source_files": [
+    ".dockerignore",
+    "Dockerfile",
+    "deploy/compose.yaml",
+    "deploy/prepare-compose.sh",
+    "scripts/prove-deployed-runtime",
+    "src/adaptive_tutor/cli.py",
+    "src/adaptive_tutor/config.py",
+    "src/adaptive_tutor/dashboard.py",
+    "src/adaptive_tutor/db.py"
+  ],
+  "source_revision": "5bf7942745a69304914abb98e6797ea86680953a"
+}

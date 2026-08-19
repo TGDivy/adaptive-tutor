@@ -147,6 +147,18 @@ def validate_dockerfile(failures: list[str]) -> None:
     require("uv sync --locked" in content, "container dependencies must use uv.lock", failures)
     require("@openai/codex@${CODEX_VERSION}" in content, "Codex CLI must be pinned", failures)
 
+    ignore_path = ROOT / ".dockerignore"
+    try:
+        ignored = set(ignore_path.read_text(encoding="utf-8").splitlines())
+    except OSError as exc:
+        failures.append(f".dockerignore is unreadable: {exc}")
+    else:
+        require(
+            {".env", "**/.env"}.issubset(ignored),
+            "Docker build context must exclude owner-only environment files",
+            failures,
+        )
+
 
 def _volume_targets(volumes: list[Any]) -> set[str]:
     targets: set[str] = set()

@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Validate sanitized, current operational evidence against product sources."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_EVIDENCE = ROOT / "implementation" / "evidence" / "deployed-runtime.json"
+REQUIRED_ASSERTIONS = {
+    "authenticated_api",
+    "authorization_enforced",
+    "backup_integrity",
+    "capabilities_dropped",
+    "crash_restart_recovered",
+    "image_revision_matches",
+    "immutable_root_filesystem",
+    "loopback_binding",
+    "migrations_applied",
+    "no_privilege_escalation",
+    "non_root_runtime",
+    "persistent_state_recovered",
+    "readiness_healthy",
+}
+EXPECTED_FIELDS = {
+    "schema_version",
+    "evidence_kind",
+    "generated_at",
+    "source_revision",
+    "source_files",
+    "source_digest",
+    "deployment_path",
+    "runtime",
+    "assertions",
+    "observations",
+    "sanitized",
+}
+
+
+def _source_digest(paths: list[str], failures: list[str]) -> str:
+    digest = hashlib.sha256()
+    for value in paths:
+        path = PurePosixPath(value)
+        target = ROOT / value
+        if path.is_absolute() or ".." in path.parts or path.as_posix() != value:
+            failures.append(f"unsafe operational evidence source path: {value}")
+            continue
+        if not target.is_file():
+            failures.append(f"missing operational evidence source: {value}")
+            continue
+        digest.update(value.encode())
+        digest.update(b"\0")
+        digest.update(target.read_bytes())
+        digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
+
+
+def _positive_integer(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def validate(payload: Any, *, now: datetime | None = None) -> list[str]:
+    failures: list[str] = []
+    if not isinstance(payload, dict):
+        return ["operational evidence must contain an object"]
+    if set(payload) != EXPECTED_FIELDS:
+        failures.append("deployed-runtime evidence fields do not match the strict schema")
+    if payload.get("schema_version") != "1.0":
+        failures.append("deployed-runtime schema_version must be 1.0")
+    if payload.get("evidence_kind") != "deployed_runtime":
+        failures.append("deployed-runtime evidence kind is invalid")
+    if payload.get("deployment_path") != "docker_compose":
+        failures.append("deployed-runtime proof did not exercise Docker Compose")
+    if payload.get("runtime") != "disposable_local_container":
+        failures.append("deployed-runtime proof has an unknown runtime class")
+    if payload.get("sanitized") is not True:
+        failures.append("deployed-runtime evidence is not marked sanitized")
+    revision = payload.get("source_revision")
+    if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        failures.append("deployed-runtime source revision is invalid")
+    sources = payload.get("source_files")
+    if not isinstance(sources, list) or not all(isinstance(value, str) for value in sources):
+        failures.append("deployed-runtime source_files must be a path list")
+        sources = []
+    if _source_digest(sources, failures) != payload.get("source_digest"):
+        failures.append("deployed-runtime evidence is stale relative to product sources")
+    assertions = payload.get("assertions")
+    if not isinstance(assertions, dict) or set(assertions) != REQUIRED_ASSERTIONS:
+        failures.append("deployed-runtime assertions do not match the required set")
+    elif not all(value is True for value in assertions.values()):
+        failures.append("deployed-runtime proof contains a failed assertion")
+    observations = payload.get("observations")
+    if not isinstance(observations, dict):
+        failures.append("deployed-runtime observations must be an object")
+    else:
+        expected = {
+            "authenticated_status": 200,
+            "backup_integrity": "ok",
+            "readiness_status": 200,
+            "unauthenticated_status": 401,
+        }
+        for name, value in expected.items():
+            if observations.get(name) != value:
+                failures.append(f"deployed-runtime observation {name} is invalid")
+        if _positive_integer(observations.get("migration_count")) < 1:
+            failures.append("deployed-runtime proof observed no migrations")
+        if _positive_integer(observations.get("restart_count")) < 1:
+            failures.append("deployed-runtime proof observed no crash restart")
+    generated_at = payload.get("generated_at")
+    try:
+        generated = datetime.fromisoformat(str(generated_at))
+    except ValueError:
+        failures.append("deployed-runtime generated_at is invalid")
+    else:
+        if generated.tzinfo is None:
+            failures.append("deployed-runtime generated_at must include a timezone")
+        else:
+            current = now or datetime.now(UTC)
+            if generated > current + timedelta(minutes=5):
+                failures.append("deployed-runtime evidence is dated in the future")
+            if generated < current - timedelta(days=45):
+                failures.append("deployed-runtime evidence is older than 45 days")
+    return failures
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--evidence", type=Path, default=DEFAULT_EVIDENCE)
+    args = parser.parse_args()
+    try:
+        payload = json.loads(args.evidence.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Operational evidence validation failed: {exc}", file=sys.stderr)
+        return 1
+    failures = validate(payload)
+    if failures:
+        print("Operational evidence validation failed:", file=sys.stderr)
+        for failure in failures:
+            print(f"  - {failure}", file=sys.stderr)
+        return 1
+    print("Operational evidence validation: PASS (deployed runtime)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -175,6 +175,15 @@
       ]
     },
     {"id": "private_repositories", "status": "pending", "evidence": []},
-    {"id": "deployed_runtime", "status": "pending", "evidence": []}
+    {
+      "id": "deployed_runtime",
+      "status": "complete",
+      "evidence": [
+        "scripts/prove-deployed-runtime",
+        "scripts/check-operational-evidence",
+        "implementation/evidence/deployed-runtime.json",
+        "tests/test_operational_evidence.py"
+      ]
+    }
   ]
 }

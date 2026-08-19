@@ -278,6 +278,10 @@ def main() -> int:
                 ),
                 run("documentation", [python, "scripts/check-docs"]),
                 run("deployment", [python, "scripts/check-deployment"]),
+                run(
+                    "operational evidence",
+                    [python, "scripts/check-operational-evidence"],
+                ),
                 run("screenshots", [python, "scripts/check-screenshots"]),
                 check_cli_and_demo(),
             ]
