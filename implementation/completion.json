@@ -3,27 +3,168 @@
   "updated_at": "2026-08-19",
   "policy": "Evidence is verified by scripts/check-completion; status is descriptive only.",
   "requirements": [
-    {"id": "cli", "status": "in_progress", "evidence": []},
-    {"id": "demo", "status": "in_progress", "evidence": []},
-    {"id": "dashboard_api", "status": "pending", "evidence": []},
-    {"id": "curriculum_loading", "status": "in_progress", "evidence": ["curricula/systems-foundations"]},
-    {"id": "learner_model", "status": "in_progress", "evidence": ["src/adaptive_tutor/learner.py"]},
-    {"id": "adaptive_scheduler", "status": "in_progress", "evidence": ["src/adaptive_tutor/scheduler.py"]},
-    {"id": "assignment_generation_validation", "status": "in_progress", "evidence": ["src/adaptive_tutor/assignments.py"]},
-    {"id": "deterministic_evaluation", "status": "in_progress", "evidence": ["src/adaptive_tutor/evaluation.py", "tests/test_evaluation.py"]},
-    {"id": "qualitative_evaluation", "status": "in_progress", "evidence": ["src/adaptive_tutor/codex.py", "tests/test_codex.py"]},
-    {"id": "appeals_hints", "status": "in_progress", "evidence": ["src/adaptive_tutor/assignments.py"]},
-    {"id": "github_integration", "status": "in_progress", "evidence": ["src/adaptive_tutor/github.py", "tests/test_github.py"]},
-    {"id": "webhook_jobs", "status": "in_progress", "evidence": ["src/adaptive_tutor/webhooks.py", "src/adaptive_tutor/jobs.py", "tests/test_webhooks.py", "tests/test_jobs.py"]},
-    {"id": "persistent_storage", "status": "in_progress", "evidence": ["src/adaptive_tutor/migrations"]},
-    {"id": "reporting", "status": "pending", "evidence": []},
-    {"id": "security_boundary", "status": "in_progress", "evidence": ["scripts/check-public-boundary"]},
-    {"id": "deployment_operations", "status": "pending", "evidence": []},
-    {"id": "documentation", "status": "in_progress", "evidence": ["README.md", "SPEC.md"]},
+    {
+      "id": "cli",
+      "status": "complete",
+      "evidence": ["src/adaptive_tutor/cli.py", "tests/test_cli.py", "docs/cli.md"]
+    },
+    {
+      "id": "demo",
+      "status": "complete",
+      "evidence": ["src/adaptive_tutor/demo.py", "tests/test_reporting.py", "docs/getting-started.md"]
+    },
+    {
+      "id": "dashboard_api",
+      "status": "complete",
+      "evidence": ["src/adaptive_tutor/dashboard.py", "tests/test_dashboard.py", "docs/api.md"]
+    },
+    {
+      "id": "curriculum_loading",
+      "status": "complete",
+      "evidence": [
+        "src/adaptive_tutor/curriculum.py",
+        "tests/test_curriculum.py",
+        "curricula/systems-foundations/curriculum.yaml",
+        "docs/curricula.md"
+      ]
+    },
+    {
+      "id": "learner_model",
+      "status": "complete",
+      "evidence": [
+        "src/adaptive_tutor/learner.py",
+        "tests/test_learner.py",
+        "docs/learner-model.md"
+      ]
+    },
+    {
+      "id": "adaptive_scheduler",
+      "status": "complete",
+      "evidence": [
+        "src/adaptive_tutor/scheduler.py",
+        "tests/test_scheduler.py",
+        "docs/adaptation.md"
+      ]
+    },
+    {
+      "id": "assignment_generation_validation",
+      "status": "complete",
+      "evidence": [
+        "src/adaptive_tutor/assignments.py",
+        "src/adaptive_tutor/generation.py",
+        "tests/test_assignments.py",
+        "docs/curricula.md"
+      ]
+    },
+    {
+      "id": "deterministic_evaluation",
+      "status": "complete",
+      "evidence": [
+        "src/adaptive_tutor/runner.py",
+        "tests/test_runner.py",
+        "tests/test_evaluator_supervisor.py",
+        "docs/evaluation.md"
+      ]
+    },
+    {
+      "id": "qualitative_evaluation",
+      "status": "complete",
+      "evidence": ["src/adaptive_tutor/codex.py", "tests/test_codex.py", "docs/codex.md"]
+    },
+    {
+      "id": "appeals_hints",
+      "status": "complete",
+      "evidence": [
+        "src/adaptive_tutor/evaluation.py",
+        "tests/test_evaluation.py",
+        "tests/test_assignments.py",
+        "docs/evaluation.md"
+      ]
+    },
+    {
+      "id": "github_integration",
+      "status": "complete",
+      "evidence": ["src/adaptive_tutor/github.py", "tests/test_github.py", "docs/github.md"]
+    },
+    {
+      "id": "webhook_jobs",
+      "status": "complete",
+      "evidence": [
+        "src/adaptive_tutor/webhooks.py",
+        "src/adaptive_tutor/jobs.py",
+        "tests/test_webhooks.py",
+        "tests/test_jobs.py"
+      ]
+    },
+    {
+      "id": "persistent_storage",
+      "status": "complete",
+      "evidence": [
+        "src/adaptive_tutor/db.py",
+        "src/adaptive_tutor/migrations/001_initial.sql",
+        "tests/test_database.py",
+        "docs/architecture.md"
+      ]
+    },
+    {
+      "id": "reporting",
+      "status": "complete",
+      "evidence": [
+        "src/adaptive_tutor/reporting.py",
+        "tests/test_reporting.py",
+        "docs/cli.md"
+      ]
+    },
+    {
+      "id": "security_boundary",
+      "status": "complete",
+      "evidence": [
+        "src/adaptive_tutor/security.py",
+        "scripts/check-public-boundary",
+        "tests/test_security.py",
+        "tests/test_trusted_bundles.py",
+        "docs/security.md"
+      ]
+    },
+    {
+      "id": "deployment_operations",
+      "status": "complete",
+      "evidence": [
+        "deploy/compose.yaml",
+        "scripts/check-deployment",
+        "tests/test_deployment.py",
+        "docs/operations.md"
+      ]
+    },
+    {
+      "id": "documentation",
+      "status": "complete",
+      "evidence": ["README.md", "scripts/check-docs", "tests/test_documentation.py", "mkdocs.yml"]
+    },
     {"id": "screenshots", "status": "pending", "evidence": []},
-    {"id": "automated_tests", "status": "in_progress", "evidence": ["tests"]},
-    {"id": "controlled_end_to_end", "status": "in_progress", "evidence": ["tests/test_end_to_end.py"]},
-    {"id": "public_repository", "status": "pending", "evidence": []},
+    {
+      "id": "automated_tests",
+      "status": "complete",
+      "evidence": ["pyproject.toml", ".github/workflows/ci.yml", "tests/test_workflows.py"]
+    },
+    {
+      "id": "controlled_end_to_end",
+      "status": "in_progress",
+      "evidence": [
+        "src/adaptive_tutor/orchestrator.py",
+        "tests/test_end_to_end.py",
+        "deploy/workspace/adaptive-tutor-evaluate.yml"
+      ]
+    },
+    {
+      "id": "public_repository",
+      "status": "complete",
+      "evidence": [
+        "scripts/check-public-boundary",
+        "tests/test_packaging.py",
+        ".github/workflows/security.yml"
+      ]
+    },
     {"id": "private_repositories", "status": "pending", "evidence": []},
     {"id": "deployed_runtime", "status": "pending", "evidence": []}
   ]

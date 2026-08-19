@@ -5,16 +5,48 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
-from pathlib import Path
+import tempfile
+from pathlib import Path, PurePosixPath
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+LEDGER_PATH = ROOT / "implementation" / "completion.json"
+EXPECTED_REQUIREMENTS = (
+    "cli",
+    "demo",
+    "dashboard_api",
+    "curriculum_loading",
+    "learner_model",
+    "adaptive_scheduler",
+    "assignment_generation_validation",
+    "deterministic_evaluation",
+    "qualitative_evaluation",
+    "appeals_hints",
+    "github_integration",
+    "webhook_jobs",
+    "persistent_storage",
+    "reporting",
+    "security_boundary",
+    "deployment_operations",
+    "documentation",
+    "screenshots",
+    "automated_tests",
+    "controlled_end_to_end",
+    "public_repository",
+    "private_repositories",
+    "deployed_runtime",
+)
+VALID_STATUSES = {"pending", "in_progress", "complete"}
 
 
 def run(name: str, command: list[str]) -> bool:
-    print(f"\n[{name}] {' '.join(command)}")
-    result = subprocess.run(command, cwd=ROOT, check=False)
+    print(f"\n[{name}] {' '.join(command)}", flush=True)
+    result = subprocess.run(  # noqa: S603 - callers supply fixed repository-owned commands.
+        command, cwd=ROOT, check=False
+    )
     if result.returncode:
         print(f"FAIL: {name} (exit {result.returncode})")
         return False
@@ -22,55 +54,233 @@ def run(name: str, command: list[str]) -> bool:
     return True
 
 
-def ledger_complete() -> bool:
-    path = ROOT / "implementation" / "completion.json"
+def _tool_python() -> str:
+    candidate = ROOT / ".venv" / "bin" / "python"
+    return str(candidate) if candidate.is_file() else sys.executable
+
+
+def _tracked_files() -> set[str]:
+    git = shutil.which("git")
+    if git is None:
+        return set()
+    result = subprocess.run(  # noqa: S603 - resolved Git and fixed arguments.
+        [git, "ls-files", "-z"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode:
+        return set()
+    return {
+        value.decode("utf-8")
+        for value in result.stdout.split(b"\0")
+        if value
+    }
+
+
+def validate_ledger(
+    payload: Any,
+    *,
+    root: Path = ROOT,
+    tracked_files: set[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Return structural failures and incomplete requirement identifiers."""
+    failures: list[str] = []
+    incomplete: list[str] = []
+    if not isinstance(payload, dict):
+        return ["completion ledger must contain an object"], incomplete
+    if payload.get("schema_version") != "1.0":
+        failures.append("completion ledger schema_version must be 1.0")
+    requirements = payload.get("requirements")
+    if not isinstance(requirements, list):
+        return [*failures, "completion ledger requirements must be a list"], incomplete
+
+    identifiers = [
+        item.get("id") if isinstance(item, dict) else None
+        for item in requirements
+    ]
+    if tuple(identifiers) != EXPECTED_REQUIREMENTS:
+        failures.append("completion ledger requirement IDs or ordering do not match SPEC.md")
+    tracked = _tracked_files() if tracked_files is None else tracked_files
+    if not tracked:
+        failures.append("tracked repository files could not be enumerated")
+
+    for item in requirements:
+        if not isinstance(item, dict):
+            failures.append("completion ledger entries must be objects")
+            continue
+        identifier = item.get("id")
+        if not isinstance(identifier, str):
+            failures.append("completion ledger entry has an invalid id")
+            continue
+        status = item.get("status")
+        if status not in VALID_STATUSES:
+            failures.append(f"{identifier}: invalid status {status!r}")
+            continue
+        if status != "complete":
+            incomplete.append(identifier)
+        evidence = item.get("evidence")
+        if not isinstance(evidence, list) or not all(
+            isinstance(value, str) and value for value in evidence
+        ):
+            failures.append(f"{identifier}: evidence must be a list of non-empty paths")
+            continue
+        if len(evidence) != len(set(evidence)):
+            failures.append(f"{identifier}: evidence paths must be unique")
+        for value in evidence:
+            path = PurePosixPath(value)
+            if path.is_absolute() or ".." in path.parts or path.as_posix() != value:
+                failures.append(f"{identifier}: unsafe evidence path {value!r}")
+                continue
+            if value not in tracked:
+                failures.append(f"{identifier}: evidence is not a tracked file: {value}")
+            if not (root / value).is_file():
+                failures.append(f"{identifier}: evidence file is missing: {value}")
+        if status == "complete":
+            if len(evidence) < 2:
+                failures.append(f"{identifier}: completed requirements need independent evidence")
+            if not any(
+                value.startswith("tests/") or value.startswith("scripts/check-")
+                for value in evidence
+            ):
+                failures.append(f"{identifier}: completed requirement has no verification evidence")
+    return failures, incomplete
+
+
+def check_ledger() -> bool:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(LEDGER_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         print(f"FAIL: completion ledger is unreadable: {exc}")
         return False
-    requirements = payload.get("requirements", [])
-    identifiers = [item.get("id") for item in requirements]
-    if len(requirements) < 20 or len(identifiers) != len(set(identifiers)):
-        print("FAIL: completion ledger is incomplete or has duplicate identifiers")
-        return False
-    incomplete = [item["id"] for item in requirements if item.get("status") != "complete"]
-    weak = [
-        item["id"]
-        for item in requirements
-        if item.get("status") == "complete" and not item.get("evidence")
-    ]
+    failures, incomplete = validate_ledger(payload)
+    for failure in failures:
+        print(f"FAIL: {failure}")
     if incomplete:
         print("Incomplete requirements: " + ", ".join(incomplete))
-    if weak:
-        print("Completed entries without evidence: " + ", ".join(weak))
-    return not incomplete and not weak
+    return not failures and not incomplete
+
+
+def check_required_artifacts() -> bool:
+    required = (
+        "README.md",
+        "SPEC.md",
+        "AGENTS.md",
+        "pyproject.toml",
+        "implementation/completion.json",
+        "docs/index.md",
+        "mkdocs.yml",
+        "deploy/compose.yaml",
+        "tests/test_end_to_end.py",
+    )
+    missing = [path for path in required if not (ROOT / path).is_file()]
+    if missing:
+        print("Missing required artifacts: " + ", ".join(missing))
+        return False
+    print("Required artifact set: PASS")
+    return True
+
+
+def check_cli_and_demo() -> bool:
+    python = _tool_python()
+    entrypoint = "from adaptive_tutor.cli import app; app()"
+    with tempfile.TemporaryDirectory(prefix="adaptive-tutor-completion-") as temp:
+        root = Path(temp)
+        config = root / "config.yaml"
+        initialized = subprocess.run(  # noqa: S603 - resolved Python and fixed arguments.
+            [
+                python,
+                "-c",
+                entrypoint,
+                "--config",
+                str(config),
+                "init",
+                "--data-dir",
+                str(root / "state"),
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if initialized.returncode:
+            print("FAIL: CLI initialization smoke test")
+            print(initialized.stdout + initialized.stderr)
+            return False
+        status = subprocess.run(  # noqa: S603 - resolved Python and fixed arguments.
+            [python, "-c", entrypoint, "--config", str(config), "status", "--json"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        try:
+            status_payload = json.loads(status.stdout)
+        except json.JSONDecodeError:
+            status_payload = None
+        if status.returncode or not isinstance(status_payload, dict):
+            print("FAIL: CLI status smoke test")
+            print(status.stdout + status.stderr)
+            return False
+
+    demo = subprocess.run(  # noqa: S603 - resolved Python and fixed arguments.
+        [python, "-c", entrypoint, "demo", "--json"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        payload = json.loads(demo.stdout)
+        valid_demo = (
+            len(payload.get("journey", [])) == 7
+            and payload.get("report", {}).get("study_activity", {}).get("attempts") == 3
+            and payload.get("assignment", {}).get("id") == "A-0007"
+        )
+    except (AttributeError, json.JSONDecodeError):
+        valid_demo = False
+    if demo.returncode or not valid_demo:
+        print("FAIL: credential-free demo smoke test")
+        print(demo.stdout + demo.stderr)
+        return False
+    print("CLI initialization, status, and credential-free demo: PASS")
+    return True
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--quick", action="store_true", help="run the lightweight agent stop gate")
     args = parser.parse_args()
+
     outcomes = [
         run("public boundary", [sys.executable, "scripts/check-public-boundary"]),
-        ledger_complete(),
+        check_ledger(),
     ]
     if not args.quick:
-        required = [
-            "README.md",
-            "SPEC.md",
-            "AGENTS.md",
-            "pyproject.toml",
-            "implementation/completion.json",
-            "docs/index.md",
-            "mkdocs.yml",
-            "deploy/compose.yaml",
-            "tests/test_end_to_end.py",
-        ]
-        missing = [path for path in required if not (ROOT / path).exists()]
-        if missing:
-            print("Missing required artifacts: " + ", ".join(missing))
-            outcomes.append(False)
+        python = _tool_python()
+        outcomes.extend(
+            [
+                check_required_artifacts(),
+                run("lint", [python, "-m", "ruff", "check", "src", "tests", "scripts"]),
+                run("types", [python, "-m", "mypy", "src/adaptive_tutor"]),
+                run(
+                    "tests and coverage",
+                    [
+                        python,
+                        "-m",
+                        "pytest",
+                        "-q",
+                        "-W",
+                        "error",
+                        "--cov=adaptive_tutor",
+                        "--cov-report=term",
+                    ],
+                ),
+                run("documentation", [python, "scripts/check-docs"]),
+                run("deployment", [python, "scripts/check-deployment"]),
+                check_cli_and_demo(),
+            ]
+        )
     if all(outcomes):
         print("\nAdaptive Tutor completion gate: PASS")
         return 0
