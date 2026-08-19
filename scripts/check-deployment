@@ -6,6 +6,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -152,13 +153,30 @@ def validate_with_tools(failures: list[str]) -> None:
     require(shell.returncode == 0, "prepare-compose.sh has invalid shell syntax", failures)
     docker_path = shutil.which("docker")
     if docker_path:
-        compose = subprocess.run(  # noqa: S603 - resolved executable and fixed arguments
-            [docker_path, "compose", "-f", "deploy/compose.yaml", "config", "--quiet"],
-            cwd=ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        with tempfile.TemporaryDirectory(prefix="adaptive-tutor-compose-check-") as temp:
+            root = Path(temp)
+            env_file = root / "compose.env"
+            runtime = root / "runtime"
+            env_file.write_text(
+                f"TUTOR_RUNTIME_DIR={runtime}\nTUTOR_UID=1000\nTUTOR_GID=1000\n",
+                encoding="utf-8",
+            )
+            compose = subprocess.run(  # noqa: S603 - resolved executable and fixed arguments
+                [
+                    docker_path,
+                    "compose",
+                    "--env-file",
+                    str(env_file),
+                    "-f",
+                    "deploy/compose.yaml",
+                    "config",
+                    "--quiet",
+                ],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
         require(
             compose.returncode == 0,
             "docker compose rejected deploy/compose.yaml: " + compose.stderr.strip(),

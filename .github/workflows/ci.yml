@@ -82,7 +82,7 @@ jobs:
           wheel_path=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
           uv run --isolated --no-project --with "${wheel_path}" \
             adaptive-tutor demo --json > /tmp/adaptive-tutor-demo.json
-          python -c "import json; p=json.load(open('/tmp/adaptive-tutor-demo.json')); assert p['report']['study_activity']['attempts'] == 1"
+          python -c "import json; p=json.load(open('/tmp/adaptive-tutor-demo.json')); assert len(p['journey']) == 7 and p['report']['study_activity']['attempts'] == 3"
       - name: Upload distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -105,4 +105,4 @@ jobs:
           docker run --rm --cap-drop ALL --network none \
             --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=128m \
             adaptive-tutor:ci demo --json > /tmp/container-demo.json
-          python3 -c "import json; p=json.load(open('/tmp/container-demo.json')); assert p['assignment']['id'] == 'A-0001'"
+          python3 -c "import json; p=json.load(open('/tmp/container-demo.json')); assert p['assignment']['id'] == 'A-0007' and len(p['journey']) == 7"

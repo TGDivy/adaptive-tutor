@@ -19,6 +19,29 @@ pass requires at least one non-skipped check and every relevant check to pass.
 Malformed JSON, an invalid commit, unknown status, or incorrect artifact digest
 is rejected before persistence.
 
+## Credential-free evaluator command
+
+The workspace workflow invokes the same hidden command used by integration
+tests:
+
+```bash
+env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+  adaptive-tutor evaluate \
+  --bundle /runner/trusted/assignment-bundle.json \
+  --workspace /runner/learner-checkout \
+  --output /runner/evidence/adaptive-tutor-evidence.json \
+  --assignment-id A-0001 \
+  --commit-sha 0123456789abcdef0123456789abcdef01234567
+```
+
+The trusted bundle and evidence destination must both be outside the untrusted
+checkout. The evaluator copies only declared learner-visible files into a new
+temporary directory, adds trusted hidden tests there, strips credential-like
+environment variables, applies CPU/output/address-space/process limits, and
+runs the fixed Python pytest harness without a shell. It writes the artifact
+atomically with mode `0600`, including a canonical SHA-256 digest over the
+normalized contract.
+
 ## Trust-separated review prompt
 
 The review builder emits visibly delimited sections for:

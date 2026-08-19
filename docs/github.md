@@ -100,6 +100,30 @@ action/toolchain, `persist-credentials: false`, read-only token permissions,
 and an isolated credential-free container for learner code. Never use
 `pull_request_target` to execute a pull request checkout with write credentials.
 
+The repository includes a hardened workspace template at
+`deploy/workspace/adaptive-tutor-evaluate.yml`. Install it as
+`.github/workflows/adaptive-tutor-evaluate.yml` on the protected default branch.
+It runs only on dedicated, one-job runners carrying the
+`adaptive-tutor-ephemeral` label. The runner must be destroyed after the job; it
+must never be the tutor host or a machine holding GitHub-write, model, personal
+agent, or dashboard credentials.
+
+Before registering the ephemeral runner, the trusted provisioner places the
+assignment's complete bundle at
+`$RUNNER_TEMP/trusted/assignment-bundle.json` with owner-only permissions. That
+file arrives out of band from the tutor's protected state, never from the
+learner branch. The workflow checks out without retained credentials, invokes
+the hidden `adaptive-tutor evaluate` command with an empty environment, writes
+evidence outside the checkout, and uploads exactly
+`adaptive-tutor-evidence.json`. The command starts learner tests in a further
+scrubbed, resource-limited temporary directory. A missing trusted bundle fails
+closed.
+
+The tutor accepts a run only when its workflow ID and path, repository, head
+repository, branch, commit SHA, event type, and unchanged default-branch
+workflow digest all match. The normalized artifact's internal assignment ID,
+commit SHA, schema, and digest must then match before qualitative review starts.
+
 ## Reconciliation and recovery
 
 Webhooks are primary; polling is only a repair mechanism. After an outage:

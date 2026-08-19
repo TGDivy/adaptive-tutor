@@ -1,0 +1,54 @@
+name: Adaptive Tutor Evaluation
+
+on:
+  push:
+    branches:
+      - "assignment/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adaptive-tutor-evaluate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evaluate:
+    name: Credential-free assignment checks
+    runs-on: [self-hosted, adaptive-tutor-ephemeral]
+    timeout-minutes: 10
+    steps:
+      - name: Check out learner commit without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          clean: true
+      - name: Run trusted evaluator
+        shell: bash
+        run: |
+          set -euo pipefail
+          trusted_bundle="${RUNNER_TEMP}/trusted/assignment-bundle.json"
+          evidence_dir="${RUNNER_TEMP}/adaptive-tutor-evidence"
+          branch_tail="${GITHUB_REF_NAME#assignment/}"
+          [[ "${branch_tail}" =~ ^([0-9]{4})-[a-z0-9-]+$ ]]
+          assignment_id="A-${BASH_REMATCH[1]}"
+          test -f "${trusted_bundle}"
+          install -d -m 0700 "${evidence_dir}"
+          env -i \
+            PATH="/usr/local/bin:/usr/bin:/bin" \
+            LANG="C.UTF-8" \
+            LC_ALL="C.UTF-8" \
+            adaptive-tutor evaluate \
+              --bundle "${trusted_bundle}" \
+              --workspace "${GITHUB_WORKSPACE}" \
+              --output "${evidence_dir}/adaptive-tutor-evidence.json" \
+              --assignment-id "${assignment_id}" \
+              --commit-sha "${GITHUB_SHA}"
+      - name: Upload normalized evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: adaptive-tutor-evidence
+          path: ${{ runner.temp }}/adaptive-tutor-evidence/adaptive-tutor-evidence.json
+          if-no-files-found: error
+          retention-days: 14

@@ -58,3 +58,23 @@ def test_python_validation_scripts_run_inside_the_locked_environment() -> None:
         content = (WORKFLOW_ROOT / workflow_name).read_text(encoding="utf-8")
         assert "./scripts/check-docs" not in content
         assert "uv run --locked python scripts/check-docs" in content
+
+
+def test_workspace_evaluator_is_ephemeral_credential_free_and_uploads_contract() -> None:
+    path = ROOT / "deploy" / "workspace" / "adaptive-tutor-evaluate.yml"
+    content = path.read_text(encoding="utf-8")
+    assert isinstance(yaml.safe_load(content), dict)
+    for required in (
+        "adaptive-tutor-ephemeral",
+        "persist-credentials: false",
+        "env -i",
+        "adaptive-tutor evaluate",
+        "assignment-bundle.json",
+        "adaptive-tutor-evidence.json",
+        "name: adaptive-tutor-evidence",
+        "retention-days: 14",
+    ):
+        assert required in content
+    assert "pull_request_target" not in content
+    uses_lines = [line for line in content.splitlines() if "uses:" in line]
+    assert uses_lines and all(PINNED_ACTION.search(line) for line in uses_lines)
