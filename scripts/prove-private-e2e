@@ -1,0 +1,1225 @@
+#!/usr/bin/env python3
+"""Run the controlled private GitHub path and write sanitized public evidence."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import hmac
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import stat
+import subprocess
+import tarfile
+import time
+import uuid
+import zipfile
+from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
+from typing import Any
+from urllib.parse import quote, urlsplit
+
+import httpx
+import yaml
+from fastapi.testclient import TestClient
+
+from adaptive_tutor.codex import CodexRunner, grader_health
+from adaptive_tutor.config import TutorSettings, load_settings, write_initial_config
+from adaptive_tutor.curriculum import CurriculumLoader, curriculum_digest
+from adaptive_tutor.dashboard import create_app
+from adaptive_tutor.db import Database
+from adaptive_tutor.evaluation import EvaluationService
+from adaptive_tutor.github import GitHubClient
+from adaptive_tutor.jobs import JobQueue, Worker
+from adaptive_tutor.models import AutomatedEvaluation, LearnerContext, QualitativeEvaluation
+from adaptive_tutor.orchestrator import TutorOrchestrator
+from adaptive_tutor.reporting import ReportService
+from adaptive_tutor.security import codex_worker_environment
+from adaptive_tutor.state import StatusService
+
+ROOT = Path(__file__).resolve().parents[1]
+PRIVATE_ROOT = ROOT / ".private" / "controlled-e2e"
+REPOSITORY_STATE = PRIVATE_ROOT / "repositories.json"
+EVIDENCE_PATH = ROOT / "implementation" / "evidence" / "controlled-e2e.json"
+WORKFLOW_PATH = ".github/workflows/adaptive-tutor-evaluate.yml"
+WORKFLOW_SOURCE = ROOT / "deploy" / "workspace" / "adaptive-tutor-evaluate.yml"
+CURRICULUM_SOURCE = ROOT / "curricula" / "systems-foundations"
+SOURCE_FILES = (
+    "scripts/prove-private-e2e",
+    "src/adaptive_tutor/codex.py",
+    "src/adaptive_tutor/evaluation.py",
+    "src/adaptive_tutor/github.py",
+    "src/adaptive_tutor/jobs.py",
+    "src/adaptive_tutor/orchestrator.py",
+    "src/adaptive_tutor/runner.py",
+    "src/adaptive_tutor/trusted_bundles.py",
+    "src/adaptive_tutor/webhooks.py",
+    "deploy/workspace/adaptive-tutor-evaluate.yml",
+)
+_PRIVATE_VALUES: set[str] = set()
+
+
+def _sanitize(value: str) -> str:
+    sanitized = value
+    for private in sorted(_PRIVATE_VALUES, key=len, reverse=True):
+        if private:
+            sanitized = sanitized.replace(private, "[private]")
+    sanitized = re.sub(r"\bgh[opsu]_[A-Za-z0-9]{20,}\b", "[REDACTED]", sanitized)
+    return sanitized
+
+
+def _run(
+    command: list[str],
+    *,
+    cwd: Path = ROOT,
+    env: dict[str, str] | None = None,
+    timeout: int = 120,
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(  # noqa: S603 - callers supply fixed tools and bounded arguments.
+        command,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout,
+    )
+    if result.returncode:
+        detail = _sanitize((result.stdout + result.stderr)[-4000:])
+        raise RuntimeError(
+            f"{Path(command[0]).name} failed with exit {result.returncode}:\n{detail}"
+        )
+    return result
+
+
+def _source_digest() -> str:
+    digest = hashlib.sha256()
+    for value in SOURCE_FILES:
+        digest.update(value.encode())
+        digest.update(b"\0")
+        digest.update((ROOT / value).read_bytes())
+        digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
+
+
+def _private_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.chmod(0o700)
+
+
+def _write_private(path: Path, payload: dict[str, Any]) -> None:
+    _private_directory(path.parent)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+def _github_token() -> str:
+    token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN") or os.environ.get("GH_TOKEN")
+    if not token:
+        token = _run(["gh", "auth", "token"]).stdout.strip()
+    if not token:
+        raise RuntimeError("an authenticated GitHub token is required")
+    _PRIVATE_VALUES.add(token)
+    return token
+
+
+class GitHubAPI:
+    def __init__(self, token: str) -> None:
+        self.client = httpx.Client(
+            base_url="https://api.github.com",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {token}",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "adaptive-tutor-controlled-e2e",
+            },
+            follow_redirects=True,
+            timeout=60,
+        )
+
+    def close(self) -> None:
+        self.client.close()
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        expected: tuple[int, ...] = (200,),
+        **kwargs: Any,
+    ) -> httpx.Response:
+        response = self.client.request(method, path, **kwargs)
+        if response.status_code not in expected:
+            detail = _sanitize(response.text[:1500])
+            raise RuntimeError(
+                f"GitHub API {method} returned {response.status_code}: {detail}"
+            )
+        return response
+
+    def current_owner(self) -> str:
+        return str(self.request("GET", "/user").json()["login"])
+
+    def repository(self, owner: str, repo: str) -> dict[str, Any]:
+        return dict(self.request("GET", f"/repos/{owner}/{repo}").json())
+
+    def create_repository(self, name: str, description: str) -> dict[str, Any]:
+        response = self.request(
+            "POST",
+            "/user/repos",
+            expected=(201,),
+            json={
+                "name": name,
+                "description": description,
+                "private": True,
+                "has_issues": True,
+                "has_projects": False,
+                "has_wiki": False,
+                "auto_init": False,
+                "delete_branch_on_merge": True,
+            },
+        )
+        return dict(response.json())
+
+
+def _repository_names(api: GitHubAPI) -> tuple[str, str, str]:
+    owner = api.current_owner()
+    _PRIVATE_VALUES.add(owner)
+    if REPOSITORY_STATE.is_file():
+        state = json.loads(REPOSITORY_STATE.read_text(encoding="utf-8"))
+        values = (str(state["owner"]), str(state["workspace"]), str(state["curriculum"]))
+        if values[0].lower() != owner.lower():
+            raise RuntimeError("saved private repositories belong to another account")
+        _PRIVATE_VALUES.update(values)
+        return values
+    suffix = datetime.now(UTC).strftime("%Y%m%d") + "-" + secrets.token_hex(3)
+    workspace = f"adaptive-tutor-workspace-{suffix}"
+    curriculum = f"adaptive-tutor-curriculum-{suffix}"
+    _PRIVATE_VALUES.update({workspace, curriculum})
+    api.create_repository(workspace, "Disposable private Adaptive Tutor workspace")
+    api.create_repository(curriculum, "Private neutral Adaptive Tutor curriculum package")
+    _write_private(
+        REPOSITORY_STATE,
+        {"owner": owner, "workspace": workspace, "curriculum": curriculum},
+    )
+    return owner, workspace, curriculum
+
+
+def _remove_protection(api: GitHubAPI, owner: str, repo: str) -> None:
+    response = api.client.delete(f"/repos/{owner}/{repo}/branches/main/protection")
+    if response.status_code not in {204, 403, 404}:
+        raise RuntimeError(f"could not reset default-branch protection ({response.status_code})")
+
+
+def _close_old_workspace_state(api: GitHubAPI, owner: str, repo: str) -> None:
+    pulls = api.request(
+        "GET", f"/repos/{owner}/{repo}/pulls", params={"state": "open", "per_page": 100}
+    ).json()
+    for pull in pulls:
+        api.request(
+            "PATCH",
+            f"/repos/{owner}/{repo}/pulls/{int(pull['number'])}",
+            json={"state": "closed"},
+        )
+    branches = api.request(
+        "GET", f"/repos/{owner}/{repo}/branches", params={"per_page": 100}
+    ).json()
+    for branch in branches:
+        name = str(branch.get("name", ""))
+        if name.startswith("assignment/"):
+            api.request(
+                "DELETE",
+                f"/repos/{owner}/{repo}/git/refs/heads/{quote(name, safe='/')}",
+                expected=(204,),
+            )
+    runs = api.request(
+        "GET", f"/repos/{owner}/{repo}/actions/runs", params={"per_page": 100}
+    ).json()
+    for run in runs.get("workflow_runs", []):
+        if run.get("status") in {"queued", "in_progress", "waiting", "pending"}:
+            response = api.client.post(
+                f"/repos/{owner}/{repo}/actions/runs/{int(run['id'])}/cancel"
+            )
+            if response.status_code not in {202, 409}:
+                raise RuntimeError("could not cancel a stale controlled workflow")
+    runners = api.request(
+        "GET", f"/repos/{owner}/{repo}/actions/runners", params={"per_page": 100}
+    ).json()
+    for runner in runners.get("runners", []):
+        response = api.client.delete(
+            f"/repos/{owner}/{repo}/actions/runners/{int(runner['id'])}"
+        )
+        if response.status_code not in {204, 404}:
+            raise RuntimeError("could not remove a stale controlled runner")
+
+
+def _commit_tree(
+    api: GitHubAPI,
+    owner: str,
+    repo: str,
+    files: dict[str, bytes],
+    *,
+    message: str,
+    branch: str = "main",
+    base_tree: str | None = None,
+    parent: str | None = None,
+) -> str:
+    entries: list[dict[str, str]] = []
+    for path, content in sorted(files.items()):
+        candidate = PurePosixPath(path)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise RuntimeError(f"unsafe repository path: {path}")
+        blob = api.request(
+            "POST",
+            f"/repos/{owner}/{repo}/git/blobs",
+            expected=(201,),
+            json={"content": content.decode("utf-8"), "encoding": "utf-8"},
+        ).json()
+        entries.append(
+            {"path": path, "mode": "100644", "type": "blob", "sha": str(blob["sha"])}
+        )
+    tree_payload: dict[str, Any] = {"tree": entries}
+    if base_tree:
+        tree_payload["base_tree"] = base_tree
+    tree = api.request(
+        "POST",
+        f"/repos/{owner}/{repo}/git/trees",
+        expected=(201,),
+        json=tree_payload,
+    ).json()
+    commit_payload: dict[str, Any] = {"message": message, "tree": tree["sha"]}
+    if parent:
+        commit_payload["parents"] = [parent]
+    commit = api.request(
+        "POST",
+        f"/repos/{owner}/{repo}/git/commits",
+        expected=(201,),
+        json=commit_payload,
+    ).json()
+    reference = api.client.get(f"/repos/{owner}/{repo}/git/ref/heads/{branch}")
+    if reference.status_code == 404:
+        api.request(
+            "POST",
+            f"/repos/{owner}/{repo}/git/refs",
+            expected=(201,),
+            json={"ref": f"refs/heads/{branch}", "sha": commit["sha"]},
+        )
+    elif reference.status_code == 200:
+        api.request(
+            "PATCH",
+            f"/repos/{owner}/{repo}/git/refs/heads/{quote(branch, safe='/')}",
+            json={"sha": commit["sha"], "force": False},
+        )
+    else:
+        raise RuntimeError("could not inspect repository branch")
+    return str(commit["sha"])
+
+
+def _replace_default_tree(
+    api: GitHubAPI, owner: str, repo: str, files: dict[str, bytes], message: str
+) -> str:
+    _remove_protection(api, owner, repo)
+    reference = api.client.get(f"/repos/{owner}/{repo}/git/ref/heads/main")
+    parent = str(reference.json()["object"]["sha"]) if reference.status_code == 200 else None
+    commit = _commit_tree(
+        api,
+        owner,
+        repo,
+        files,
+        message=message,
+        parent=parent,
+    )
+    api.request(
+        "PATCH", f"/repos/{owner}/{repo}", json={"default_branch": "main", "private": True}
+    )
+    return commit
+
+
+def _protect_main(api: GitHubAPI, owner: str, repo: str) -> bool:
+    response = api.client.put(
+        f"/repos/{owner}/{repo}/branches/main/protection",
+        json={
+            "required_status_checks": None,
+            "enforce_admins": True,
+            "required_pull_request_reviews": {"required_approving_review_count": 1},
+            "restrictions": None,
+            "allow_force_pushes": False,
+            "allow_deletions": False,
+        },
+    )
+    if response.status_code == 200:
+        return True
+    if response.status_code in {403, 404}:
+        return False
+    raise RuntimeError(f"default-branch protection failed ({response.status_code})")
+
+
+def _curriculum_files() -> dict[str, bytes]:
+    return {
+        "curriculum/systems-foundations/" + path.relative_to(CURRICULUM_SOURCE).as_posix():
+        path.read_bytes()
+        for path in CURRICULUM_SOURCE.rglob("*")
+        if path.is_file()
+    }
+
+
+def _prepare_repositories(
+    api: GitHubAPI, owner: str, workspace: str, curriculum: str
+) -> tuple[bool, bool]:
+    _remove_protection(api, owner, workspace)
+    _close_old_workspace_state(api, owner, workspace)
+    _replace_default_tree(
+        api,
+        owner,
+        workspace,
+        {
+            "README.md": b"# Adaptive Tutor private learning workspace\n",
+            WORKFLOW_PATH: WORKFLOW_SOURCE.read_bytes(),
+        },
+        "Initialize protected Adaptive Tutor workspace",
+    )
+    _replace_default_tree(
+        api,
+        owner,
+        curriculum,
+        _curriculum_files(),
+        "Publish neutral private curriculum package",
+    )
+    return _protect_main(api, owner, workspace), _protect_main(api, owner, curriculum)
+
+
+def _download_private_curriculum(
+    api: GitHubAPI, owner: str, repo: str, run_root: Path
+) -> Path:
+    archive = api.request(
+        "GET", f"/repos/{owner}/{repo}/zipball/main", expected=(200,)
+    ).content
+    target = run_root / "private-curriculum-checkout"
+    _private_directory(target)
+    archive_path = run_root / "curriculum.zip"
+    archive_path.write_bytes(archive)
+    archive_path.chmod(0o600)
+    with zipfile.ZipFile(archive_path) as zipped:
+        for item in zipped.infolist():
+            path = PurePosixPath(item.filename)
+            if path.is_absolute() or ".." in path.parts or len(path.parts) < 2:
+                raise RuntimeError("private curriculum archive contains an unsafe path")
+            relative = Path(*path.parts[1:])
+            destination = target / relative
+            if item.is_dir():
+                destination.mkdir(parents=True, exist_ok=True)
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(zipped.read(item))
+    package = target / "curriculum" / "systems-foundations"
+    loaded = CurriculumLoader().load(package)
+    if curriculum_digest(package) != curriculum_digest(CURRICULUM_SOURCE):
+        raise RuntimeError("private curriculum archive does not match the published package")
+    if loaded.metadata.id != "systems-foundations":
+        raise RuntimeError("private curriculum archive has an unexpected identity")
+    return package
+
+
+def _initialize_runtime(
+    run_root: Path,
+    package: Path,
+    owner: str,
+    workspace: str,
+    curriculum: str,
+    grader_socket: Path,
+) -> tuple[Path, TutorSettings, Database]:
+    config = run_root / "config.yaml"
+    data_dir = run_root / "state"
+    write_initial_config(
+        config,
+        data_dir=data_dir,
+        github_owner=owner,
+        workspace_repo=workspace,
+        curriculum_repo=curriculum,
+    )
+    payload = yaml.safe_load(config.read_text(encoding="utf-8"))
+    payload["curriculum_paths"] = [str(package)]
+    payload["learner_id"] = "controlled-learner"
+    payload["codex"]["enabled"] = True
+    payload["codex"]["socket_path"] = str(grader_socket)
+    config.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    config.chmod(0o600)
+    for name in (
+        "ADAPTIVE_TUTOR_API_TOKEN",
+        "ADAPTIVE_TUTOR_WEBHOOK_SECRET",
+        "ADAPTIVE_TUTOR_GRADER_SOCKET",
+    ):
+        os.environ.pop(name, None)
+    settings = load_settings(config, require_file=True)
+    database = Database(settings.database_path or data_dir / "tutor.sqlite3")
+    database.migrate()
+    curriculum_package = CurriculumLoader().load(package)
+    CurriculumLoader().persist(curriculum_package, database, settings.learner_id)
+    row = database.fetch_one(
+        "SELECT source_path FROM curricula WHERE id=?", (settings.active_curriculum,)
+    )
+    if row is None or Path(str(row["source_path"])).resolve() != package.resolve():
+        raise RuntimeError("runtime did not load its active curriculum from the private checkout")
+    return config, settings, database
+
+
+def _commit_solution(
+    api: GitHubAPI,
+    owner: str,
+    repo: str,
+    branch: str,
+) -> str:
+    reference = api.request(
+        "GET", f"/repos/{owner}/{repo}/git/ref/heads/{quote(branch, safe='/')}"
+    ).json()
+    parent = str(reference["object"]["sha"])
+    commit = api.request(
+        "GET", f"/repos/{owner}/{repo}/git/commits/{parent}"
+    ).json()
+    answer = (
+        "# Invariant\n\n"
+        "The size is always between zero and capacity. Empty means size is zero; full "
+        "means size equals capacity, so equal indices are never ambiguous.\n\n"
+        "# Failure mechanism\n\n"
+        "Indices alone repeat after wraparound and cannot distinguish empty from full.\n\n"
+        "# Alternative representation\n\n"
+        "A separate full bit can disambiguate equal indices with less counter state, but it "
+        "makes each index transition update another shared invariant.\n\n"
+        "Confidence (0-100): 92\n"
+    )
+    return _commit_tree(
+        api,
+        owner,
+        repo,
+        {
+            "src/bounded_queue.py": (
+                CURRICULUM_SOURCE / "assignments" / "bounded-work-queue" / "reference.py"
+            ).read_bytes(),
+            "ANSWER.md": answer.encode(),
+        },
+        message="Complete bounded queue repair\n\nConfidence: 92",
+        branch=branch,
+        base_tree=str(commit["tree"]["sha"]),
+        parent=parent,
+    )
+
+
+def _deliver(
+    client: TestClient,
+    secret: str,
+    event: str,
+    delivery: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    signature = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    response = client.post(
+        "/webhooks/github",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-GitHub-Delivery": delivery,
+            "X-GitHub-Event": event,
+            "X-Hub-Signature-256": signature,
+        },
+    )
+    if response.status_code != 202:
+        raise RuntimeError(f"signed {event} webhook returned {response.status_code}")
+    return dict(response.json())
+
+
+def _run_job(worker: Worker, database: Database, job_id: str, *, timeout: int) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        row = database.fetch_one(
+            "SELECT status, available_at, last_error FROM jobs WHERE id=?", (job_id,)
+        )
+        if row is None:
+            raise RuntimeError("durable webhook job disappeared")
+        if row["status"] == "completed":
+            return
+        if row["status"] == "dead_letter":
+            raise RuntimeError("durable webhook job failed: " + _sanitize(str(row["last_error"])))
+        if not worker.run_once():
+            time.sleep(1)
+    raise RuntimeError("durable webhook job did not complete before timeout")
+
+
+def _find_workflow_run(
+    api: GitHubAPI,
+    owner: str,
+    repo: str,
+    assignment_id: str,
+    branch: str,
+    commit_sha: str,
+    *,
+    timeout: int = 90,
+) -> dict[str, Any]:
+    title = f"Adaptive Tutor | {assignment_id} | {branch} | {commit_sha}"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        payload = api.request(
+            "GET",
+            f"/repos/{owner}/{repo}/actions/runs",
+            params={"event": "workflow_dispatch", "per_page": 100},
+        ).json()
+        for run in payload.get("workflow_runs", []):
+            if run.get("display_title") == title:
+                return dict(run)
+        time.sleep(2)
+    raise RuntimeError("dispatched evaluator workflow did not appear")
+
+
+def _runner_environment(home: Path) -> dict[str, str]:
+    environment = {
+        "HOME": str(home),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "RUNNER_ALLOW_RUNASROOT": "1",
+    }
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"):
+        value = os.environ.get(name) or os.environ.get(name.lower())
+        if not value:
+            continue
+        parsed = urlsplit(value)
+        if parsed.username or parsed.password:
+            raise RuntimeError("credential-bearing proxies cannot enter the evaluator runner")
+        environment[name] = value
+    return environment
+
+
+def _runner_download(api: GitHubAPI, owner: str, repo: str) -> tuple[bytes, str, str]:
+    options = api.request(
+        "GET", f"/repos/{owner}/{repo}/actions/runners/downloads"
+    ).json()
+    match = next(
+        (
+            item
+            for item in options
+            if item.get("os") == "linux"
+            and item.get("architecture") == "x64"
+            and str(item.get("filename", "")).endswith(".tar.gz")
+        ),
+        None,
+    )
+    if match is None:
+        raise RuntimeError("GitHub did not offer a Linux x64 runner")
+    response = api.request("GET", str(match["download_url"]), expected=(200,))
+    checksum = str(match.get("sha256_checksum", "")).removeprefix("sha256:")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", checksum):
+        raise RuntimeError("GitHub runner download has no SHA-256 checksum")
+    content = response.content
+    if not hmac.compare_digest(hashlib.sha256(content).hexdigest(), checksum.lower()):
+        raise RuntimeError("GitHub runner download failed checksum verification")
+    return content, str(match["filename"]), checksum.lower()
+
+
+def _extract_runner(content: bytes, filename: str, runner_root: Path) -> None:
+    archive = runner_root.parent / filename
+    archive.write_bytes(content)
+    archive.chmod(0o600)
+    _private_directory(runner_root)
+    with tarfile.open(archive, mode="r:gz") as source:
+        for member in source.getmembers():
+            path = PurePosixPath(member.name)
+            if path.is_absolute() or ".." in path.parts:
+                raise RuntimeError("GitHub runner archive contains an unsafe path")
+        source.extractall(runner_root, filter="data")
+
+
+def _stage_evaluator(
+    config: Path,
+    assignment_id: str,
+    branch: str,
+    commit_sha: str,
+    run_id: int,
+    trusted: Path,
+    environment: dict[str, str],
+) -> tuple[Path, Path]:
+    _private_directory(trusted)
+    bundle = trusted / "assignment-bundle.json"
+    key = trusted / "evaluator-signing.pub"
+    _run(
+        [
+            str(ROOT / ".venv" / "bin" / "adaptive-tutor"),
+            "--config",
+            str(config),
+            "stage-evaluator",
+            assignment_id,
+            "--branch",
+            branch,
+            "--commit-sha",
+            commit_sha,
+            "--run-id",
+            str(run_id),
+            "--output",
+            str(bundle),
+            "--verification-key-output",
+            str(key),
+        ],
+        env=environment,
+        timeout=120,
+    )
+    return bundle, key
+
+
+def _assert_private_directory(path: Path, label: str) -> None:
+    info = path.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_IMODE(info.st_mode) != 0o700
+        or info.st_uid != os.getuid()
+    ):
+        raise RuntimeError(f"{label} is not an owner-only directory")
+
+
+def _wait_for_stage_request(
+    runner_root: Path,
+    process: subprocess.Popen[str],
+    run_log: Path,
+    *,
+    timeout: int = 120,
+) -> Path:
+    trusted = runner_root / "_work" / "_temp" / "trusted"
+    request = trusted / "stage-request"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            detail = _sanitize(run_log.read_text(encoding="utf-8")[-6000:])
+            raise RuntimeError(
+                f"ephemeral GitHub runner exited before provisioning ({process.returncode}):\n"
+                f"{detail}"
+            )
+        if request.exists() or request.is_symlink():
+            _assert_private_directory(trusted, "Trusted runner handoff")
+            _assert_private_directory(trusted / "bin", "Trusted runner executable path")
+            info = request.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_uid != os.getuid()
+            ):
+                raise RuntimeError("runner provisioning request is not an owner-only file")
+            request.unlink()
+            return trusted
+        time.sleep(0.2)
+    raise RuntimeError("ephemeral GitHub runner did not request trusted evaluator provisioning")
+
+
+def _stage_runner_tool(trusted: Path) -> Path:
+    source = ROOT / ".venv" / "bin" / "adaptive-tutor"
+    if not source.is_file() or source.is_symlink():
+        raise RuntimeError("the locked Adaptive Tutor entry point is unavailable")
+    destination = trusted / "bin" / "adaptive-tutor"
+    if destination.exists() or destination.is_symlink():
+        raise RuntimeError("trusted runner executable destination already exists")
+    shutil.copyfile(source, destination)
+    destination.chmod(0o700)
+    return destination
+
+
+def _run_ephemeral_runner(
+    api: GitHubAPI,
+    owner: str,
+    repo: str,
+    runner_root: Path,
+    run_log: Path,
+    stage: Callable[[Path], tuple[Path, Path]],
+    *,
+    timeout: int = 900,
+) -> tuple[bool, Path, Path]:
+    environment = _runner_environment(runner_root / "home")
+    _private_directory(Path(environment["HOME"]))
+    token = str(
+        api.request(
+            "POST",
+            f"/repos/{owner}/{repo}/actions/runners/registration-token",
+            expected=(201,),
+        ).json()["token"]
+    )
+    _PRIVATE_VALUES.add(token)
+    runner_name = "adaptive-tutor-controlled-" + uuid.uuid4().hex[:10]
+    _PRIVATE_VALUES.add(runner_name)
+    _run(
+        [
+            str(runner_root / "config.sh"),
+            "--unattended",
+            "--ephemeral",
+            "--disableupdate",
+            "--url",
+            f"https://github.com/{owner}/{repo}",
+            "--token",
+            token,
+            "--name",
+            runner_name,
+            "--labels",
+            "adaptive-tutor-ephemeral",
+            "--work",
+            "_work",
+        ],
+        cwd=runner_root,
+        env=environment,
+        timeout=120,
+    )
+    with run_log.open("w", encoding="utf-8") as output:
+        process = subprocess.Popen(  # noqa: S603 - checksum-verified GitHub runner script.
+            [str(runner_root / "run.sh")],
+            cwd=runner_root,
+            env=environment,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            trusted = _wait_for_stage_request(runner_root, process, run_log)
+            _stage_runner_tool(trusted)
+            staged_bundle, staged_key = stage(trusted)
+            return_code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            raise RuntimeError("ephemeral GitHub runner timed out") from exc
+        except BaseException:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+            raise
+    if return_code:
+        detail = _sanitize(run_log.read_text(encoding="utf-8")[-6000:])
+        raise RuntimeError(f"ephemeral GitHub runner failed ({return_code}):\n{detail}")
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        runners = api.request(
+            "GET", f"/repos/{owner}/{repo}/actions/runners", params={"per_page": 100}
+        ).json()
+        if all(item.get("name") != runner_name for item in runners.get("runners", [])):
+            return True, staged_bundle, staged_key
+        time.sleep(2)
+    return False, staged_bundle, staged_key
+
+
+def _wait_run_completed(
+    api: GitHubAPI, owner: str, repo: str, run_id: int, *, timeout: int = 180
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        run = dict(
+            api.request("GET", f"/repos/{owner}/{repo}/actions/runs/{run_id}").json()
+        )
+        if run.get("status") == "completed":
+            return run
+        time.sleep(2)
+    raise RuntimeError("GitHub evaluator workflow did not complete")
+
+
+def _start_grader(socket_path: Path, log_path: Path) -> tuple[subprocess.Popen[str], Any]:
+    environment = codex_worker_environment()
+    environment["PYTHONUNBUFFERED"] = "1"
+    output = log_path.open("w", encoding="utf-8")
+    process = subprocess.Popen(  # noqa: S603 - fixed local package entry point.
+        [
+            str(ROOT / ".venv" / "bin" / "adaptive-tutor"),
+            "grader",
+            "--socket",
+            str(socket_path),
+            "--timeout-seconds",
+            "600",
+        ],
+        cwd=ROOT,
+        env=environment,
+        stdout=output,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        healthy, _ = grader_health(socket_path)
+        if healthy:
+            return process, output
+        if process.poll() is not None:
+            break
+        time.sleep(0.5)
+    output.flush()
+    detail = _sanitize(log_path.read_text(encoding="utf-8")[-4000:])
+    raise RuntimeError("isolated grader did not become healthy:\n" + detail)
+
+
+def _stop_process(process: subprocess.Popen[str], output: Any) -> None:
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+    output.close()
+
+
+def _private_repository_assertions(
+    api: GitHubAPI, owner: str, workspace: str, curriculum: str
+) -> dict[str, bool]:
+    workspace_data = api.repository(owner, workspace)
+    curriculum_data = api.repository(owner, curriculum)
+    return {
+        "private_workspace": workspace_data.get("private") is True,
+        "private_curriculum_repository": curriculum_data.get("private") is True,
+        "repositories_are_distinct": workspace_data.get("id") != curriculum_data.get("id"),
+        "workspace_push_permission": bool(
+            (workspace_data.get("permissions") or {}).get("push")
+        ),
+        "curriculum_push_permission": bool(
+            (curriculum_data.get("permissions") or {}).get("push")
+        ),
+    }
+
+
+def prove(evidence_path: Path) -> None:
+    token = _github_token()
+    os.environ["ADAPTIVE_TUTOR_GITHUB_TOKEN"] = token
+    api = GitHubAPI(token)
+    github: GitHubClient | None = None
+    try:
+        owner, workspace, curriculum = _repository_names(api)
+        workspace_protected, curriculum_protected = _prepare_repositories(
+            api, owner, workspace, curriculum
+        )
+        run_id_text = datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8]
+        run_root = PRIVATE_ROOT / "runs" / run_id_text
+        _private_directory(run_root)
+        package = _download_private_curriculum(api, owner, curriculum, run_root)
+        grader_socket = run_root / "grader" / "grader.sock"
+        config, settings, database = _initialize_runtime(
+            run_root, package, owner, workspace, curriculum, grader_socket
+        )
+        github = GitHubClient(settings.github)
+        orchestrator = TutorOrchestrator(
+            settings,
+            database,
+            github,
+            EvaluationService(database, CodexRunner(settings.codex, database)),
+        )
+        application = create_app(settings, database, orchestrator)
+        worker = Worker(JobQueue(database), orchestrator.handlers(), worker_id="controlled-e2e")
+
+        created = orchestrator.create_next_assignment(
+            LearnerContext(available_minutes=45, energy="medium")
+        )
+        assignment_id = str(created["id"])
+        branch = str(created["branch_name"])
+        pull_number = int(created["pull_number"])
+        publication_sha = str(created["head_sha"])
+        solution_sha = _commit_solution(api, owner, workspace, branch)
+
+        repository_payload = {"full_name": f"{owner}/{workspace}", "private": True}
+        push_payload = {
+            "ref": f"refs/heads/{branch}",
+            "before": publication_sha,
+            "after": solution_sha,
+            "deleted": False,
+            "head_commit": {
+                "id": solution_sha,
+                "message": "Complete bounded queue repair\n\nConfidence: 92",
+            },
+            "repository": repository_payload,
+        }
+        secret = settings.webhook_secret
+        if not secret:
+            raise RuntimeError("controlled webhook secret was not loaded")
+        with TestClient(application) as client:
+            push_delivery = str(uuid.uuid4())
+            first_push = _deliver(client, secret, "push", push_delivery, push_payload)
+            duplicate_push = _deliver(client, secret, "push", push_delivery, push_payload)
+            if first_push["duplicate"] or not duplicate_push["duplicate"]:
+                raise RuntimeError("push delivery idempotency failed")
+            _run_job(worker, database, str(first_push["job_id"]), timeout=120)
+
+            queued_run = _find_workflow_run(
+                api, owner, workspace, assignment_id, branch, solution_sha
+            )
+            actions_run_id = int(queued_run["id"])
+            runner_root = run_root / "runner"
+            runner_content, runner_filename, _ = _runner_download(
+                api, owner, workspace
+            )
+            _extract_runner(runner_content, runner_filename, runner_root)
+            control_environment = dict(os.environ)
+
+            def stage_runner(trusted: Path) -> tuple[Path, Path]:
+                return _stage_evaluator(
+                    config,
+                    assignment_id,
+                    branch,
+                    solution_sha,
+                    actions_run_id,
+                    trusted,
+                    control_environment,
+                )
+
+            ephemeral_removed, staged_bundle, staged_key = _run_ephemeral_runner(
+                api,
+                owner,
+                workspace,
+                runner_root,
+                run_root / "runner.log",
+                stage_runner,
+            )
+            completed_run = _wait_run_completed(
+                api, owner, workspace, actions_run_id
+            )
+            if completed_run.get("conclusion") != "success":
+                detail = _sanitize((run_root / "runner.log").read_text(encoding="utf-8")[-6000:])
+                raise RuntimeError("GitHub evaluator workflow did not succeed:\n" + detail)
+            trusted_consumed = not staged_bundle.exists() and not staged_key.exists()
+
+            workflow_payload = {
+                "action": "completed",
+                "workflow_run": completed_run,
+                "repository": repository_payload,
+            }
+            workflow_delivery = str(uuid.uuid4())
+            first_workflow = _deliver(
+                client, secret, "workflow_run", workflow_delivery, workflow_payload
+            )
+            duplicate_workflow = _deliver(
+                client, secret, "workflow_run", workflow_delivery, workflow_payload
+            )
+            if first_workflow["duplicate"] or not duplicate_workflow["duplicate"]:
+                raise RuntimeError("workflow delivery idempotency failed")
+
+            grader, grader_output = _start_grader(
+                grader_socket, run_root / "grader.log"
+            )
+            try:
+                _run_job(
+                    worker,
+                    database,
+                    str(first_workflow["job_id"]),
+                    timeout=900,
+                )
+            finally:
+                _stop_process(grader, grader_output)
+
+            post_process_duplicate = _deliver(
+                client, secret, "workflow_run", workflow_delivery, workflow_payload
+            )
+            if not post_process_duplicate["duplicate"]:
+                raise RuntimeError("processed workflow replay was not recognized")
+
+            evaluation_row = database.fetch_one(
+                """
+                SELECT q.evaluation_json, q.review_posted_at, q.review_external_id,
+                       ae.evidence_json
+                FROM qualitative_evaluations q
+                JOIN automated_evaluations ae ON ae.id=q.automated_evaluation_id
+                JOIN attempts at ON at.id=q.attempt_id
+                WHERE at.assignment_id=? AND q.review_kind='initial'
+                """,
+                (assignment_id,),
+            )
+            if evaluation_row is None:
+                raise RuntimeError("controlled evaluation was not persisted")
+            evaluation = QualitativeEvaluation.model_validate_json(
+                str(evaluation_row["evaluation_json"])
+            )
+            automated = AutomatedEvaluation.model_validate_json(
+                str(evaluation_row["evidence_json"])
+            )
+            reviews = api.request(
+                "GET",
+                f"/repos/{owner}/{workspace}/pulls/{pull_number}/reviews",
+                params={"per_page": 100},
+            ).json()
+            review_matches = [
+                review
+                for review in reviews
+                if "Adaptive Tutor review" in str(review.get("body") or "")
+            ]
+            if len(review_matches) != 1:
+                raise RuntimeError("expected exactly one structured GitHub review")
+
+            assignment = database.fetch_one(
+                "SELECT status, current_stage FROM assignments WHERE id=?", (assignment_id,)
+            )
+            if assignment is None:
+                raise RuntimeError("controlled assignment disappeared")
+            next_challenge_id = assignment_id
+            next_challenge_kind = "stage"
+            next_pull_number = pull_number
+            if assignment["status"] == "completed":
+                next_created = orchestrator.create_next_assignment(
+                    LearnerContext(available_minutes=45, energy="medium")
+                )
+                next_challenge_id = str(next_created["id"])
+                next_pull_number = int(next_created["pull_number"])
+                next_challenge_kind = "assignment"
+            elif assignment["status"] != "follow_up":
+                raise RuntimeError(
+                    f"controlled review left assignment in {assignment['status']}"
+                )
+
+            evidence_count_row = database.fetch_one(
+                "SELECT COUNT(*) count FROM mastery_evidence WHERE attempt_id IN "
+                "(SELECT id FROM attempts WHERE assignment_id=?)",
+                (assignment_id,),
+            )
+            evidence_count = int(evidence_count_row["count"]) if evidence_count_row else 0
+            observed_concept_evidence = sum(
+                item.outcome != "not_observed" for item in evaluation.concept_evidence
+            )
+            model_row = database.fetch_one(
+                "SELECT status, input_tokens, output_tokens FROM model_invocations "
+                "WHERE purpose='grading' ORDER BY started_at DESC LIMIT 1"
+            )
+            if model_row is None:
+                raise RuntimeError("real qualitative grader invocation was not recorded")
+            report = ReportService(database).generate(
+                settings.learner_id, settings.active_curriculum, "weekly"
+            )
+            status = StatusService(database).get_status(
+                settings.learner_id, settings.active_curriculum
+            )
+            headers = {"Authorization": f"Bearer {settings.api_token}"}
+            dashboard_status = client.get("/api/v1/get_status", headers=headers)
+            dashboard_report = client.post(
+                "/api/v1/generate_report?period=weekly", headers=headers
+            )
+            if dashboard_status.status_code != 200 or dashboard_report.status_code != 200:
+                raise RuntimeError("controlled evidence is not visible through the private API")
+
+        cli_environment = dict(os.environ)
+        cli_status = json.loads(
+            _run(
+                [
+                    str(ROOT / ".venv" / "bin" / "adaptive-tutor"),
+                    "--config",
+                    str(config),
+                    "status",
+                    "--json",
+                ],
+                env=cli_environment,
+            ).stdout
+        )
+        cli_report = json.loads(
+            _run(
+                [
+                    str(ROOT / ".venv" / "bin" / "adaptive-tutor"),
+                    "--config",
+                    str(config),
+                    "report",
+                    "--period",
+                    "weekly",
+                    "--format",
+                    "json",
+                ],
+                env=cli_environment,
+            ).stdout
+        )
+        artifacts = api.request(
+            "GET", f"/repos/{owner}/{workspace}/actions/runs/{actions_run_id}/artifacts"
+        ).json()
+        artifact_matches = [
+            item
+            for item in artifacts.get("artifacts", [])
+            if item.get("name") == "adaptive-tutor-evidence" and not item.get("expired")
+        ]
+        repository_assertions = _private_repository_assertions(
+            api, owner, workspace, curriculum
+        )
+        assertions = {
+            **repository_assertions,
+            "assignment_published_to_real_pull_request": pull_number > 0,
+            "automated_evidence_bound_to_commit": automated.commit_sha == solution_sha,
+            "branch_protection_enabled": workspace_protected and curriculum_protected,
+            "cli_visibility": cli_status.get("recent_scores") is not None
+            and cli_report.get("study_activity", {}).get("attempts", 0) >= 1,
+            "credential_free_ci_passed": automated.learner_passed,
+            "dashboard_and_report_visibility": bool(status.recent_scores)
+            and report.data["study_activity"]["attempts"] >= 1,
+            "duplicate_push_delivery_safe": duplicate_push["event_id"]
+            == first_push["event_id"],
+            "duplicate_workflow_delivery_safe": duplicate_workflow["event_id"]
+            == first_workflow["event_id"],
+            "ephemeral_runner_removed": ephemeral_removed,
+            "external_private_curriculum_loaded": True,
+            "model_schema_validated": model_row["status"] == "succeeded",
+            "next_challenge_published": next_pull_number > 0,
+            "normalized_artifact_available": len(artifact_matches) == 1,
+            "state_updated_once": evidence_count == observed_concept_evidence,
+            "structured_review_posted_once": len(review_matches) == 1,
+            "trusted_evaluator_consumed": trusted_consumed,
+            "workflow_provenance_verified": github.verify_evaluator_run(actions_run_id)[
+                "commit_sha"
+            ]
+            == solution_sha,
+        }
+        failed = sorted(name for name, passed in assertions.items() if not passed)
+        if failed:
+            raise RuntimeError("controlled E2E assertions failed: " + ", ".join(failed))
+        output = {
+            "schema_version": "1.0",
+            "evidence_kind": "controlled_private_e2e",
+            "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "source_revision": _run(["git", "rev-parse", "HEAD"]).stdout.strip(),
+            "source_files": list(SOURCE_FILES),
+            "source_digest": _source_digest(),
+            "authentication_mode": "development_token",
+            "assertions": assertions,
+            "observations": {
+                "artifact_count": len(artifact_matches),
+                "assignment_id": assignment_id,
+                "ci_conclusion": str(completed_run["conclusion"]),
+                "ci_event": str(completed_run["event"]),
+                "concept_evidence_count": len(evaluation.concept_evidence),
+                "grader_classification": evaluation.classification,
+                "grader_confidence": evaluation.grader_confidence,
+                "model_input_tokens": int(model_row["input_tokens"] or 0),
+                "model_output_tokens": int(model_row["output_tokens"] or 0),
+                "next_challenge_id": next_challenge_id,
+                "next_challenge_kind": next_challenge_kind,
+                "overall_score": evaluation.overall_score,
+                "pull_number": pull_number,
+                "review_follow_up": evaluation.follow_up,
+                "runner_kind": automated.runner,
+            },
+            "sanitized": True,
+        }
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        evidence_path.write_text(
+            json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        print("Controlled private GitHub E2E: PASS (sanitized evidence written)")
+    finally:
+        if github is not None:
+            github.close()
+        api.close()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--evidence", type=Path, default=EVIDENCE_PATH)
+    parser.add_argument(
+        "--confirm-private-resources",
+        action="store_true",
+        help="Confirm creation or mutation of dedicated private GitHub proof repositories.",
+    )
+    args = parser.parse_args()
+    if not args.confirm_private_resources:
+        print("Refusing to modify GitHub without --confirm-private-resources")
+        return 2
+    try:
+        prove(args.evidence.resolve())
+    except (OSError, RuntimeError, ValueError, httpx.HTTPError, zipfile.BadZipFile) as exc:
+        print("Controlled private GitHub E2E failed: " + _sanitize(str(exc)))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -34,6 +34,23 @@ jobs:
       ASSIGNMENT_BRANCH: ${{ inputs.branch }}
       ASSIGNMENT_COMMIT: ${{ inputs.commit_sha }}
     steps:
+      - name: Request commit-bound trusted evaluator
+        shell: bash
+        run: |
+          set -euo pipefail
+          trusted_dir="${RUNNER_TEMP}/trusted"
+          install -d -m 0700 "${trusted_dir}" "${trusted_dir}/bin"
+          install -m 0600 /dev/null "${trusted_dir}/stage-request"
+          for _ in $(seq 1 120); do
+            if test -f "${trusted_dir}/assignment-bundle.json" \
+              && test -f "${trusted_dir}/evaluator-signing.pub" \
+              && test -x "${trusted_dir}/bin/adaptive-tutor"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Trusted evaluator provisioning timed out" >&2
+          exit 1
       - name: Check out learner commit without retained credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -52,6 +69,7 @@ jobs:
           set -euo pipefail
           trusted_bundle="${RUNNER_TEMP}/trusted/assignment-bundle.json"
           verification_key="${RUNNER_TEMP}/trusted/evaluator-signing.pub"
+          evaluator="${RUNNER_TEMP}/trusted/bin/adaptive-tutor"
           evidence_dir="${RUNNER_TEMP}/adaptive-tutor-evidence"
           branch_tail="${ASSIGNMENT_BRANCH#assignment/}"
           [[ "${branch_tail}" =~ ^([0-9]{4,12})-[a-z0-9-]+$ ]]
@@ -63,9 +81,12 @@ jobs:
           test -f "${verification_key}"
           test ! -L "${verification_key}"
           test "$(stat -c '%a' "${verification_key}")" = "600"
+          test -f "${evaluator}"
+          test ! -L "${evaluator}"
+          test "$(stat -c '%a' "${evaluator}")" = "700"
           install -d -m 0700 "${evidence_dir}"
           env -i \
-            PATH="/usr/local/bin:/usr/bin:/bin" \
+            PATH="${RUNNER_TEMP}/trusted/bin:/usr/bin:/bin" \
             LANG="C.UTF-8" \
             LC_ALL="C.UTF-8" \
             adaptive-tutor evaluate \
