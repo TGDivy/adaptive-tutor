@@ -63,10 +63,17 @@ def test_progressive_hints_and_stages(initialized: tuple[Database, object]) -> N
     assert service.unlock_follow_up("A-0001") is None
 
 
-def test_validator_rejects_recent_problem(initialized: tuple[Database, object]) -> None:
+def test_generator_avoids_and_validator_rejects_recent_problem(
+    initialized: tuple[Database, object],
+) -> None:
     recent_request = request().model_copy(
         update={"recent_assignments": [{"slug": "bounded-work-queue"}]}
     )
     bundle = TemplateAssignmentGenerator().generate(recent_request)
+    assert bundle.slug == "rolling-event-counter"
+    assert AssignmentValidator().validate(
+        bundle, recent_request, run_reference=False
+    ).valid
+    repeated = bundle.model_copy(update={"slug": "bounded-work-queue"})
     with pytest.raises(AssignmentValidationError, match="repeats"):
-        AssignmentValidator().validate(bundle, recent_request, run_reference=False)
+        AssignmentValidator().validate(repeated, recent_request, run_reference=False)

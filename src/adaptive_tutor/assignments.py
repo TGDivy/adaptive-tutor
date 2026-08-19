@@ -43,6 +43,9 @@ class TemplateAssignmentGenerator:
             ExerciseType.REFACTORING,
             ExerciseType.PERFORMANCE,
         }:
+            recent_slugs = {str(item.get("slug")) for item in request.recent_assignments[-3:]}
+            if "bounded-work-queue" in recent_slugs:
+                return self._window_counter_bundle(request, primary, exercise_type)
             return self._coding_bundle(request, primary, exercise_type)
         return self._reasoning_bundle(request, primary, exercise_type)
 
@@ -245,6 +248,179 @@ def test_wraparound_and_repeated_cycles() -> None:
                         "its API and storage trade-offs."
                     ),
                     unlock_condition="Stage 1 passes with a supported explanation.",
+                ),
+            ],
+            validation_command=["python", "-m", "pytest", "-q"],
+        )
+
+    @staticmethod
+    def _window_counter_bundle(
+        request: AssignmentRequest,
+        primary: str,
+        exercise_type: ExerciseType,
+    ) -> AssignmentBundle:
+        minutes = min(request.context.available_minutes, 50)
+        title = "Repair a rolling event counter"
+        readme = f"""# {title}
+
+`src/rolling_counter.py` counts events in a half-open moving window. The current
+expiration loop mutates a list while iterating over it and can retain expired
+events. Repair it under these constraints:
+
+1. timestamps passed to `record` are nondecreasing;
+2. `count(now)` retains exactly timestamps where `now - timestamp < window`;
+3. repeated calls to `count` without new events are idempotent;
+4. construction rejects a non-positive window;
+5. the public API remains unchanged.
+
+Add a regression test with several consecutive expired events. Run
+`python -m pytest -q`. In `ANSWER.md`, state the retained-range invariant,
+explain the mutation bug, compare one alternative representation, and report
+confidence from 0-100.
+
+Target concept: `{primary}`. Expected time: {minutes} minutes. Difficulty:
+{request.target_difficulty}/10.
+"""
+        starter = """class RollingCounter:
+    def __init__(self, window: float) -> None:
+        if window <= 0:
+            raise ValueError("window must be positive")
+        self._window = window
+        self._timestamps: list[float] = []
+
+    def record(self, timestamp: float) -> None:
+        self._timestamps.append(timestamp)
+
+    def count(self, now: float) -> int:
+        for timestamp in self._timestamps:
+            if now - timestamp >= self._window:
+                self._timestamps.remove(timestamp)
+        return len(self._timestamps)
+"""
+        public_test = """import pytest
+
+from src.rolling_counter import RollingCounter
+
+
+def test_counts_recent_events() -> None:
+    counter = RollingCounter(10)
+    counter.record(0)
+    counter.record(8)
+    assert counter.count(10) == 1
+    assert counter.count(10) == 1
+
+
+def test_window_must_be_positive() -> None:
+    with pytest.raises(ValueError):
+        RollingCounter(0)
+"""
+        reference = """class RollingCounter:
+    def __init__(self, window: float) -> None:
+        if window <= 0:
+            raise ValueError("window must be positive")
+        self._window = window
+        self._timestamps: list[float] = []
+
+    def record(self, timestamp: float) -> None:
+        self._timestamps.append(timestamp)
+
+    def count(self, now: float) -> int:
+        expired = 0
+        while (
+            expired < len(self._timestamps)
+            and now - self._timestamps[expired] >= self._window
+        ):
+            expired += 1
+        del self._timestamps[:expired]
+        return len(self._timestamps)
+"""
+        hidden_test = """from src.rolling_counter import RollingCounter
+
+
+def test_expires_consecutive_prefix_and_respects_boundary() -> None:
+    counter = RollingCounter(5)
+    for timestamp in (1, 2, 3, 6, 7):
+        counter.record(timestamp)
+    assert counter.count(7) == 3
+    assert counter.count(8) == 2
+    assert counter.count(8) == 2
+"""
+        return AssignmentBundle(
+            slug="rolling-event-counter",
+            title=title,
+            summary="Repair mutation-during-iteration and state a moving-window invariant.",
+            concepts=request.target_concepts,
+            exercise_type=exercise_type,
+            difficulty=request.target_difficulty,
+            expected_minutes=minutes,
+            files=[
+                AssignmentFile(path="README.md", content=readme, role="instructions"),
+                AssignmentFile(path="src/__init__.py", content="", role="starter"),
+                AssignmentFile(
+                    path="src/rolling_counter.py", content=starter, role="starter"
+                ),
+                AssignmentFile(
+                    path="tests/test_counter.py", content=public_test, role="public_test"
+                ),
+                AssignmentFile(
+                    path="reference/rolling_counter.py", content=reference, role="reference"
+                ),
+                AssignmentFile(
+                    path="evaluator/test_hidden.py", content=hidden_test, role="evaluator"
+                ),
+                AssignmentFile(
+                    path="ANSWER.md",
+                    content=(
+                        "# Invariant\n\n# Failure mechanism\n\n# Alternative\n\n"
+                        "Confidence (0-100):\n"
+                    ),
+                    role="starter",
+                ),
+            ],
+            hidden_evaluator={
+                "reference_replacements": {
+                    "src/rolling_counter.py": "reference/rolling_counter.py"
+                },
+                "extra_tests": {"tests/test_hidden.py": "evaluator/test_hidden.py"},
+                "constraints": [
+                    "all and only expired prefix events are removed",
+                    "the boundary is half-open",
+                    "repeated observations are idempotent",
+                ],
+                "hints": [
+                    "Trace the list after each removal when three old values are adjacent.",
+                    "The issue is mutation of the collection being iterated.",
+                    "Nondecreasing timestamps make expired events a contiguous prefix.",
+                    "Find the first retained index, then delete the prefix once.",
+                    "Advance while now - timestamps[index] >= window, then delete [:index].",
+                ],
+            },
+            rubric={
+                "correctness": 0.45,
+                "tests": 0.20,
+                "reasoning": 0.25,
+                "communication": 0.10,
+            },
+            reference_expectations=[
+                "Expiration removes a prefix without mutating during iteration.",
+                "The exact boundary and idempotence are tested.",
+                "The explanation connects sorted timestamps to the chosen algorithm.",
+            ],
+            stages=[
+                AssignmentStage(
+                    number=1,
+                    title="Correct expiration",
+                    instructions="Repair expiration and state the moving-window invariant.",
+                    unlock_condition="Public and hidden boundary checks pass.",
+                ),
+                AssignmentStage(
+                    number=2,
+                    title="Ordering follow-up",
+                    instructions=(
+                        "Now allow timestamps to arrive out of order. Propose a representation "
+                        "and analyze its update and query costs."
+                    ),
+                    unlock_condition="Stage 1 is correct and justified.",
                 ),
             ],
             validation_command=["python", "-m", "pytest", "-q"],

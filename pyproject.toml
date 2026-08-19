@@ -38,6 +38,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "build>=1.2,<2",
+  "httpx2>=2.10,<3",
   "mkdocs-material>=9.6,<10",
   "mypy>=1.17,<2",
   "pip-audit>=2.9,<3",

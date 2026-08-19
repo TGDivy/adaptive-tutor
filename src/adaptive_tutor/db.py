@@ -77,7 +77,7 @@ class Database:
 
     def migration_versions(self) -> list[str]:
         try:
-            with self.connect() as connection:
+            with contextlib.closing(self.connect()) as connection:
                 return [
                     row["version"]
                     for row in connection.execute(
@@ -93,17 +93,17 @@ class Database:
             return cursor.rowcount
 
     def fetch_one(self, sql: str, parameters: Sequence[Any] = ()) -> dict[str, Any] | None:
-        with self.connect() as connection:
+        with contextlib.closing(self.connect()) as connection:
             row = connection.execute(sql, parameters).fetchone()
             return dict(row) if row is not None else None
 
     def fetch_all(self, sql: str, parameters: Sequence[Any] = ()) -> list[dict[str, Any]]:
-        with self.connect() as connection:
+        with contextlib.closing(self.connect()) as connection:
             return [dict(row) for row in connection.execute(sql, parameters).fetchall()]
 
     def integrity_check(self) -> tuple[bool, str]:
         try:
-            with self.connect() as connection:
+            with contextlib.closing(self.connect()) as connection:
                 result = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
                 foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
             if result != "ok" or foreign_keys:
@@ -114,14 +114,18 @@ class Database:
 
     def backup(self, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with self.connect() as source, sqlite3.connect(destination) as target:
+        with contextlib.closing(self.connect()) as source, contextlib.closing(
+            sqlite3.connect(destination)
+        ) as target:
             source.backup(target)
         destination.chmod(0o600)
 
     def restore(self, source: Path) -> None:
         if not source.is_file():
             raise ConfigurationError(f"Backup does not exist: {source}")
-        with sqlite3.connect(source) as backup, self.connect() as target:
+        with contextlib.closing(sqlite3.connect(source)) as backup, contextlib.closing(
+            self.connect()
+        ) as target:
             if backup.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise ConfigurationError("Backup failed SQLite integrity check")
             backup.backup(target)
