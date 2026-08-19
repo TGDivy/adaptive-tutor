@@ -141,7 +141,16 @@
       "status": "complete",
       "evidence": ["README.md", "scripts/check-docs", "tests/test_documentation.py", "mkdocs.yml"]
     },
-    {"id": "screenshots", "status": "pending", "evidence": []},
+    {
+      "id": "screenshots",
+      "status": "in_progress",
+      "evidence": [
+        "scripts/capture-screenshots",
+        "scripts/check-screenshots",
+        "tests/test_screenshots.py",
+        "docs/product-tour.md"
+      ]
+    },
     {
       "id": "automated_tests",
       "status": "complete",

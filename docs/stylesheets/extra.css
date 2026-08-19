@@ -24,49 +24,76 @@
   background: color-mix(in srgb, var(--md-primary-fg-color) 92%, transparent);
 }
 
-.hero {
-  display: grid;
-  gap: 2rem;
-  grid-template-columns: minmax(0, 1.35fr) minmax(16rem, 0.65fr);
-  margin: 1rem 0 2.5rem;
-  padding: clamp(1.5rem, 4vw, 3.5rem);
-  border: 1px solid color-mix(in srgb, var(--md-accent-fg-color) 25%, transparent);
-  border-radius: 1.25rem;
-  background:
-    radial-gradient(circle at 95% 10%, color-mix(in srgb, #6f7cff 22%, transparent), transparent 45%),
-    radial-gradient(circle at 5% 95%, color-mix(in srgb, #58d7b3 20%, transparent), transparent 42%),
-    var(--md-code-bg-color);
+.product-intro {
+  max-width: 48rem;
+  margin: 1.25rem 0 1.75rem;
 }
 
-.hero h1 {
+.product-intro h1 {
   margin: 0 0 1rem;
-  font-size: clamp(2.3rem, 6vw, 4.6rem);
-  line-height: 0.98;
-  letter-spacing: -0.055em;
+  font-size: 3rem;
+  line-height: 1.05;
+  letter-spacing: 0;
 }
 
-.hero p {
+.product-intro p {
   max-width: 46rem;
   font-size: 1.08rem;
 }
 
-.hero-card {
-  align-self: center;
-  padding: 1.25rem;
-  border: 1px solid color-mix(in srgb, var(--md-accent-fg-color) 35%, transparent);
-  border-radius: 1rem;
-  background: color-mix(in srgb, var(--md-default-bg-color) 84%, transparent);
-  box-shadow: 0 1.2rem 3rem rgb(0 0 0 / 14%);
+.product-intro .md-button {
+  margin: 0 0.5rem 0.5rem 0;
 }
 
-.hero-card code {
+.product-preview {
+  margin: 0 0 2.5rem;
+}
+
+.product-preview img {
   display: block;
-  padding: 0.3rem 0;
-  background: transparent;
+  width: 100%;
+  height: auto;
+  border: 1px solid color-mix(in srgb, var(--md-default-fg-color) 20%, transparent);
+  border-radius: 6px;
+  box-shadow: 0 1rem 2.5rem rgb(0 0 0 / 14%);
+}
+
+.product-preview figcaption {
+  margin-top: 0.6rem;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.72rem;
+}
+
+.mobile-capture {
+  max-width: 28rem;
+}
+
+.mobile-capture img {
+  width: 100%;
+  height: auto;
+}
+
+.loop-path {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.65rem;
+  padding: 1rem;
+  border-left: 3px solid var(--md-accent-fg-color);
+  background: var(--md-code-bg-color);
+}
+
+.loop-path span {
+  font-family: var(--md-code-font-family);
+  font-size: 0.78rem;
+}
+
+.loop-path b {
+  color: var(--md-accent-fg-color);
 }
 
 .grid.cards > ul > li {
-  border-radius: 0.8rem;
+  border-radius: 8px;
   transition: border-color 150ms ease, transform 150ms ease;
 }
 
@@ -76,7 +103,7 @@
 }
 
 @media (max-width: 52rem) {
-  .hero {
-    grid-template-columns: 1fr;
+  .product-intro h1 {
+    font-size: 2.35rem;
   }
 }

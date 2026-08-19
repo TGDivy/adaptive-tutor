@@ -44,6 +44,7 @@ nav:
   - Home: index.md
   - Get started:
       - Installation: getting-started.md
+      - Product tour: product-tour.md
       - CLI reference: cli.md
       - FAQ: faq.md
       - Troubleshooting: troubleshooting.md

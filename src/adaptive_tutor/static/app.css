@@ -181,8 +181,18 @@ h1, h2, h3 { line-height: 1.18; letter-spacing: 0; }
 .readiness-label { min-width: 0; display: flex; justify-content: space-between; gap: 8px; text-transform: capitalize; }
 .readiness-label strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .readiness-label span { color: var(--muted); font-size: 12px; }
-.bar { height: 7px; overflow: hidden; border-radius: 3px; background: #e6ebe8; }
-.bar i { display: block; height: 100%; background: var(--green); }
+.bar {
+  width: 100%;
+  height: 7px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 3px;
+  background: #e6ebe8;
+  appearance: none;
+}
+.bar::-webkit-progress-bar { background: #e6ebe8; }
+.bar::-webkit-progress-value { background: var(--green); }
+.bar::-moz-progress-bar { background: var(--green); }
 .bar.unknown { border: 1px dashed var(--line-strong); background: transparent; }
 .readiness-value { font-weight: 750; font-variant-numeric: tabular-nums; text-align: right; }
 .readiness-value small { display: block; color: var(--muted); font-size: 10px; font-weight: 500; }
@@ -256,7 +266,7 @@ h1, h2, h3 { line-height: 1.18; letter-spacing: 0; }
 
 .assignment-shell > h1 { max-width: 780px; margin-bottom: 9px; font-size: 34px; }
 .assignment-summary { max-width: 760px; color: var(--muted); font-size: 17px; }
-.assignment-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 24px; margin-top: 30px; }
+.assignment-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; align-items: start; gap: 24px; margin-top: 30px; }
 .assignment-brief, .assignment-sidebar > section { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .assignment-brief { min-width: 0; padding: 24px; }
 .assignment-brief h2 { font-size: 18px; }

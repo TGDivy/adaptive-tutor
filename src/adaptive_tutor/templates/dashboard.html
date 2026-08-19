@@ -65,7 +65,12 @@
               {% if item.readiness is not none %}
               <div class="readiness-row">
                 <div class="readiness-label"><strong>{{ item.domain|replace('-', ' ') }}</strong><span>{{ item.assessed_concept_count }}/{{ item.concept_count }} assessed</span></div>
-                <div class="bar"><i style="width: {{ (item.readiness * 100)|round|int }}%"></i></div>
+                <progress
+                  class="bar"
+                  max="100"
+                  value="{{ (item.readiness * 100)|round|int }}"
+                  aria-label="{{ item.domain|replace('-', ' ') }} readiness"
+                ></progress>
                 <span class="readiness-value">{{ (item.readiness * 100)|round|int }}% <small>{{ 'high' if item.uncertainty <= 0.3 else 'medium' if item.uncertainty <= 0.6 else 'low' }} confidence</small></span>
               </div>
               {% endif %}

@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""Validate screenshot provenance, freshness, dimensions, and visible content."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import sys
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+from PIL import Image, ImageStat
+
+ROOT = Path(__file__).resolve().parents[1]
+MANIFEST = ROOT / "docs" / "assets" / "screenshots" / "manifest.json"
+REQUIRED_ASSETS = {
+    "setup.png",
+    "doctor.png",
+    "status-readiness.png",
+    "assignment-created.png",
+    "report.png",
+    "dashboard.png",
+    "dashboard-mobile.png",
+    "assignment-detail.png",
+    "terminal-tour.gif",
+}
+
+
+def _source_digest(paths: list[str], failures: list[str]) -> str:
+    digest = hashlib.sha256()
+    for value in paths:
+        path = PurePosixPath(value)
+        target = ROOT / value
+        if path.is_absolute() or ".." in path.parts or path.as_posix() != value:
+            failures.append(f"unsafe screenshot source path: {value}")
+            continue
+        if not target.is_file():
+            failures.append(f"missing screenshot source: {value}")
+            continue
+        digest.update(value.encode())
+        digest.update(b"\0")
+        digest.update(target.read_bytes())
+        digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
+
+
+def _validate_image(record: dict[str, Any], failures: list[str]) -> None:
+    value = record.get("path")
+    if not isinstance(value, str):
+        failures.append("screenshot record has no path")
+        return
+    path = PurePosixPath(value)
+    target = ROOT / value
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or path.as_posix() != value
+        or not value.startswith("docs/assets/screenshots/")
+    ):
+        failures.append(f"unsafe screenshot asset path: {value}")
+        return
+    if not target.is_file():
+        failures.append(f"missing screenshot asset: {value}")
+        return
+    expected_digest = record.get("sha256")
+    actual_digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    if actual_digest != expected_digest:
+        failures.append(f"stale screenshot digest: {value}")
+    try:
+        with Image.open(target) as image:
+            width, height = image.size
+            frames = getattr(image, "n_frames", 1)
+            sample = image.convert("RGB")
+            sample.thumbnail((160, 160), Image.Resampling.LANCZOS)
+            extrema = ImageStat.Stat(sample).extrema
+            colors = sample.getcolors(maxcolors=160 * 160)
+    except OSError as exc:
+        failures.append(f"unreadable screenshot {value}: {exc}")
+        return
+    if [width, height] != [record.get("width"), record.get("height")]:
+        failures.append(f"screenshot dimensions do not match manifest: {value}")
+    if frames != record.get("frames"):
+        failures.append(f"screenshot frame count does not match manifest: {value}")
+    if width < 390 or height < 340:
+        failures.append(f"screenshot is too small: {value}")
+    if target.stat().st_size < 12_000:
+        failures.append(f"screenshot has implausibly little image data: {value}")
+    tonal_range = sum(high - low for low, high in extrema)
+    if tonal_range < 90 or colors is None or len(colors) < 32:
+        failures.append(f"screenshot appears blank or visually degenerate: {value}")
+
+
+def main() -> int:
+    failures: list[str] = []
+    try:
+        payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Screenshot validation failed: manifest is unreadable: {exc}", file=sys.stderr)
+        return 1
+    if payload.get("schema_version") != "1.0":
+        failures.append("screenshot manifest schema_version must be 1.0")
+    if payload.get("generator") != "scripts/capture-screenshots":
+        failures.append("screenshot manifest generator is invalid")
+    sources = payload.get("source_files")
+    if not isinstance(sources, list) or not all(isinstance(value, str) for value in sources):
+        failures.append("screenshot source_files must be a path list")
+        sources = []
+    if _source_digest(sources, failures) != payload.get("source_digest"):
+        failures.append("screenshots are stale relative to product sources")
+    assets = payload.get("assets")
+    if not isinstance(assets, list) or not all(isinstance(item, dict) for item in assets):
+        failures.append("screenshot assets must be an object list")
+        assets = []
+    names = {Path(str(item.get("path", ""))).name for item in assets}
+    missing = sorted(REQUIRED_ASSETS - names)
+    if missing:
+        failures.append("missing required screenshot records: " + ", ".join(missing))
+    if len(names) != len(assets):
+        failures.append("screenshot asset paths must be unique")
+    for item in assets:
+        _validate_image(item, failures)
+
+    tour = (ROOT / "docs" / "product-tour.md").read_text(encoding="utf-8")
+    for name in REQUIRED_ASSETS:
+        if name not in tour and name not in {"dashboard-mobile.png", "assignment-detail.png"}:
+            failures.append(f"product tour does not reference {name}")
+    if failures:
+        print("Screenshot validation failed:", file=sys.stderr)
+        for failure in failures:
+            print(f"  - {failure}", file=sys.stderr)
+        return 1
+    print(f"Screenshot validation: PASS ({len(assets)} real product assets)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

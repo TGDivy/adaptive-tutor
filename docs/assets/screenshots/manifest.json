@@ -1,0 +1,112 @@
+{
+  "assets": [
+    {
+      "frames": 1,
+      "height": 360,
+      "path": "docs/assets/screenshots/setup.png",
+      "sha256": "964e136dc1085ffcaa41de4d75cd201a0699f1c4f79553933011fcf9c5bc1a07",
+      "source": [
+        "adaptive-tutor --config /tmp/adaptive-tutor-docs-capture/init/config.yaml init"
+      ],
+      "width": 1180
+    },
+    {
+      "frames": 1,
+      "height": 580,
+      "path": "docs/assets/screenshots/doctor.png",
+      "sha256": "4532c32562889e1e2b2579b746e1d86272193e664c430d44bbacc93d93174deb",
+      "source": [
+        "adaptive-tutor --config \u2026/config.yaml doctor --offline"
+      ],
+      "width": 1180
+    },
+    {
+      "frames": 1,
+      "height": 560,
+      "path": "docs/assets/screenshots/status-readiness.png",
+      "sha256": "5f6bbbe0d88bfc23d9e571a2b1bd5fdb04c558d877c854423cfd0ce7bbb70fbd",
+      "source": [
+        "adaptive-tutor --config \u2026/config.yaml status",
+        "adaptive-tutor --config \u2026/config.yaml readiness"
+      ],
+      "width": 1180
+    },
+    {
+      "frames": 1,
+      "height": 540,
+      "path": "docs/assets/screenshots/assignment-created.png",
+      "sha256": "5ab4343665b8c0fd4c2cda3c806924e54a07e3ca1d031f72ec20e3612e082623",
+      "source": [
+        "adaptive-tutor demo --keep /tmp/adaptive-tutor-docs-capture/demo"
+      ],
+      "width": 1180
+    },
+    {
+      "frames": 1,
+      "height": 460,
+      "path": "docs/assets/screenshots/report.png",
+      "sha256": "8ee381d5ec186fae6364386913eb66b68512fd52f31efb747843b2a6e65fd54e",
+      "source": [
+        "adaptive-tutor --config \u2026/config.yaml report --period weekly"
+      ],
+      "width": 1180
+    },
+    {
+      "frames": 1,
+      "height": 1650,
+      "path": "docs/assets/screenshots/dashboard.png",
+      "sha256": "c71df38e6dc76b899d7e4293178371a03065547d6a50888ba5f6c6b131f6d716",
+      "source": [
+        "http://127.0.0.1:8876/"
+      ],
+      "width": 1440
+    },
+    {
+      "frames": 1,
+      "height": 1101,
+      "path": "docs/assets/screenshots/assignment-detail.png",
+      "sha256": "1a97bca075485715d77108835c7ae1dcdc42908544e262a30454550141ca412a",
+      "source": [
+        "http://127.0.0.1:8876/"
+      ],
+      "width": 1440
+    },
+    {
+      "frames": 1,
+      "height": 2811,
+      "path": "docs/assets/screenshots/dashboard-mobile.png",
+      "sha256": "e775c7bf1bf4329cdeb92afa7ff29d711c72cd87750bc8eb4dd1c923fc495f1f",
+      "source": [
+        "http://127.0.0.1:8876/"
+      ],
+      "width": 390
+    },
+    {
+      "frames": 5,
+      "height": 520,
+      "path": "docs/assets/screenshots/terminal-tour.gif",
+      "sha256": "1db3f0a3e2896205075acd4eace0c90d1d5abf47be47ff755964de3f2272d629",
+      "source": [
+        "setup.png",
+        "doctor.png",
+        "status-readiness.png",
+        "report.png"
+      ],
+      "width": 1000
+    }
+  ],
+  "generator": "scripts/capture-screenshots",
+  "playwright_version": "1.62.0",
+  "schema_version": "1.0",
+  "source_digest": "sha256:3d5c95b34880947c6d70e8b1924d67cf768de30b3b23c84b1695ac950c62cafc",
+  "source_files": [
+    "src/adaptive_tutor/cli.py",
+    "src/adaptive_tutor/dashboard.py",
+    "src/adaptive_tutor/demo.py",
+    "src/adaptive_tutor/reporting.py",
+    "src/adaptive_tutor/static/app.css",
+    "src/adaptive_tutor/templates/assignment.html",
+    "src/adaptive_tutor/templates/dashboard.html",
+    "curricula/systems-foundations/curriculum.yaml"
+  ]
+}

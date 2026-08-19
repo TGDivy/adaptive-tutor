@@ -4,61 +4,49 @@ hide:
   - toc
 ---
 
-<div class="hero" markdown>
-<div markdown>
+<div class="product-intro" markdown>
 
-# Deliberate practice, continuously adapted.
+# Adaptive Tutor
 
-Adaptive Tutor is a self-hosted, Git-native learning engine. It turns durable
-evidence from focused pull requests into the next useful challenge—without
+Self-hosted, Git-native adaptive learning. Turn durable evidence from focused
+pull requests into the next useful challenge without
 letting learner code near your tutor, repository-write, model, or agent
 credentials.
 
 [Get started](getting-started.md){ .md-button .md-button--primary }
-[See the architecture](architecture.md){ .md-button }
+[View the product](product-tour.md){ .md-button }
 
 </div>
-<div class="hero-card" markdown>
 
-**One local command. No credentials.**
-
-`adaptive-tutor demo`
-
-`✓ curriculum loaded`
-
-`✓ assignment validated`
-
-`✓ evidence evaluated`
-
-`✓ learner model updated`
-
-</div>
-</div>
+<figure class="product-preview">
+  <a href="product-tour/"><img src="assets/screenshots/dashboard.png" alt="Adaptive Tutor dashboard showing an active assignment, progress, reviews, misconceptions, and scores"></a>
+  <figcaption>Real credential-free demo state. Generated and freshness-checked from the current product.</figcaption>
+</figure>
 
 <div class="grid cards" markdown>
 
--   :material-source-branch: **Git-native assignments**
+-   **Git-native assignments**
 
     ---
 
     Practice lives in private branches and pull requests. Progressive stages,
     feedback, appeals, and follow-ups stay attached to the work.
 
--   :material-chart-timeline-variant-shimmer: **Evidence-driven adaptation**
+-   **Evidence-driven adaptation**
 
     ---
 
     Scheduling combines mastery, uncertainty, forgetting, prerequisites,
     confidence, misconception transfer, format diversity, and available time.
 
--   :material-shield-lock-outline: **Hard trust boundaries**
+-   **Hard trust boundaries**
 
     ---
 
     Untrusted submissions run only in credential-free ephemeral CI. Model
     output must pass a strict schema before one transactional state update.
 
--   :material-database-outline: **Your state, visibly yours**
+-   **Your state, visibly yours**
 
     ---
 
@@ -69,13 +57,15 @@ credentials.
 
 ## The learning loop
 
-```text
-curriculum package ──► adaptive scheduler ──► private assignment PR
-        ▲                                             │
-        │                                  credential-free CI
-        │                                             │
-        └── spaced retrieval ◄── learner model ◄── structured review
-```
+<p class="loop-path">
+  <span>Curriculum package</span><b>→</b>
+  <span>Adaptive scheduler</span><b>→</b>
+  <span>Private assignment PR</span><b>→</b>
+  <span>Credential-free CI</span><b>→</b>
+  <span>Structured review</span><b>→</b>
+  <span>Learner model</span><b>→</b>
+  <span>Spaced retrieval</span>
+</p>
 
 The webhook path authenticates, persists, and enqueues quickly. A durable
 worker reconciles GitHub evidence, invokes a short-lived read-only Codex worker,
