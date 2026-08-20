@@ -261,12 +261,15 @@ def setup_resume(
 def doctor(
     ctx: typer.Context,
     offline: bool = typer.Option(False, help="Skip external connectivity checks."),
+    live: bool = typer.Option(False, help="Verify the complete live installation proof."),
     strict: bool = typer.Option(False, help="Treat warnings as a failing exit status."),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ) -> None:
     """Validate configuration, database, Codex, GitHub, tooling, and service health."""
+    if offline and live:
+        _abort("--offline and --live cannot be used together")
     settings, database = _runtime(ctx)
-    checks = Doctor(settings, database).run(online=not offline)
+    checks = Doctor(settings, database).run(online=not offline, live=live)
     if json_output:
         console.print_json(data=[item.__dict__ for item in checks])
     else:
@@ -933,7 +936,10 @@ def worker(
         lease_seconds=settings.server.lease_seconds,
     )
     if once:
-        runner.run_once()
+        try:
+            runner.run_once()
+        finally:
+            runner.stop()
         return
     console.print("Adaptive Tutor worker started. Press Ctrl-C to stop.")
     try:
@@ -942,6 +948,8 @@ def worker(
                 time.sleep(1)
     except KeyboardInterrupt:
         console.print("Worker stopped.")
+    finally:
+        runner.stop()
 
 
 @app.command("evaluate-public", hidden=True)

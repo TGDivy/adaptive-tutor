@@ -9,6 +9,9 @@ import pytest
 from adaptive_tutor.config import CodexSettings, GitHubSettings, TutorSettings
 from adaptive_tutor.db import Database
 from adaptive_tutor.doctor import Doctor
+from adaptive_tutor.jobs import JobQueue
+from adaptive_tutor.security import sha256_digest
+from adaptive_tutor.setup import HostedSetupProbeEvidence, SetupRun, SetupService, StepOutcome
 
 
 def test_offline_doctor_reports_actionable_local_state(
@@ -273,3 +276,193 @@ def test_doctor_online_and_service_failures_are_contained(
     unavailable = Doctor(settings, database)._service()
     assert unavailable.status == "fail"
     assert "503" in unavailable.detail
+
+
+def test_live_doctor_verifies_complete_current_installation(
+    initialized: tuple[Database, object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database, _ = initialized
+    config = tmp_path / "config.yaml"
+    config.write_text("test", encoding="utf-8")
+    key = tmp_path / "github-app.pem"
+    key.write_text("key", encoding="utf-8")
+    key.chmod(0o600)
+    settings = TutorSettings(
+        data_dir=tmp_path / "state",
+        database_path=database.path,
+        learner_id="learner",
+        github=GitHubSettings(
+            owner="owner",
+            app_id=11,
+            installation_id=22,
+            private_key_path=key,
+            webhook_url="https://tutor.example.test",
+            evaluator_ref="e" * 40,
+        ),
+        codex=CodexSettings(enabled=False),
+    )
+    settings.ensure_runtime_dirs()
+    monkeypatch.setenv("ADAPTIVE_TUTOR_WEBHOOK_SECRET", "test-webhook-secret")
+
+    service = SetupService(database)
+    service.begin(
+        public_url="https://tutor.example.test",
+        goal_statement="Build reliable network services.",
+        config_path=config,
+        learner_id="learner",
+        curriculum_id="systems-foundations",
+    )
+
+    class CompleteSetup:
+        def execute(self, step: str, run: SetupRun) -> StepOutcome:
+            return StepOutcome.complete(f"{step} complete")
+
+    run = service.resume(CompleteSetup())
+    now = run.created_at
+    database.execute(
+        """
+        INSERT INTO events(
+            id, source, event_type, delivery_id, payload_json,
+            payload_digest, status, received_at, processed_at
+        ) VALUES ('event-live', 'github', 'ping', 'delivery-live', '{}', ?, 'ignored', ?, ?)
+        """,
+        (sha256_digest("{}"), now, now),
+    )
+    database.execute(
+        """
+        INSERT INTO model_invocations(
+            id, purpose, prompt_version, input_digest, status, started_at, completed_at
+        ) VALUES ('model-live', 'setup_canary', 'v1', ?, 'succeeded', ?, ?)
+        """,
+        (sha256_digest("canary"), now, now),
+    )
+    workflow_digest = "sha256:" + "b" * 64
+    database.execute(
+        """
+        INSERT INTO evaluator_control_planes(
+            repository_id, repository_full_name, default_branch, workflow_path,
+            workflow_commit, workflow_digest, evaluator_ref, evaluator_kit_digest,
+            evaluator_key_id, configured_at, verified_at
+        ) VALUES (123, 'owner/learning-workspace', 'main', ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            ".github/workflows/adaptive-tutor-evaluate.yml",
+            "f" * 40,
+            workflow_digest,
+            "e" * 40,
+            "sha256:" + "c" * 64,
+            "d" * 16,
+            now,
+            now,
+        ),
+    )
+    evidence = HostedSetupProbeEvidence(
+        schema_version="1.0",
+        nonce="a" * 32,
+        repository_id=123,
+        workflow_commit="f" * 40,
+        workflow_digest=workflow_digest,
+        evaluator_key_id="d" * 16,
+        runner="github-hosted:ubuntu-24.04",
+        credential_environment=[],
+    ).model_dump_json().encode()
+    database.execute(
+        """
+        INSERT INTO hosted_setup_probes(
+            id, setup_run_id, repository_id, nonce, actions_run_id, status,
+            workflow_path, workflow_digest, workflow_commit, evaluator_key_id,
+            artifact_digest, created_at, updated_at, completed_at
+        ) VALUES ('probe-live', ?, 123, ?, 77, 'passed', ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run.id,
+            "a" * 32,
+            ".github/workflows/adaptive-tutor-setup-probe.yml",
+            workflow_digest,
+            "f" * 40,
+            "d" * 16,
+            sha256_digest(evidence),
+            now,
+            now,
+            now,
+        ),
+    )
+    database.execute(
+        """
+        INSERT INTO assignments(
+            id, learner_id, curriculum_id, profile_id, slug, title, exercise_type,
+            difficulty, expected_minutes, status, branch_name, pull_number, head_sha,
+            bundle_json, created_at, updated_at
+        ) VALUES (
+            'A-0001', 'learner', 'systems-foundations', 'generalist', 'example',
+            'Example', 'implementation', 4, 45, 'published',
+            'assignment/0001-example', 42, ?, '{}', ?, ?
+        )
+        """,
+        ("a" * 40, now, now),
+    )
+    JobQueue(database).worker_heartbeat("worker-live")
+
+    class LiveGitHub:
+        def __init__(self, _settings: object) -> None:
+            pass
+
+        def verify_private_repository(self) -> dict[str, object]:
+            return {"full_name": "owner/learning-workspace"}
+
+        def webhook_status(self, _callback: str) -> dict[str, object]:
+            return {
+                "id": 1,
+                "active": True,
+                "events": [
+                    "push",
+                    "pull_request",
+                    "workflow_run",
+                    "check_suite",
+                    "issue_comment",
+                ],
+            }
+
+        def verify_app_installation_scope(self) -> dict[str, object]:
+            return {"repository_full_name": "owner/learning-workspace"}
+
+        def verify_evaluator_control(self, **_values: object) -> dict[str, object]:
+            return {
+                "repository_full_name": "owner/learning-workspace",
+                "default_branch": "main",
+            }
+
+        def get_setup_probe_run(self, *_args: object, **_kwargs: object) -> dict[str, object]:
+            return {"status": "completed", "conclusion": "success"}
+
+        def download_setup_probe_evidence(self, _run_id: int) -> bytes:
+            return evidence
+
+        def verify_assignment_pull_request(
+            self, *_args: object, **_kwargs: object
+        ) -> dict[str, object]:
+            return {"number": 42}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("adaptive_tutor.doctor.GitHubClient", LiveGitHub)
+    monkeypatch.setattr(
+        "adaptive_tutor.doctor.httpx.get", lambda *_args, **_kwargs: httpx.Response(200)
+    )
+    checks = Doctor(settings, database).run(online=True, live=True)
+    live_names = {
+        "Guided setup",
+        "Public TLS",
+        "Webhook round trip",
+        "Codex canary",
+        "Worker health",
+        "GitHub App scope",
+        "Protected evaluator controls",
+        "Hosted CI artifact",
+        "First assignment PR",
+    }
+    assert {check.name for check in checks if check.name in live_names} == live_names
+    assert all(check.status == "pass" for check in checks if check.name in live_names)

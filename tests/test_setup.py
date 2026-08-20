@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 from adaptive_tutor.cli import app
 from adaptive_tutor.db import Database
 from adaptive_tutor.errors import ConfigurationError
+from adaptive_tutor.jobs import JobQueue
 from adaptive_tutor.setup import SETUP_STEPS, SetupRun, SetupService, StepOutcome
 
 
@@ -130,3 +131,30 @@ def test_cli_setup_persists_goal_and_reports_tls_action(
     database = Database(tmp_path / "state" / "tutor.sqlite3")
     goal = database.fetch_one("SELECT statement, status FROM learning_goals")
     assert goal == {"statement": "Build reliable network services.", "status": "active"}
+
+
+def test_ready_setup_reopens_for_new_worker_health_step(
+    initialized: tuple[Database, object], tmp_path: Path
+) -> None:
+    database, _ = initialized
+    service = SetupService(database)
+    service.begin(
+        public_url="https://tutor.example.test",
+        goal_statement="Build reliable network services.",
+        config_path=tmp_path / "config.yaml",
+        learner_id="learner",
+        curriculum_id="systems-foundations",
+    )
+    ready = service.resume(RecordingExecutor())
+    assert ready.status == "ready"
+    database.execute(
+        "UPDATE setup_steps SET status='pending' WHERE run_id=? AND name='worker_health'",
+        (ready.id,),
+    )
+    JobQueue(database).worker_heartbeat("worker-upgraded")
+
+    resumed = service.resume(RecordingExecutor())
+
+    assert resumed.status == "ready"
+    assert resumed.steps[-1].name == "worker_health"
+    assert resumed.steps[-1].status == "complete"

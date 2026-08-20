@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import traceback
 import uuid
 from collections.abc import Callable, Mapping
@@ -219,6 +220,32 @@ class JobQueue:
         )
         return {str(row["status"]): int(row["count"]) for row in rows}
 
+    def worker_heartbeat(self, worker_id: str) -> None:
+        if not worker_id or len(worker_id) > 100:
+            raise ValueError("Worker identifier must contain 1 to 100 characters")
+        now = iso_now()
+        self.database.execute(
+            """
+            INSERT INTO worker_heartbeats(
+                worker_id, status, started_at, heartbeat_at, stopped_at
+            ) VALUES (?, 'running', ?, ?, NULL)
+            ON CONFLICT(worker_id) DO UPDATE SET
+                status='running', heartbeat_at=excluded.heartbeat_at, stopped_at=NULL
+            """,
+            (worker_id, now, now),
+        )
+
+    def worker_stopped(self, worker_id: str) -> None:
+        now = iso_now()
+        self.database.execute(
+            """
+            UPDATE worker_heartbeats
+            SET status='stopped', heartbeat_at=?, stopped_at=?
+            WHERE worker_id=?
+            """,
+            (now, now, worker_id),
+        )
+
 
 class EventStore:
     def __init__(self, database: Database, queue: JobQueue | None = None) -> None:
@@ -305,13 +332,20 @@ class Worker:
         *,
         worker_id: str | None = None,
         lease_seconds: int = 900,
+        heartbeat_interval_seconds: float | None = None,
     ) -> None:
         self.queue = queue
         self.handlers = handlers
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:12]}"
         self.lease_seconds = lease_seconds
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds or max(
+            1.0, min(30.0, lease_seconds / 3)
+        )
+        if self.heartbeat_interval_seconds <= 0:
+            raise ValueError("Worker heartbeat interval must be positive")
 
     def run_once(self) -> bool:
+        self.queue.worker_heartbeat(self.worker_id)
         job = self.queue.claim(self.worker_id, lease_seconds=self.lease_seconds)
         if job is None:
             return False
@@ -319,9 +353,34 @@ class Worker:
             handler = self.handlers.get(job.kind)
             if handler is None:
                 raise TutorError(f"No handler registered for job kind {job.kind}")
-            handler(job.payload)
+            self._run_handler(handler, job)
         except BaseException as exc:
             self.queue.fail(job, exc)
         else:
             self.queue.complete(job)
         return True
+
+    def stop(self) -> None:
+        self.queue.worker_stopped(self.worker_id)
+
+    def _run_handler(self, handler: Callable[[dict[str, Any]], None], job: Job) -> None:
+        stopped = threading.Event()
+
+        def renew() -> None:
+            while not stopped.wait(self.heartbeat_interval_seconds):
+                self.queue.worker_heartbeat(self.worker_id)
+                if not self.queue.heartbeat(job, lease_seconds=self.lease_seconds):
+                    return
+
+        heartbeat = threading.Thread(
+            target=renew,
+            name=f"{self.worker_id}-heartbeat",
+            daemon=True,
+        )
+        heartbeat.start()
+        try:
+            handler(job.payload)
+        finally:
+            stopped.set()
+            heartbeat.join()
+            self.queue.worker_heartbeat(self.worker_id)

@@ -24,6 +24,24 @@ class StaticAuth:
         return "test-token"
 
 
+class ScopedAppAuth(StaticAuth):
+    def mode(self) -> str:
+        return "github_app"
+
+    def installation_scope(self) -> tuple[dict[str, str], str]:
+        return (
+            {
+                "actions": "write",
+                "checks": "read",
+                "contents": "write",
+                "issues": "write",
+                "metadata": "read",
+                "pull_requests": "write",
+            },
+            "selected",
+        )
+
+
 class ChunkedBytes(httpx.SyncByteStream):
     def __iter__(self) -> Iterator[bytes]:
         remaining = MAX_ARTIFACT_BYTES + 1
@@ -415,6 +433,86 @@ def test_repository_scope_must_be_private_and_writable() -> None:
     )
     with pytest.raises(SecurityError, match="must be private"):
         client.verify_private_repository()
+
+
+def test_github_app_scope_is_limited_to_one_workspace() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/owner/learning-workspace":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 123,
+                    "full_name": "owner/learning-workspace",
+                    "private": True,
+                    "permissions": {"push": True},
+                },
+            )
+        if request.url.path == "/installation/repositories":
+            return httpx.Response(
+                200,
+                json={
+                    "total_count": 1,
+                    "repositories": [{"id": 123, "full_name": "owner/learning-workspace"}],
+                },
+            )
+        return httpx.Response(404)
+
+    client = GitHubClient(
+        GitHubSettings(owner="owner"),
+        auth=ScopedAppAuth(),  # type: ignore[arg-type]
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        scope = client.verify_app_installation_scope()
+        assert scope["repository_id"] == 123
+        assert scope["repository_selection"] == "selected"
+    finally:
+        client.close()
+
+
+def test_first_assignment_pull_request_requires_exact_open_head() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/owner/learning-workspace/pulls/42":
+            return httpx.Response(
+                200,
+                json={
+                    "number": 42,
+                    "state": "open",
+                    "head": {
+                        "ref": "assignment/0001-example",
+                        "sha": "a" * 40,
+                        "repo": {"full_name": "owner/learning-workspace"},
+                    },
+                    "base": {"repo": {"full_name": "owner/learning-workspace"}},
+                },
+            )
+        if request.url.path == "/repos/owner/learning-workspace":
+            return httpx.Response(
+                200,
+                json={
+                    "private": True,
+                    "full_name": "owner/learning-workspace",
+                    "permissions": {"push": True},
+                },
+            )
+        return httpx.Response(404)
+
+    client = GitHubClient(
+        GitHubSettings(owner="owner"),
+        auth=StaticAuth(),  # type: ignore[arg-type]
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        pull = client.verify_assignment_pull_request(
+            42, branch="assignment/0001-example", head_sha="a" * 40
+        )
+        assert pull["number"] == 42
+        with pytest.raises(SecurityError, match="provenance"):
+            client.verify_assignment_pull_request(
+                42, branch="assignment/0001-example", head_sha="b" * 40
+            )
+    finally:
+        client.close()
 
 
 def test_webhook_status_reports_matching_hook_health() -> None:

@@ -31,7 +31,7 @@ from .config import (
 )
 from .db import Database
 from .errors import ConfigurationError, ExternalServiceError, SecurityError
-from .github import GitHubClient
+from .github import GITHUB_APP_PERMISSIONS, GitHubClient
 from .runner import EVALUATOR_KIT_FILES, evaluator_kit_digest
 from .security import redact, sha256_digest
 from .time import iso_now, utc_now
@@ -561,14 +561,7 @@ class GitHubAppSetupService:
             },
             "public": False,
             "request_oauth_on_install": False,
-            "default_permissions": {
-                "actions": "write",
-                "checks": "read",
-                "contents": "write",
-                "issues": "write",
-                "metadata": "read",
-                "pull_requests": "write",
-            },
+            "default_permissions": GITHUB_APP_PERMISSIONS,
             "default_events": [
                 "check_suite",
                 "issue_comment",
@@ -675,6 +668,7 @@ class GitHubAppSetupService:
         client = GitHubClient(candidate_github)
         try:
             repository = client.verify_private_repository()
+            client.verify_app_installation_scope()
         finally:
             client.close()
         expected_repository_id = int(

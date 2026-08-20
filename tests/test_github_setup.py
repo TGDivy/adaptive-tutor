@@ -26,6 +26,7 @@ from adaptive_tutor.github_setup import (
     InstalledEvaluatorControls,
     PublicEvaluatorSource,
 )
+from adaptive_tutor.jobs import JobQueue
 from adaptive_tutor.runner import evaluator_kit_digest
 from adaptive_tutor.security import sha256_digest
 from adaptive_tutor.setup import LiveSetupExecutor, SetupRun, SetupService, StepOutcome
@@ -379,6 +380,12 @@ def test_github_app_manifest_flow_persists_owner_only_credentials_and_scope(
                 "permissions": {"push": True},
             }
 
+        def verify_app_installation_scope(self) -> dict[str, Any]:
+            return {
+                "repository_id": 9876,
+                "repository_full_name": "example-owner/learning-workspace",
+            }
+
         def close(self) -> None:
             return None
 
@@ -574,3 +581,18 @@ def test_live_setup_publishes_first_assignment_pull_request(
 
     assert outcome.status == "complete"
     assert outcome.external_ids == {"assignment_id": "A-0001", "pull_number": 42}
+
+
+def test_live_setup_requires_fresh_persistent_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path, settings, database, run = configured_setup(tmp_path, monkeypatch)
+    executor = LiveSetupExecutor(settings, database, config_path=config_path)
+
+    waiting = executor._worker_health(run)
+    assert waiting.status == "waiting_user"
+
+    JobQueue(database).worker_heartbeat("worker-setup")
+    complete = executor._worker_health(run)
+    assert complete.status == "complete"
+    assert complete.external_ids == {"worker_id": "worker-setup"}

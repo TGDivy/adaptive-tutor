@@ -9,6 +9,7 @@ import shutil
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
@@ -26,7 +27,7 @@ from .goals import GoalService
 from .models import LearnerContext, StrictModel
 from .orchestrator import TutorOrchestrator
 from .security import redact, sha256_digest
-from .time import iso_now
+from .time import iso_now, parse_time, utc_now
 
 SetupRunStatus = Literal["provisioning", "action_required", "failed", "ready"]
 SetupStepStatus = Literal[
@@ -49,6 +50,7 @@ SETUP_STEPS = (
     "codex_canary",
     "hosted_ci_probe",
     "first_assignment",
+    "worker_health",
 )
 
 _SETUP_PROBE_WORKFLOW = ".github/workflows/adaptive-tutor-setup-probe.yml"
@@ -216,7 +218,7 @@ class SetupService:
         run = self.current()
         if run is None:
             raise ConfigurationError("No setup exists; run adaptive-tutor setup first")
-        if run.status == "ready":
+        if run.status == "ready" and all(step.status == "complete" for step in run.steps):
             return run
         self.database.execute(
             """
@@ -715,6 +717,28 @@ class LiveSetupExecutor:
         return StepOutcome.complete(
             "The first live assignment pull request is available",
             external_ids={"assignment_id": str(row["id"]), "pull_number": int(row["pull_number"])},
+        )
+
+    def _worker_health(self, run: SetupRun) -> StepOutcome:
+        worker = self.database.fetch_one(
+            """
+            SELECT worker_id, heartbeat_at FROM worker_heartbeats
+            WHERE status='running' ORDER BY heartbeat_at DESC LIMIT 1
+            """
+        )
+        heartbeat = parse_time(str(worker["heartbeat_at"])) if worker else None
+        maximum_age = timedelta(
+            seconds=max(10, min(self.settings.server.lease_seconds // 3, 60))
+        )
+        if heartbeat is None or utc_now() - heartbeat > maximum_age:
+            return StepOutcome.wait(
+                "The persistent event worker has no fresh heartbeat",
+                action="Start or restart the worker service, then resume setup",
+            )
+        assert worker is not None  # heartbeat cannot exist without its selected row
+        return StepOutcome.complete(
+            "The persistent event worker is healthy",
+            external_ids={"worker_id": str(worker["worker_id"])},
         )
 
 

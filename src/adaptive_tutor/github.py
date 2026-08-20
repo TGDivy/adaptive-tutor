@@ -10,7 +10,7 @@ import io
 import re
 import time
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Any
@@ -31,11 +31,22 @@ _EVALUATOR_RUN_TITLE = re.compile(
 )
 _SETUP_PROBE_RUN_TITLE = re.compile(r"Adaptive Tutor Setup \| ([0-9a-f]{32})")
 
+GITHUB_APP_PERMISSIONS = {
+    "actions": "write",
+    "checks": "read",
+    "contents": "write",
+    "issues": "write",
+    "metadata": "read",
+    "pull_requests": "write",
+}
+
 
 @dataclass
 class InstallationToken:
     value: str
     expires_at: datetime
+    permissions: dict[str, str] = field(default_factory=dict)
+    repository_selection: str = ""
 
 
 class GitHubAuth:
@@ -56,6 +67,17 @@ class GitHubAuth:
 
     def mode(self) -> str:
         return "github_app" if self.settings.app_id and self.settings.installation_id else "token"
+
+    def installation_scope(self) -> tuple[dict[str, str], str]:
+        if self.mode() != "github_app":
+            raise ConfigurationError("GitHub App authentication is required")
+        self.token()
+        if self._installation_token is None:  # pragma: no cover - token() invariant
+            raise RuntimeError("GitHub App token metadata is unavailable")
+        return (
+            dict(self._installation_token.permissions),
+            self._installation_token.repository_selection,
+        )
 
     def _fallback_token(self) -> str | None:
         import os
@@ -96,6 +118,11 @@ class GitHubAuth:
         token = InstallationToken(
             value=str(payload["token"]),
             expires_at=datetime.fromisoformat(str(payload["expires_at"]).replace("Z", "+00:00")),
+            permissions={
+                str(name): str(level)
+                for name, level in payload.get("permissions", {}).items()
+            },
+            repository_selection=str(payload.get("repository_selection") or ""),
         )
         self._installation_token = token
         return token.value
@@ -168,6 +195,55 @@ class GitHubClient:
         if not permissions.get("push"):
             raise SecurityError("Integration lacks required repository content permission")
         return payload
+
+    def verify_app_installation_scope(self) -> dict[str, Any]:
+        if self.auth.mode() != "github_app":
+            raise SecurityError("GitHub integration is not using App authentication")
+        repository = self.verify_private_repository()
+        permissions, selection = self.auth.installation_scope()
+        if permissions != GITHUB_APP_PERMISSIONS:
+            raise SecurityError("GitHub App permissions differ from the least-privilege contract")
+        repositories = self._request(
+            "GET", "/installation/repositories", params={"per_page": 100}
+        ).json()
+        visible = list(repositories.get("repositories") or [])
+        expected_id = int(repository.get("id") or 0)
+        observed_ids = {int(item.get("id") or 0) for item in visible}
+        if (
+            selection != "selected"
+            or int(repositories.get("total_count") or 0) != 1
+            or observed_ids != {expected_id}
+        ):
+            raise SecurityError("GitHub App installation must select only the learning workspace")
+        return {
+            "repository_id": expected_id,
+            "repository_full_name": str(repository.get("full_name") or ""),
+            "permissions": permissions,
+            "repository_selection": selection,
+        }
+
+    def verify_assignment_pull_request(
+        self,
+        pull_number: int,
+        *,
+        branch: str,
+        head_sha: str,
+    ) -> dict[str, Any]:
+        pull = self._request("GET", f"{self.repository_path}/pulls/{pull_number}").json()
+        repository = self.verify_private_repository()
+        expected_repository = str(repository.get("full_name") or "").casefold()
+        if (
+            int(pull.get("number") or 0) != pull_number
+            or str(pull.get("state") or "") != "open"
+            or str((pull.get("head") or {}).get("ref") or "") != branch
+            or str((pull.get("head") or {}).get("sha") or "") != head_sha
+            or str(((pull.get("head") or {}).get("repo") or {}).get("full_name") or "").casefold()
+            != expected_repository
+            or str(((pull.get("base") or {}).get("repo") or {}).get("full_name") or "").casefold()
+            != expected_repository
+        ):
+            raise SecurityError("First assignment pull request provenance is invalid")
+        return dict(pull)
 
     def preflight_assignment_publication(self) -> dict[str, Any]:
         """Authenticate and verify the exact private write scope before state is created."""
