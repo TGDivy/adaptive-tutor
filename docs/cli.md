@@ -14,7 +14,8 @@ adaptive-tutor COMMAND --help
 | Command | Purpose |
 | --- | --- |
 | `init` | Create secure configuration, migrate SQLite, and load the bundled curriculum. |
-| `doctor` | Check configuration, permissions, database, tooling, Codex, GitHub, webhook, and service health. |
+| `setup` / `setup status` / `setup resume` | Run and inspect durable guided live setup from HTTPS through the first private assignment PR and worker health. |
+| `doctor` | Check configuration, permissions, database, tooling, Codex, GitHub, webhook, and service health; `--live --strict` verifies the completed installation proof. |
 | `status` | Summarize runtime state, active work, reviews, misconceptions, readiness, and model cost. |
 | `next` | Select and publish the next assignment; `--dry-run` only recommends. |
 | `current` | Show the active assignment without private evaluator or reference material. |
@@ -55,8 +56,11 @@ adaptive-tutor goal history
 
 Goal revisions are retained. Explicit concept/domain focus contributes a
 bounded scheduling factor, including prerequisite paths; a saved target date
-supplies the default urgency horizon. Free-form text is retained as the
-operator's objective but is not interpreted as a curriculum package.
+supplies the default urgency horizon. Without explicit selectors, free-form
+text is deterministically matched against concept names, domains, and the
+active curriculum's `goal_terms`. The strongest matches become saved concept
+focus. No match is an error, so a goal cannot silently select an unrelated
+curriculum.
 
 ### Completed reviews
 
@@ -90,6 +94,23 @@ adaptive-tutor doctor --offline --json
 Offline mode skips GitHub calls. Strict mode turns warnings—such as a stopped
 service or intentionally disabled Codex worker—into a nonzero exit status.
 
+### Guided live verification
+
+```bash
+adaptive-tutor setup --public-url https://tutor.example.net \
+  --goal "Build reliable network services"
+adaptive-tutor setup status --json
+adaptive-tutor setup resume
+adaptive-tutor doctor --live --strict
+```
+
+Setup is resumable and stops at the first action that needs operator input or
+an external result. Its ordered proof covers secure configuration, compatible
+goal mapping, public TLS, one private GitHub workspace, browser-created GitHub
+App credentials, protected evaluator controls, a signed webhook round trip,
+an isolated Codex canary, a credential-free hosted Actions artifact, the first
+assignment PR, and a fresh persistent-worker heartbeat.
+
 ## Operations
 
 | Command | Purpose |
@@ -99,7 +120,7 @@ service or intentionally disabled Codex worker—into a nonzero exit status.
 | `backup [PATH]` | Create an online, mode-0600 SQLite backup and verify its destination. |
 | `restore PATH --yes` | Replace state from an integrity-checked backup while services are stopped. |
 | `curriculum-load PATH` | Validate and persist a curriculum package without core-code changes. |
-| `webhook-setup` | Create or reconcile the configured signed repository webhook. |
+| `webhook-setup` | Legacy token-mode command that creates or reconciles a repository webhook; guided GitHub App setup uses the App-level manifest webhook instead. |
 | `evaluate-public` | Internal protected-workflow entry point that verifies a signed public manifest and writes normalized evidence. |
 
 `serve`, `worker`, `grader`, and `evaluate-public` are hidden from the concise

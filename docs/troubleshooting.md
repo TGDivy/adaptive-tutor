@@ -6,6 +6,7 @@ the integration checks:
 ```bash
 adaptive-tutor doctor --offline
 adaptive-tutor doctor
+adaptive-tutor setup status
 ```
 
 The JSON form is useful for supervisors and support bundles:
@@ -26,6 +27,23 @@ Configuration not found ... Run 'adaptive-tutor init'.
 Pass the same global path to every command or export
 `ADAPTIVE_TUTOR_CONFIG`. For a service, confirm the unit/container environment
 points to a readable mode-0600 file.
+
+## Guided setup is waiting
+
+Setup intentionally exits nonzero while an operator action or hosted result is
+pending. Read the durable current action:
+
+```bash
+adaptive-tutor setup status
+adaptive-tutor setup resume
+```
+
+In Compose, run both through the tools-profile `operator` so the process has
+writable setup configuration and read-only grader-socket access. After browser
+App installation, restart `tutor` once before resuming. When the hosted probe
+is running, wait for its Actions result rather than dispatching unrelated runs.
+When worker health is the only pending step, start `worker` and resume once.
+The installation is ready only when `doctor --live --strict` exits zero.
 
 ## Permission check fails
 
@@ -101,14 +119,23 @@ tutor-host bundle while retrying.
 ## Evaluator controls are not configured
 
 Remote assignment creation requires protected workflow/key state plus a matching
-`evaluator_control_planes` record. The current construction build does not
-provide a supported bootstrap or trust-anchor rotation command. Repository and
-webhook checks can therefore pass while assignment publication still stops at
-the evaluator-control check.
+`evaluator_control_planes` record. Guided setup creates that state only after it
+installs the exact pinned workflow and public signing key, protects and reads
+back the default branch, and verifies the remote files through the App.
 
 Do not create the database row manually, substitute an unprotected workflow, or
-disable the check. Use the local demo until the authenticated bootstrap path is
-implemented.
+disable the check. Inspect the current action and retry after fixing it:
+
+```bash
+adaptive-tutor setup status
+adaptive-tutor setup resume
+```
+
+Private repositories must support branch protection. Confirm the temporary
+`gh` login belongs to the repository owner, the pinned public source revision
+exists, and the App installation selects only that workspace. A terminal
+security mismatch requires investigation; do not repeatedly overwrite the
+protected controls.
 
 ## GitHub-hosted evaluation fails
 
@@ -126,12 +153,19 @@ commit.
 
 ## Webhook is missing or rejected
 
-Run:
+For a guided GitHub App installation, inspect the App's **Advanced** delivery
+page, confirm the configured callback, and redeliver the setup `ping` or
+`installation` event after the tutor has stored the manifest webhook secret.
+Then run:
 
 ```bash
-adaptive-tutor webhook-setup
+adaptive-tutor setup resume
 adaptive-tutor doctor
 ```
+
+`webhook-setup` reconciles repository hooks only in legacy development-token
+mode. A guided installation uses the App-level hook and `doctor` reads its App
+metadata and hook configuration with an authenticated App JWT.
 
 A `401` means the signature or local secret does not match. `403` means the
 payload names a repository outside the configured workspace. `503` means the

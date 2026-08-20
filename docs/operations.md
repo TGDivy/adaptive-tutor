@@ -6,38 +6,159 @@ webhook service, durable worker, and isolated grader after a crash or reboot.
 Learner code runs only in credential-free GitHub-hosted evaluation jobs, never
 on the tutor host.
 
-## Docker Compose
+## Production Compose runbook
+
+This is the recommended clean-server path. Use a dedicated Linux host with
+Docker Engine and Compose v2, a public DNS name already pointing at it, inbound
+TCP 80/443, a GitHub owner whose plan supports Actions and branch protection on
+private repositories, and an OpenAI API key. Only amd64 and arm64 images are
+supported by the pinned GitHub CLI layer.
 
 ### Install and initialize
 
-From a release checkout:
+Check out the exact public revision you intend to operate, then prepare owner-
+only runtime storage and automatic Caddy TLS:
 
 ```bash
-cd deploy
-./prepare-compose.sh
+git clone https://github.com/TGDivy/adaptive-tutor.git
+cd adaptive-tutor/deploy
+./prepare-compose.sh --domain tutor.example.net
 docker compose build
 docker compose --profile tools run --rm initializer
 ```
 
-`prepare-compose.sh` creates owner-only `runtime/config`, `runtime/state`,
-`runtime/codex`, and `runtime/grader-run` directories, three mode-0600
-environment files, and a local Compose UID/GID mapping. Initialization writes
-`runtime/config/config.yaml`, a mode-0600 token file, the migrated SQLite
-database, and the bundled neutral curriculum.
+`prepare-compose.sh` records the exact source commit in `deploy/.env`, creates
+mode-0700 `runtime/config`, `runtime/state`, `runtime/codex`, and
+`runtime/grader-run`, and creates mode-0600 service environment files.
+Initialization writes private configuration, generated API/webhook secrets,
+all SQLite migrations, and the bundled curriculum. It refuses to overwrite
+existing state.
 
-The container binds to `0.0.0.0` internally, but Compose publishes it only on
-host loopback at `127.0.0.1:8765`. The dashboard still requires the generated
-token. Retrieve that token locally from `runtime/state/secrets.env`; do not put
-it in shell history, chat, source control, or a reverse-proxy configuration.
-
-Run the credential-free product first:
+Put the model credential only in the grader environment file using an
+owner-only editor:
 
 ```bash
-docker compose up -d tutor
-docker compose ps
-curl --fail http://127.0.0.1:8765/readyz
-docker compose logs --tail=100 tutor
+${EDITOR:-vi} runtime/grader.env
+chmod 0600 runtime/grader.env
 ```
+
+Add one line named `OPENAI_API_KEY`. Do not put it in `tutor.env`,
+`worker.env`, YAML, shell history, or GitHub. The grader receives this file but
+cannot see tutor configuration, SQLite state, GitHub credentials, or a TCP
+port. The image pins Codex CLI; every grading request is a fresh read-only,
+no-approval process.
+
+### Start HTTPS and the grader
+
+```bash
+docker compose --profile live --profile remote up -d tutor proxy grader
+docker compose ps
+curl --fail https://tutor.example.net/readyz
+docker compose logs --tail=100 tutor proxy grader
+```
+
+Caddy obtains and renews the certificate. Compose also publishes the tutor at
+`127.0.0.1:8765`; never change that mapping to a public bind. The dashboard is
+still token-protected through Caddy. Read the token locally from
+`runtime/state/secrets.env` and do not place it in URLs, proxy configuration,
+screenshots, or support bundles.
+
+### Authenticate the temporary bootstrap operator
+
+The runtime image contains pinned `gh` and Git. Authenticate the one-shot
+operator as the user or organization owner that may create the private
+workspace and protect its default branch:
+
+```bash
+docker compose --profile remote --profile tools run --rm \
+  --entrypoint gh operator auth login \
+  --hostname github.com --git-protocol https --web
+```
+
+The login is stored under private tutor state only for setup. It is more
+powerful than the steady-state App and must be removed after the final proof.
+
+### Set the goal and run guided setup
+
+Start setup with the public URL and the actual learning objective. Omit
+`--github-owner` for the authenticated personal account; specify it for an
+organization:
+
+```bash
+docker compose --profile remote --profile tools run --rm operator setup \
+  --public-url https://tutor.example.net \
+  --goal "Build reliable network services" \
+  --github-owner YOUR_GITHUB_OWNER \
+  --workspace-repo learning-workspace
+```
+
+An exit code of 2 means setup durably stopped for an operator action; it is not
+lost progress. The goal is matched against the active curriculum's concept
+names, domains, and `goal_terms`. An incompatible objective stops here so you
+can load a matching private curriculum rather than receive unrelated work.
+
+Setup first creates or verifies the one private workspace. Open
+`https://tutor.example.net/setup`, sign in with the generated API token, and
+follow **Create GitHub App**. Approve the manifest under the same owner and,
+on the installation page, select only `learning-workspace`. The callback stores
+the App key and webhook secret in owner-only state, validates exact App
+permissions/events and one-repository scope, installs the protected evaluator
+workflows/key, and waits for a signed `ping` or `installation` delivery.
+
+After the browser returns to setup, restart the tutor once so its long-lived
+assignment orchestrator uses the final App configuration:
+
+```bash
+docker compose restart tutor
+```
+
+Resume from the first incomplete step:
+
+```bash
+docker compose --profile remote --profile tools run --rm operator setup status
+docker compose --profile remote --profile tools run --rm operator setup resume
+```
+
+The operator can reach the grader socket but cannot read its credential. Setup
+runs a schema-valid Codex canary, dispatches a credential-free GitHub-hosted
+probe, downloads and verifies its bound artifact, and creates the first private
+assignment PR. A hosted run can take time; when status says it is scheduled or
+running, wait for that Actions run and execute `setup resume` again. If the
+webhook step is waiting, redeliver the App's recent `ping` from its GitHub
+**Advanced** settings, then resume.
+
+When setup reaches worker health, start the persistent worker and finish:
+
+```bash
+docker compose --profile remote up -d worker
+docker compose --profile remote --profile tools run --rm operator setup resume
+```
+
+### Prove readiness and remove bootstrap access
+
+Do not call the installation ready until this exits zero:
+
+```bash
+docker compose --profile remote --profile tools run --rm \
+  operator doctor --live --strict
+```
+
+The live doctor revalidates all setup steps, public TLS, authenticated App
+metadata and exact repository scope, signed webhook storage, protected
+evaluator identity, isolated Codex canary, hosted credential-free artifact,
+first assignment PR, and worker heartbeat. Then remove the temporary GitHub CLI
+login and confirm steady-state services:
+
+```bash
+docker compose --profile remote --profile tools run --rm \
+  --entrypoint gh operator auth logout --hostname github.com
+docker compose --profile live --profile remote up -d
+docker compose ps
+```
+
+Steady state now uses only the single-repository GitHub App. Preserve the setup
+status and first PR URL in private operational records, not in this public
+repository.
 
 ### Verify a deployed runtime
 
@@ -58,44 +179,6 @@ Run it from a clean release checkout with a working Docker daemon. The
 image; the prover rejects that image unless its source-revision label exactly
 matches the checkout.
 
-Use an SSH tunnel or authenticated private reverse proxy for remote access.
-Keep the published Compose port loopback-bound. If TLS terminates at a proxy,
-allow only trusted users and preserve the service's security headers.
-
-### Configure GitHub credentials and model grading
-
-Edit `runtime/config/config.yaml` and set the GitHub owner, private workspace,
-GitHub App ID, installation ID, HTTPS webhook URL, and container path to the App
-key. Store that key under `runtime/config` with mode `0600`; its path inside the
-container starts with `/etc/adaptive-tutor/`. A development token, when
-temporarily needed, belongs only in `runtime/tutor.env` and
-`runtime/worker.env`, never in YAML.
-
-Put the model API key only in `runtime/grader.env` under the
-`OPENAI_API_KEY` variable. Enter the assigned value directly in an owner-only
-editor; do not echo it through shell history.
-
-Set `codex.enabled: true` in `runtime/config/config.yaml` after the grader is
-configured. Compose injects the owner-only socket path into the worker through
-a read-only bind; only the grader can modify the shared socket directory. The
-grader receives no tutor config, state, GitHub key, dashboard secret, learner
-checkout, or TCP port. The image pins Codex CLI and each request uses a
-read-only sandbox, no approvals, and an ephemeral session. See the official
-[Codex CLI documentation](https://developers.openai.com/codex/cli/) for current
-authentication guidance.
-
-Start the remote worker profile and reconcile the webhook:
-
-```bash
-docker compose --profile remote up -d
-docker compose exec worker adaptive-tutor doctor
-docker compose exec tutor adaptive-tutor webhook-setup
-docker compose ps
-```
-
-Those commands configure credentials and start services, but they do not make
-the remote assignment path ready in the current construction build.
-
 ### GitHub-hosted evaluator controls
 
 Remote deterministic checks use the protected
@@ -113,27 +196,28 @@ and public-test digests, then runs learner code under
 runtime in each hosted job; there is no evaluator machine to operate on the
 tutor server.
 
-The current public build has no supported command to install and protect those
-GitHub files, attest them, or create the control-plane record. Do not insert the
-record manually or weaken the orchestrator check. Until authenticated bootstrap
-and rotation are implemented, use the local demo and treat remote assignment
-publication as unavailable.
+Guided setup installs and verifies those files, applies and reads back default-
+branch protection, and creates the attested record. Do not insert or modify the
+record manually. Assignment publication and dispatch fail closed if the
+repository, workflow, key, evaluator revision, or digest later differs.
 
-### Lifecycle commands
+## Compose lifecycle commands
 
 ```bash
 # Start
-docker compose --profile remote up -d
+docker compose --profile live --profile remote up -d
 
 # Stop without deleting state
-docker compose --profile remote stop
+docker compose --profile live --profile remote stop
 
 # Restart
-docker compose --profile remote restart
+docker compose --profile live --profile remote restart
 
 # Status and readiness
 docker compose ps
 docker compose exec tutor adaptive-tutor status
+docker compose --profile remote --profile tools run --rm \
+  operator doctor --live --strict
 
 # Logs
 docker compose logs --since=30m tutor worker grader
@@ -168,10 +252,9 @@ sudo python3 -m venv /opt/adaptive-tutor
 sudo /opt/adaptive-tutor/bin/pip install /path/to/adaptive_tutor-release.whl
 ```
 
-Install Codex CLI using the current
-[official Codex CLI instructions](https://developers.openai.com/codex/cli/),
-then make its executable available to `adaptive-tutor-grader`. Initialize the
-application as the state-owning account:
+Install GitHub CLI and Codex CLI using their official packages, and make Codex
+available to `adaptive-tutor-grader`. Initialize the application as the
+state-owning account:
 
 ```bash
 sudo -u adaptive-tutor /opt/adaptive-tutor/bin/adaptive-tutor \
@@ -181,19 +264,23 @@ sudo -u adaptive-tutor /opt/adaptive-tutor/bin/adaptive-tutor \
   --config /etc/adaptive-tutor/config.yaml doctor --offline
 ```
 
-Configure the GitHub App in `/etc/adaptive-tutor/config.yaml` and set
-`codex.enabled: true`. Put dashboard and webhook variables in
-`/etc/adaptive-tutor/tutor.env`, worker-only GitHub variables in
-`/etc/adaptive-tutor/worker.env`, and the model key only in the root-owned
+Put the model key only in the root-owned
 `/etc/adaptive-tutor-grader/grader.env`. The state account must not be able to
-replace the grader environment file:
+replace the grader environment file. Tutor/worker environment files are for
+non-secret runtime overrides; generated API/webhook secrets remain in the
+owner-only state secrets file:
 
 ```bash
-sudo chown adaptive-tutor:adaptive-tutor /etc/adaptive-tutor/*.env
-sudo chmod 0600 /etc/adaptive-tutor/*.env
-sudo chown root:root /etc/adaptive-tutor-grader/grader.env
-sudo chmod 0600 /etc/adaptive-tutor-grader/grader.env
+sudo install -m 0600 -o adaptive-tutor -g adaptive-tutor /dev/null \
+  /etc/adaptive-tutor/tutor.env
+sudo install -m 0600 -o adaptive-tutor -g adaptive-tutor /dev/null \
+  /etc/adaptive-tutor/worker.env
+sudo install -m 0600 -o root -g root /dev/null \
+  /etc/adaptive-tutor-grader/grader.env
+sudoedit /etc/adaptive-tutor-grader/grader.env
 ```
+
+Add only `OPENAI_API_KEY=...` to the grader file.
 
 Install and enable the units:
 
@@ -204,9 +291,63 @@ sudo install -m 0644 deploy/systemd/adaptive-tutor.service \
   deploy/systemd/adaptive-tutor-backup.service \
   deploy/systemd/adaptive-tutor-backup.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now adaptive-tutor.service adaptive-tutor-grader.service \
-  adaptive-tutor-worker.service
+sudo systemctl enable --now adaptive-tutor.service adaptive-tutor-grader.service
 sudo systemctl enable --now adaptive-tutor-backup.timer
+```
+
+Terminate public TLS in a hardened reverse proxy that forwards the chosen
+hostname to `127.0.0.1:8765`, preserves webhook headers and raw bodies, and
+exposes `/readyz`. Authenticate the temporary GitHub bootstrap login:
+
+```bash
+sudo -u adaptive-tutor env HOME=/var/lib/adaptive-tutor \
+  gh auth login --hostname github.com --git-protocol https --web
+```
+
+Run setup with the exact 40-character public source commit used to build the
+installed wheel:
+
+```bash
+sudo -u adaptive-tutor env HOME=/var/lib/adaptive-tutor \
+  ADAPTIVE_TUTOR_SOURCE_REVISION=YOUR_40_CHARACTER_COMMIT \
+  /opt/adaptive-tutor/bin/adaptive-tutor \
+  --config /etc/adaptive-tutor/config.yaml setup \
+  --public-url https://tutor.example.net \
+  --goal "Build reliable network services" \
+  --github-owner YOUR_GITHUB_OWNER
+```
+
+Complete browser App approval at `/setup`, selecting only the created private
+workspace, then restart `adaptive-tutor.service`. Resume setup with temporary
+socket-group access so the trusted operator process can run the grader canary:
+
+```bash
+sudo systemctl restart adaptive-tutor.service
+sudo -u adaptive-tutor -g adaptive-tutor-grader-socket env \
+  HOME=/var/lib/adaptive-tutor \
+  ADAPTIVE_TUTOR_CONFIG=/etc/adaptive-tutor/config.yaml \
+  ADAPTIVE_TUTOR_GRADER_SOCKET=/run/adaptive-tutor-grader/grader.sock \
+  ADAPTIVE_TUTOR_SOURCE_REVISION=YOUR_40_CHARACTER_COMMIT \
+  /opt/adaptive-tutor/bin/adaptive-tutor setup resume
+```
+
+Repeat only when setup reports a completed external action. At worker health,
+enable the worker, resume once more, and require the live doctor to pass:
+
+```bash
+sudo systemctl enable --now adaptive-tutor-worker.service
+sudo -u adaptive-tutor -g adaptive-tutor-grader-socket env \
+  HOME=/var/lib/adaptive-tutor \
+  ADAPTIVE_TUTOR_CONFIG=/etc/adaptive-tutor/config.yaml \
+  ADAPTIVE_TUTOR_GRADER_SOCKET=/run/adaptive-tutor-grader/grader.sock \
+  /opt/adaptive-tutor/bin/adaptive-tutor setup resume
+sudo -u adaptive-tutor -g adaptive-tutor-grader-socket env \
+  HOME=/var/lib/adaptive-tutor \
+  ADAPTIVE_TUTOR_CONFIG=/etc/adaptive-tutor/config.yaml \
+  ADAPTIVE_TUTOR_GRADER_SOCKET=/run/adaptive-tutor-grader/grader.sock \
+  /opt/adaptive-tutor/bin/adaptive-tutor doctor --live --strict
+sudo -u adaptive-tutor env HOME=/var/lib/adaptive-tutor \
+  gh auth logout --hostname github.com
 ```
 
 ### Lifecycle commands
@@ -269,12 +410,14 @@ be reconstructed from SQLite only while the original key remains available;
 published manifests and the protected workspace public key are anchored to
 that key ID.
 
-Losing `signing.key` requires a coordinated trust-anchor rotation and new
-control-plane attestation, not silent key regeneration. That rotation is not
-automated in the current construction build. Keep GitHub App keys, webhook/API
-secrets, grader credentials, configuration, and the evaluator signing state in
-the same encrypted disaster-recovery inventory, with access separated by their
-trust domains.
+Losing `signing.key` without a backup makes existing trusted bundles and public
+manifests unverifiable. Restore the matching key; never silently regenerate it
+inside an existing installation. If no verified copy exists, retire the
+affected workspace and tutor state and perform a fresh guided installation
+with a new private workspace, retaining the old records as untrusted history.
+Keep GitHub App keys, webhook/API secrets, grader credentials, configuration,
+and evaluator signing state in the same encrypted disaster-recovery inventory,
+with access separated by their trust domains.
 
 Restore is intentionally explicit. Stop both writers, retain a copy of the
 current database, and restore a verified snapshot:
@@ -303,9 +446,11 @@ release, run the migration/doctor check, and restart:
 ```bash
 # Compose
 docker compose exec tutor adaptive-tutor backup
+./prepare-compose.sh
 docker compose build --pull
-docker compose --profile remote up -d
-docker compose exec worker adaptive-tutor doctor
+docker compose --profile live --profile remote up -d
+docker compose --profile remote --profile tools run --rm \
+  operator doctor --live --strict
 
 # systemd
 sudo systemctl stop adaptive-tutor-worker.service adaptive-tutor-grader.service \
@@ -374,10 +519,10 @@ after returning to a separated release.
 - **Database corruption or host loss:** provision a clean host, install the same
   release, restore the newest tested off-host database and evaluator signing
   state, run `doctor --offline`, then start the service and worker.
-- **Lost evaluator signing key:** stop remote publication and dispatch. Preserve
-  SQLite and the protected GitHub controls, then perform an audited trust-anchor
-  rotation when a supported rotation path is available; generating an unrelated
-  replacement key does not validate already published manifests.
+- **Lost evaluator signing key:** stop remote publication and dispatch, restore
+  the matching key from a verified backup, and rerun the live doctor. Without a
+  backup, preserve the old records offline and build a new installation and
+  workspace; an unrelated replacement key cannot validate old manifests.
 - **Lost webhook delivery:** run the reconciliation path after connectivity is
   restored; duplicate event deliveries are safe because delivery IDs and jobs
   are idempotent.

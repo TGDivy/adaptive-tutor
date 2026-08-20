@@ -1,30 +1,45 @@
 # GitHub App and webhooks
 
-Remote learning uses two private repositories: a learner workspace and a
-separate curriculum repository. Install a dedicated GitHub App only
-on those selected repositories; do not use an organization-wide personal token.
+Remote learning uses one private learner workspace. Private curriculum packages
+may live in a separate access-controlled repository, but the tutor loads them
+from an operator-managed local checkout and its GitHub App does not need access
+to that repository. Guided setup creates a dedicated App and limits its
+installation to exactly the learning workspace; do not use an organization-wide
+personal token for steady-state operation.
 
 ## Repository roles
 
 | Repository | Contains | Access |
 | --- | --- | --- |
 | Learning workspace | Assignment branches, learner commits, pull requests, CI evidence, reviews | Learner + tutor App |
-| Curriculum repository | Trusted references, private evaluator guidance, private package data | Tutor App/operators only |
+| Curriculum repository | Trusted references, private evaluator guidance, private package data | Operators only; local checkout configured in `curriculum_paths` |
 | Public product | Generic engine, neutral bundled curriculum, docs, deployment templates | Public |
 
 The public repository must never name or freeze private curriculum intent or
 learner work.
 
-## Create the App
+## Guided App and workspace setup
 
-Create a GitHub App under the account that owns the two private repositories.
-Use a descriptive private name and set the webhook callback to:
+Use `adaptive-tutor setup` through the trusted Compose `operator` service or
+the equivalent systemd runbook. The setup process uses the operator's temporary
+GitHub CLI login to:
+
+1. create or verify the named private learning workspace;
+2. open a browser GitHub App manifest under that same user or organization;
+3. receive the App ID, private key, and webhook secret without printing them;
+4. require installation on exactly the verified workspace;
+5. install the evaluator and setup-probe workflows plus the public signing key;
+6. protect and read back the default branch, then persist its immutable
+   repository/workflow/key attestation; and
+7. prove signed webhook delivery, a hosted Actions artifact, and the first PR.
+
+The generated private App uses this callback:
 
 ```text
 https://YOUR-TUTOR-HOST/webhooks/github
 ```
 
-Grant only the repository capabilities needed by your deployment:
+Its exact repository permissions are:
 
 - metadata: read;
 - contents: read/write for assignment branches;
@@ -32,15 +47,20 @@ Grant only the repository capabilities needed by your deployment:
 - Actions: read/write for trusted workflow dispatches;
 - checks: read;
 - issues: read/write for PR discussion commands; and
-- repository webhooks: read/write only if using `webhook-setup` reconciliation.
+- no administration, secrets, environments, members, or repository-hook
+  permission.
 
-Subscribe to `push`, `pull_request`, `workflow_run`, `check_suite`, and
-`issue_comment`. Install the App on selected private repositories, not every
-current and future repository.
+The App-level manifest webhook subscribes to `push`, `pull_request`,
+`workflow_run`, `check_suite`, and `issue_comment`. Select only the newly
+verified private workspace on GitHub's installation page, never "All
+repositories". Setup rejects an installation token that can see any additional
+repository.
 
-Generate one private key, store it in an owner-only file outside source
-control, and record the App and installation IDs. Rotate the key and webhook
-secret on a defined schedule and immediately after suspected exposure.
+GitHub generates one private key and webhook secret during manifest conversion.
+The callback stores them in owner-only state and records only references in
+YAML. After setup completes, remove the temporary `gh` login as shown in the
+operations runbook; steady-state tutor and worker processes use only the App.
+Rotate the App key and webhook secret after suspected exposure.
 
 ## Configure Adaptive Tutor
 
@@ -60,22 +80,22 @@ github:
   webhook_secret_env: ADAPTIVE_TUTOR_WEBHOOK_SECRET
 ```
 
-Only `https://api.github.com` is accepted by the public build. Raw secrets stay
-in the generated secrets file, an owner-only worker environment file, or the
-App key—not YAML.
+This manual shape is for inspection and recovery; guided setup writes it. Only
+`https://api.github.com` is accepted. Raw secrets stay in the generated secrets
+file or App key, not YAML.
 
 ```bash
 adaptive-tutor doctor
-adaptive-tutor webhook-setup
+adaptive-tutor doctor --live --strict
 ```
 
-`doctor` verifies that the workspace is private and writable, the configured
-callback is active with required events, and the App key and webhook secret are
-present. `webhook-setup` is idempotent: it reconciles an existing matching hook
-or creates one.
-
-These commands configure repository access and webhook delivery only. They do
-not install or record the protected evaluator control plane described below.
+`doctor` authenticates once with the installation token to verify the private
+workspace and exact one-repository scope. It separately signs an App JWT and
+reads `GET /app` plus `GET /app/hook/config` to verify the configured App ID,
+exact permissions/events, and App-level callback. The signed setup delivery is
+the independent proof that the callback is active. `webhook-setup` is only for
+legacy development-token mode with repository webhooks; do not run it after
+guided App setup.
 
 ## Webhook request path
 
@@ -94,19 +114,23 @@ true` and does not create duplicate learner evidence.
 
 ## Branch and workflow protection
 
-Protect the workspace default branch. Disallow force pushes and deletion,
-restrict changes to evaluator/workflow paths, and require the tutor App or an
-operator review for those protected files. Learner branches should change only
-assignment-visible paths. Apply a repository ruleset that blocks learner writes
-to `.github/workflows/**` on every branch; default-branch protection alone does
-not prevent an assignment branch from introducing an executable workflow.
+Guided setup protects the workspace default branch: at least one approving
+review, stale-review dismissal, last-push approval, administrator enforcement,
+linear history, conversation resolution, and no force pushes or deletion. It
+then reads the protection back before attesting the evaluator controls. This is
+default-branch protection, not an all-branch path ruleset. Organizations that
+need defense in depth may add a separately audited ruleset restricting workflow
+paths on learner branches, but must not claim guided setup created or verified
+that rule.
 
-The evaluator workflow is dispatched by the tutor on the protected default
-branch; assignment pushes never supply its executable definition. It uses a
-pinned action/toolchain, `persist-credentials: false`, read-only job-token
-permissions, and an isolated credential-free environment for learner code.
-Never use `pull_request_target`, or a workflow definition loaded from an
-assignment branch, to execute learner content.
+Learner changes are also constrained by the signed assignment manifest's
+allowed paths. The evaluator workflow is dispatched from the protected default
+branch; assignment pushes never supply its executable definition.
+
+The workflow uses a pinned action/toolchain, `persist-credentials: false`,
+read-only job-token permissions, and an isolated credential-free environment
+for learner code. Never use `pull_request_target`, or a workflow definition
+loaded from an assignment branch, to execute learner content.
 
 The repository includes the workflow contract at
 `deploy/workspace/adaptive-tutor-evaluate.yml`; its protected workspace path is
@@ -115,11 +139,11 @@ the tutor signing key's public half at
 `.adaptive-tutor/evaluator-signing.pub`. The private half and complete assignment
 bundles remain on the tutor host.
 
-> **Construction status:** the current public CLI does not install these files,
-> establish their branch protections, or populate the required
-> `evaluator_control_planes` state. Do not hand-edit SQLite to bypass that
-> check. Remote assignment publication is not supported end to end until an
-> authenticated bootstrap and trust-anchor rotation path lands.
+The `evaluator_controls` guided-setup step installs these files from the exact
+public source revision, verifies the local/public evaluator-kit digest, applies
+and reads back protection, verifies the workflow and key through the App, and
+persists `evaluator_control_planes`. Do not hand-edit that record or weaken the
+pre-publication verification.
 
 ## Signed public evaluation
 

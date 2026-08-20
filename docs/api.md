@@ -76,12 +76,11 @@ curl --fail --request POST \
 `available_minutes` is 5–480, energy is `low`, `medium`, or `high`, and the
 optional goal horizon is 0–3650 days. `allowed_formats` can narrow selection to
 known exercise-type strings. The endpoint returns `503` until GitHub access and
-the protected evaluator control plane are both configured and verified.
-
-The current construction build has no supported command to bootstrap the
-workflow/key protections or required `evaluator_control_planes` record. Do not
-hand-edit SQLite to make this endpoint proceed; remote assignment creation
-remains unavailable until that authenticated setup path is implemented.
+the protected evaluator control plane are both configured and verified. Run
+guided setup through its first live assignment and require
+`adaptive-tutor doctor --live --strict` to pass before granting an agent access
+to this endpoint. Guided setup creates and attests the control-plane record;
+never hand-edit SQLite to bypass it.
 
 ## Reports and control
 

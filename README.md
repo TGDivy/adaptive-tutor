@@ -18,9 +18,11 @@ deterministic evidence, structured review, spaced retrieval, and visible progres
 
 </div>
 
-> Adaptive Tutor is under active construction. The repository is being built
-> against the complete contract in [SPEC.md](SPEC.md); tagged releases begin
-> after the independent completion gate passes.
+> **Install readiness: NOT READY.** Guided live setup is implemented, but this
+> revision has not yet passed the independent completion gate with fresh
+> screenshots, deployed-runtime evidence, and controlled private integration
+> proof. This marker changes to **READY** only after `./scripts/check-completion`
+> passes for the release revision.
 
 ## What it feels like
 
@@ -62,9 +64,12 @@ transactionally, and generates a progress report.
 See the [installation guide](https://tgdivy.github.io/adaptive-tutor/getting-started/)
 for isolated installs, dashboard startup, and remote integration.
 
-Learning goals are durable and revisioned. Optional `--domain`, `--concept`, and
-`--target-date` focus scheduling; completed feedback is available with
-`adaptive-tutor review` and through the authenticated dashboard/API.
+Learning goals are durable and revisioned. Curriculum-owned `goal_terms` map a
+compatible free-form objective to scheduling focus; optional `--domain`,
+`--concept`, and `--target-date` provide explicit focus. Incompatible goals are
+rejected instead of silently scheduling unrelated work. Completed feedback is
+available with `adaptive-tutor review` and through the authenticated
+dashboard/API.
 
 ## Architecture
 
@@ -117,18 +122,20 @@ backups, upgrade/rollback, and disaster recovery procedures.
 
 ```bash
 cd deploy
-./prepare-compose.sh
+./prepare-compose.sh --domain tutor.example.net
 docker compose build
 docker compose --profile tools run --rm initializer
-docker compose up -d tutor
+docker compose --profile live --profile remote up -d tutor proxy grader
 ```
 
-Follow the [operations guide](https://tgdivy.github.io/adaptive-tutor/operations/)
-rather than exposing the example service directly.
-
-The local runtime deployment paths are implemented. Automated bootstrap of the
-protected GitHub evaluator controls is not yet supported, so the remote GitHub
-learning loop is not install-ready in this construction build.
+The guided setup then creates one private learning repository, creates and
+installs a least-privilege GitHub App through browser approval, protects and
+attests the hosted evaluator controls, verifies a signed webhook, runs an
+isolated Codex canary and credential-free hosted probe, opens the first
+assignment pull request, and verifies the durable worker. Follow the exact
+[clean-server runbook](https://tgdivy.github.io/adaptive-tutor/operations/#production-compose-runbook);
+do not expose the loopback service or skip its final `doctor --live --strict`
+check.
 
 ## Project status
 
@@ -140,9 +147,8 @@ authoritative gate is:
 ./scripts/check-completion
 ```
 
-It intentionally fails until product, operations, documentation, external
-integration, and security evidence are all present. See [SPEC.md](SPEC.md) for
-the full public contract.
+Any failure means the README readiness marker must remain **NOT READY**. See
+[SPEC.md](SPEC.md) for the full public contract.
 
 ## License
 

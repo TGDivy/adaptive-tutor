@@ -19,7 +19,8 @@ For each concept, the scheduler combines:
 | Diversity | Recently repeated concepts are discounted. |
 | Confidence | Confident failures and overconfident partial work return sooner. |
 | Prerequisites | Weak dependencies suppress premature work; weak foundations that unblock dependents rise. |
-| Urgency | An optional near-term goal modestly shifts ordering. |
+| Goal focus | Explicit or curriculum-inferred domains/concepts raise relevant work and prerequisite paths. |
+| Urgency | An optional target date modestly shifts ordering. |
 
 The command output includes every rounded factor and a concise reason, so a
 recommendation is inspectable rather than mysterious.

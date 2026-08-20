@@ -102,8 +102,9 @@ ingest, the tutor binds the run and artifact back to the stored nonce, manifest,
 workflow, evaluator source, repository, assignment, and learner commit.
 
 Back up `trusted-evaluators/signing.key` in encrypted owner-only storage with
-SQLite; it cannot be derived from the database. Loss requires an audited
-trust-anchor rotation. Silently generating a replacement does not authenticate
+SQLite; it cannot be derived from the database. Restore the matching key after
+loss. Without it, retire the affected workspace/state and perform a fresh
+guided installation; silently generating a replacement does not authenticate
 already published manifests or match the protected workspace key.
 
 The public-boundary gate scans every tracked file for private subject material,
@@ -112,10 +113,11 @@ but does not replace—repository secret scanning and human review.
 
 ## GitHub scope
 
-Use a dedicated App installed only on the private learning and curriculum
-repositories. Verify the workspace is private before publishing. Branch paths,
-artifact zip entries, sizes, and evidence contracts are validated. Public pull
-requests must never be routed to a credentialed evaluator.
+Use a dedicated App installed only on the single private learning workspace.
+Private curriculum checkouts remain operator-managed and outside App scope.
+Verify the workspace is private before publishing. Branch paths, artifact zip
+entries, sizes, and evidence contracts are validated. Public pull requests must
+never be routed to a credentialed evaluator.
 
 ## Failure behavior
 

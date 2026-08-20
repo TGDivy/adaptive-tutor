@@ -2,14 +2,20 @@
 
 You can evaluate the complete local learning loop without a GitHub account,
 model key, private curriculum, or running service. Remote assignments are an
-explicit second step.
+explicit second step. For a live server, use the
+[production Compose runbook](operations.md#production-compose-runbook); it is
+the supported path that proves every integration before declaring setup ready.
 
 ## Requirements
 
 - Python 3.11 or newer
 - Git
 - `uv` for source development, or another isolated Python package installer
-- Docker Compose only if you choose the container deployment
+- Docker Engine with Compose v2 for the recommended live deployment
+- a public DNS name and inbound TCP 80/443 for automatic TLS
+- a GitHub account or organization whose plan supports private-repository
+  Actions and default-branch protection
+- an OpenAI API key or another authentication method supported by Codex CLI
 
 Compilers and language tooling are curriculum-specific. The bundled demo uses
 Python and ships its own fixture review.
@@ -106,6 +112,26 @@ dashboard is authenticated by default even on loopback. `/healthz` and
 Do not bind directly to a public interface. Use the hardened
 [deployment paths](operations.md), a loopback-published port, and a trusted
 authenticated tunnel or reverse proxy.
+
+## Set the live learning objective
+
+Guided server setup accepts the objective directly:
+
+```bash
+adaptive-tutor setup \
+  --public-url https://tutor.example.net \
+  --goal "Build reliable network services"
+```
+
+The active curriculum maps the statement through concept names, domains, and
+curriculum-owned `goal_terms`. It persists the inferred concepts as a durable,
+revisioned focus. A statement that does not match the active curriculum stops
+setup with an actionable error; load a compatible private curriculum or supply
+an explicit domain/concept with `goal set` instead of accepting unrelated work.
+
+On a production Compose host, run this through the documented one-shot
+`operator` service, not directly on the host. That process has setup state and
+read-only grader-socket access without receiving the grader's model credential.
 
 ## Next steps
 

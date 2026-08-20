@@ -52,6 +52,7 @@ concepts:
     importance: 1.4
     base_difficulty: 4
     exercise_types: [debugging, code_review, written]
+    goal_terms: [state safety, reliable state transitions]
     reference_files: [trusted-source.md]
     generation_guidance: Include at least one boundary transition.
     grading_guidance: Require the invariant to be stated explicitly.
@@ -60,6 +61,12 @@ concepts:
 Importance is between 0.1 and 2.0, base difficulty is 1–10, and each concept
 supports at least two known exercise types. Concept IDs must be unique across
 the loaded database, so prefix them with a stable curriculum/domain namespace.
+`goal_terms` is an optional normalized list of phrases an operator may use when
+describing an objective. When `goal set` or guided setup receives no explicit
+domain/concept selector, it matches the statement against these phrases plus
+concept names and domains. Strongest matches become the saved focus; no match
+rejects the goal as incompatible. Use specific subject phrases, not private
+learner or employer details.
 
 ## Prerequisites
 

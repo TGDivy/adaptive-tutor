@@ -69,5 +69,6 @@ addresses the learner's argument and appends a linked result.
 ## What should I back up?
 
 The SQLite database, configuration, generated secret file, private curriculum,
-GitHub App setup/key recovery material, and Codex authentication needed by your
-deployment. Store backups encrypted off-host and test restores.
+GitHub App key, `trusted-evaluators/signing.key`, and Codex authentication
+needed by your deployment. The evaluator signing key is not derivable from
+SQLite. Store backups encrypted off-host and test restores.
