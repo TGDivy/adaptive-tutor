@@ -24,6 +24,7 @@ def test_compose_is_loopback_rootless_and_credential_separated() -> None:
     tutor = payload["services"]["tutor"]
     worker = payload["services"]["worker"]
     grader = payload["services"]["grader"]
+    operator = payload["services"]["operator"]
     proxy = payload["services"]["proxy"]
 
     assert tutor["ports"] == ["127.0.0.1:${TUTOR_PORT:-8765}:8765"]
@@ -69,6 +70,15 @@ def test_compose_is_loopback_rootless_and_credential_separated() -> None:
     assert "codex" not in str(worker["volumes"])
     assert worker["profiles"] == ["remote"]
     assert grader["profiles"] == ["remote"]
+    assert operator["profiles"] == ["tools"]
+    assert any(
+        str(volume).endswith(":/etc/adaptive-tutor") for volume in operator["volumes"]
+    )
+    assert any(
+        str(volume).endswith(":/run/adaptive-tutor-grader:ro")
+        for volume in operator["volumes"]
+    )
+    assert "grader.env" not in str(operator.get("env_file", ""))
     assert tutor["environment"]["ADAPTIVE_TUTOR_SOURCE_REVISION"].startswith(
         "${SOURCE_REVISION:?"
     )
@@ -91,7 +101,6 @@ def test_systemd_units_restart_and_harden_services() -> None:
         assert "NoNewPrivileges=true" in content
         assert "ProtectSystem=strict" in content
         assert "CapabilityBoundingSet=\n" in content
-        assert "ReadWritePaths=/var/lib/adaptive-tutor" in content
     grader = (unit_root / "adaptive-tutor-grader.service").read_text(encoding="utf-8")
     assert "Restart=on-failure" in grader
     assert "User=adaptive-tutor-grader" in grader
@@ -115,6 +124,7 @@ def test_systemd_units_restart_and_harden_services() -> None:
     )
     assert "InaccessiblePaths=/var/lib/adaptive-tutor-grader /etc/adaptive-tutor-grader" in worker
     tutor = (unit_root / "adaptive-tutor.service").read_text(encoding="utf-8")
+    assert "ReadWritePaths=/etc/adaptive-tutor /var/lib/adaptive-tutor" in tutor
     backup = (unit_root / "adaptive-tutor-backup.service").read_text(encoding="utf-8")
     for content in (tutor, backup):
         assert "SupplementaryGroups=adaptive-tutor-grader-socket" not in content

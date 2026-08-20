@@ -53,7 +53,7 @@ class Doctor:
                     "Set github.owner and GitHub App fields, then rerun doctor.",
                 )
             )
-        checks.append(self._service())
+        checks.append(self._service(live=live))
         if live:
             checks.extend(
                 [
@@ -265,8 +265,11 @@ class Doctor:
         finally:
             client.close()
 
-    def _service(self) -> DoctorCheck:
-        url = f"http://{self.settings.server.host}:{self.settings.server.port}/readyz"
+    def _service(self, *, live: bool = False) -> DoctorCheck:
+        if live and self.settings.github.webhook_url:
+            url = self.settings.github.webhook_url + "/readyz"
+        else:
+            url = f"http://{self.settings.server.host}:{self.settings.server.port}/readyz"
         try:
             response = httpx.get(url, timeout=1.5)
         except (httpx.HTTPError, OSError) as exc:

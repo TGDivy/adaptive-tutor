@@ -39,11 +39,13 @@ def validate_compose(payload: dict[str, Any], failures: list[str]) -> None:
     if not isinstance(services, dict):
         return
     require(
-        {"tutor", "worker", "grader", "initializer", "proxy"}.issubset(services),
-        "compose must define tutor, worker, grader, initializer, and proxy services",
+        {"tutor", "worker", "grader", "initializer", "operator", "proxy"}.issubset(
+            services
+        ),
+        "compose must define tutor, worker, grader, initializer, operator, and proxy services",
         failures,
     )
-    for name in ("tutor", "worker", "grader", "initializer"):
+    for name in ("tutor", "worker", "grader", "initializer", "operator"):
         service = services.get(name, {})
         if not isinstance(service, dict):
             failures.append(f"compose service {name} is invalid")
@@ -64,10 +66,16 @@ def validate_compose(payload: dict[str, Any], failures: list[str]) -> None:
     )
     worker = services.get("worker", {})
     grader = services.get("grader", {})
+    operator = services.get("operator", {})
     proxy = services.get("proxy", {})
     require(
         isinstance(worker, dict) and "remote" in worker.get("profiles", []),
         "remote worker must be explicitly profile-gated",
+        failures,
+    )
+    require(
+        isinstance(operator, dict) and operator.get("profiles") == ["tools"],
+        "trusted setup operator must be explicitly tools-profile gated",
         failures,
     )
     tutor_env = str(tutor.get("env_file", "")) if isinstance(tutor, dict) else ""
@@ -79,9 +87,11 @@ def validate_compose(payload: dict[str, Any], failures: list[str]) -> None:
     require("grader.env" in grader_env, "grader-only environment file is missing", failures)
     grader_volumes = grader.get("volumes", []) if isinstance(grader, dict) else []
     worker_volumes = worker.get("volumes", []) if isinstance(worker, dict) else []
+    operator_volumes = operator.get("volumes", []) if isinstance(operator, dict) else []
     tutor_volumes = tutor.get("volumes", []) if isinstance(tutor, dict) else []
     grader_targets = _volume_targets(grader_volumes)
     worker_targets = _volume_targets(worker_volumes)
+    operator_targets = _volume_targets(operator_volumes)
     tutor_config_mounts = [
         str(volume) for volume in tutor_volumes if ":/etc/adaptive-tutor" in str(volume)
     ]
@@ -98,6 +108,24 @@ def validate_compose(payload: dict[str, Any], failures: list[str]) -> None:
         len(worker_config_mounts) == 1
         and worker_config_mounts[0].endswith(":/etc/adaptive-tutor:ro"),
         "worker config mount must remain read-only",
+        failures,
+    )
+    require(
+        "/etc/adaptive-tutor" in operator_targets
+        and "/var/lib/adaptive-tutor" in operator_targets
+        and "/run/adaptive-tutor-grader" in operator_targets,
+        "setup operator requires config, state, and read-only grader socket access",
+        failures,
+    )
+    operator_socket_mounts = [
+        str(volume)
+        for volume in operator_volumes
+        if ":/run/adaptive-tutor-grader" in str(volume)
+    ]
+    require(
+        len(operator_socket_mounts) == 1
+        and operator_socket_mounts[0].endswith(":/run/adaptive-tutor-grader:ro"),
+        "setup operator grader socket volume must be read-only",
         failures,
     )
     require(
@@ -155,6 +183,12 @@ def validate_compose(payload: dict[str, Any], failures: list[str]) -> None:
             f"{name} runtime is not pinned to the exact source revision",
             failures,
         )
+    require(
+        operator.get("environment", {}).get("ADAPTIVE_TUTOR_SOURCE_REVISION")
+        == runtime_revision,
+        "operator runtime is not pinned to the exact source revision",
+        failures,
+    )
     require(
         isinstance(proxy, dict) and proxy.get("profiles") == ["live"],
         "TLS proxy must be explicitly live-profile gated",
@@ -315,6 +349,11 @@ def validate_systemd(failures: list[str]) -> None:
             f"{name} must not see grader state, credentials, or socket",
             failures,
         )
+    require(
+        "ReadWritePaths=/etc/adaptive-tutor /var/lib/adaptive-tutor" in tutor,
+        "tutor service must allow authenticated guided-setup configuration writes",
+        failures,
+    )
 
 
 def validate_operations(failures: list[str]) -> None:

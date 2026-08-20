@@ -112,6 +112,29 @@ services:
     healthcheck:
       disable: true
 
+  operator:
+    <<: *runtime
+    profiles: ["tools"]
+    command: ["doctor", "--offline"]
+    environment:
+      ADAPTIVE_TUTOR_CONFIG: /etc/adaptive-tutor/config.yaml
+      ADAPTIVE_TUTOR_GRADER_SOCKET: /run/adaptive-tutor-grader/grader.sock
+      ADAPTIVE_TUTOR_SOURCE_REVISION: ${SOURCE_REVISION:?Run ./prepare-compose.sh from deploy first}
+      HOME: /var/lib/adaptive-tutor
+      CODEX_HOME: /var/lib/adaptive-tutor-codex
+    volumes:
+      - ${TUTOR_RUNTIME_DIR:-./runtime}/config:/etc/adaptive-tutor
+      - ${TUTOR_RUNTIME_DIR:-./runtime}/state:/var/lib/adaptive-tutor
+      - ${TUTOR_RUNTIME_DIR:-./runtime}/grader-run:/run/adaptive-tutor-grader:ro
+    depends_on:
+      tutor:
+        condition: service_healthy
+      grader:
+        condition: service_started
+    restart: "no"
+    healthcheck:
+      disable: true
+
   proxy:
     image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
     profiles: ["live"]

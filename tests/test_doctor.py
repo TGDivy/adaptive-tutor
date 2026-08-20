@@ -278,6 +278,25 @@ def test_doctor_online_and_service_failures_are_contained(
     assert "503" in unavailable.detail
 
 
+def test_live_service_health_uses_the_public_setup_url(
+    database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requested: list[str] = []
+    settings = TutorSettings(
+        data_dir=tmp_path / "state",
+        database_path=database.path,
+        github=GitHubSettings(webhook_url="https://tutor.example.test"),
+    )
+
+    def healthy(url: str, **_kwargs: object) -> httpx.Response:
+        requested.append(url)
+        return httpx.Response(200)
+
+    monkeypatch.setattr("adaptive_tutor.doctor.httpx.get", healthy)
+    assert Doctor(settings, database)._service(live=True).status == "pass"
+    assert requested == ["https://tutor.example.test/readyz"]
+
+
 def test_live_doctor_verifies_complete_current_installation(
     initialized: tuple[Database, object],
     tmp_path: Path,

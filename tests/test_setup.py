@@ -8,7 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from adaptive_tutor.cli import app
-from adaptive_tutor.config import TutorSettings
+from adaptive_tutor.config import TutorSettings, load_settings
 from adaptive_tutor.db import Database
 from adaptive_tutor.errors import ConfigurationError
 from adaptive_tutor.jobs import JobQueue
@@ -138,6 +138,7 @@ def test_cli_setup_persists_goal_and_reports_tls_action(
     database = Database(tmp_path / "state" / "tutor.sqlite3")
     goal = database.fetch_one("SELECT statement, status FROM learning_goals")
     assert goal == {"statement": "Build reliable network services.", "status": "active"}
+    assert load_settings(config, require_file=True).codex.enabled is True
 
 
 def test_ready_setup_reopens_for_new_worker_health_step(

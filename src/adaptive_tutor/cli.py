@@ -193,6 +193,7 @@ def setup_command(
                 public_url=public_url,
                 github_owner=github_owner,
                 workspace_repo=workspace_repo,
+                codex_enabled=True,
                 evaluator_ref=evaluator_ref,
             )
             if data_dir is not None and data_dir.expanduser().resolve() != current.data_dir:
@@ -206,7 +207,11 @@ def setup_command(
                 webhook_url=public_url,
                 evaluator_ref=evaluator_ref,
             )
-            settings = load_settings(config_path, require_file=True)
+            settings = update_setup_config(
+                config_path,
+                public_url=public_url,
+                codex_enabled=True,
+            )
         database = _bootstrap(settings, force_load=True)
         service = SetupService(database)
         service.begin(
