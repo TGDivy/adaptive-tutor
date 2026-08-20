@@ -29,11 +29,13 @@ def client(database: Database, tmp_path: Path, monkeypatch: object) -> TestClien
     return TestClient(app)
 
 
-def signed_headers(body: bytes, *, delivery: str = "delivery-1") -> dict[str, str]:
+def signed_headers(
+    body: bytes, *, delivery: str = "delivery-1", event: str = "push"
+) -> dict[str, str]:
     digest = hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()
     return {
         "X-Hub-Signature-256": "sha256=" + digest,
-        "X-GitHub-Event": "push",
+        "X-GitHub-Event": event,
         "X-GitHub-Delivery": delivery,
         "Content-Type": "application/json",
     }
@@ -49,9 +51,7 @@ def test_webhook_persists_enqueues_and_returns_before_work(
     response = test_client.post("/webhooks/github", content=body, headers=signed_headers(body))
     assert response.status_code == 202
     assert response.json()["duplicate"] is False
-    duplicate = test_client.post(
-        "/webhooks/github", content=body, headers=signed_headers(body)
-    )
+    duplicate = test_client.post("/webhooks/github", content=body, headers=signed_headers(body))
     assert duplicate.status_code == 202
     assert duplicate.json()["duplicate"] is True
     assert database.fetch_one("SELECT status FROM events") == {"status": "queued"}
@@ -70,9 +70,7 @@ def test_webhook_rejects_invalid_signature_and_wrong_repository(
     wrong_response = test_client.post(
         "/webhooks/github", content=wrong, headers=signed_headers(wrong)
     )
-    assert (
-        wrong_response.status_code == 403
-    )
+    assert wrong_response.status_code == 403
     assert database.fetch_one("SELECT COUNT(*) count FROM events") == {"count": 0}
 
 
@@ -93,3 +91,27 @@ def test_webhook_rejects_oversized_chunked_body_without_content_length(
 
     assert response.status_code == 413
     assert database.fetch_one("SELECT COUNT(*) count FROM events") == {"count": 0}
+
+
+def test_github_app_installation_webhook_accepts_only_selected_workspace(
+    database: Database, tmp_path: Path, monkeypatch: object
+) -> None:
+    test_client = client(database, tmp_path, monkeypatch)
+    body = json.dumps(
+        {
+            "action": "created",
+            "repositories": [{"full_name": "owner/learning-workspace"}],
+            "installation": {"id": 42},
+        }
+    ).encode()
+    response = test_client.post(
+        "/webhooks/github",
+        content=body,
+        headers=signed_headers(body, delivery="installation-1", event="installation"),
+    )
+
+    assert response.status_code == 202
+    assert database.fetch_one("SELECT event_type, status FROM events") == {
+        "event_type": "installation",
+        "status": "ignored",
+    }

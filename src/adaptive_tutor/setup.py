@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import shutil
 import uuid
 from collections.abc import Callable
@@ -18,10 +19,13 @@ from .codex import CodexRunner
 from .config import TutorSettings, update_setup_config
 from .db import Database
 from .errors import ConfigurationError, ExternalServiceError, SecurityError, TutorError
+from .evaluation import EvaluationService
+from .github import GitHubClient
 from .github_setup import EvaluatorControlProvisioner, GitHubCLIBootstrap
 from .goals import GoalService
-from .models import StrictModel
-from .security import redact
+from .models import LearnerContext, StrictModel
+from .orchestrator import TutorOrchestrator
+from .security import redact, sha256_digest
 from .time import iso_now
 
 SetupRunStatus = Literal["provisioning", "action_required", "failed", "ready"]
@@ -46,6 +50,8 @@ SETUP_STEPS = (
     "hosted_ci_probe",
     "first_assignment",
 )
+
+_SETUP_PROBE_WORKFLOW = ".github/workflows/adaptive-tutor-setup-probe.yml"
 
 
 class SetupStep(StrictModel):
@@ -82,6 +88,17 @@ class SetupRun(StrictModel):
         if not normalized.startswith("https://"):
             raise ValueError("setup public_url must use HTTPS")
         return normalized
+
+
+class HostedSetupProbeEvidence(StrictModel):
+    schema_version: Literal["1.0"]
+    nonce: str = Field(pattern=r"^[0-9a-f]{32}$")
+    repository_id: int = Field(gt=0)
+    workflow_commit: str = Field(pattern=r"^[0-9a-f]{40,64}$")
+    workflow_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    evaluator_key_id: str = Field(pattern=r"^[0-9a-f]{16}$")
+    runner: Literal["github-hosted:ubuntu-24.04"]
+    credential_environment: list[str] = Field(max_length=0)
 
 
 @dataclass(frozen=True)
@@ -501,15 +518,163 @@ class LiveSetupExecutor:
         )
 
     def _hosted_ci_probe(self, run: SetupRun) -> StepOutcome:
-        row = self.database.fetch_one(
-            "SELECT value_json FROM configuration WHERE key='setup_hosted_ci_probe'"
+        passed = self.database.fetch_one(
+            """
+            SELECT * FROM hosted_setup_probes
+            WHERE setup_run_id=? AND status='passed'
+            ORDER BY completed_at DESC LIMIT 1
+            """,
+            (run.id,),
         )
-        if row and json.loads(str(row["value_json"])).get("passed") is True:
-            return StepOutcome.complete("Credential-free GitHub-hosted CI probe passed")
-        return StepOutcome.wait(
-            "A credential-free GitHub-hosted CI probe has not passed",
-            action="Resume after evaluator controls are installed to dispatch the setup probe",
+        if passed:
+            return StepOutcome.complete(
+                "Credential-free GitHub-hosted CI probe passed",
+                external_ids={
+                    "actions_run_id": int(passed["actions_run_id"]),
+                    "artifact_digest": str(passed["artifact_digest"]),
+                },
+            )
+        control = self.database.fetch_one(
+            "SELECT * FROM evaluator_control_planes ORDER BY configured_at DESC LIMIT 1"
         )
+        if control is None:
+            return StepOutcome("failed_terminal", "Evaluator controls are not configured")
+        github = GitHubClient(self.settings.github)
+        try:
+            probe = self.database.fetch_one(
+                """
+                SELECT * FROM hosted_setup_probes
+                WHERE setup_run_id=? AND status IN ('dispatching', 'dispatched')
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (run.id,),
+            )
+            if probe is None:
+                workflow_commit = str(control["workflow_commit"])
+                workflow = github.get_file(_SETUP_PROBE_WORKFLOW, workflow_commit)
+                workflow_digest = sha256_digest(workflow)
+                probe_id = str(uuid.uuid4())
+                nonce = secrets.token_hex(16)
+                now = iso_now()
+                self.database.execute(
+                    """
+                    INSERT INTO hosted_setup_probes(
+                        id, setup_run_id, repository_id, nonce, status,
+                        workflow_path, workflow_digest, workflow_commit,
+                        evaluator_key_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'dispatching', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        probe_id,
+                        run.id,
+                        int(control["repository_id"]),
+                        nonce,
+                        _SETUP_PROBE_WORKFLOW,
+                        workflow_digest,
+                        workflow_commit,
+                        str(control["evaluator_key_id"]),
+                        now,
+                        now,
+                    ),
+                )
+                try:
+                    github.dispatch_setup_probe(
+                        nonce=nonce,
+                        evaluator_key_id=str(control["evaluator_key_id"]),
+                    )
+                except (TutorError, OSError, ValueError) as exc:
+                    self.database.execute(
+                        """
+                        UPDATE hosted_setup_probes
+                        SET status='failed', detail=?, completed_at=?, updated_at=?
+                        WHERE id=?
+                        """,
+                        (redact(str(exc))[:1000], now, now, probe_id),
+                    )
+                    raise
+                probe = self.database.fetch_one(
+                    "SELECT * FROM hosted_setup_probes WHERE id=?", (probe_id,)
+                )
+                if probe is None:  # pragma: no cover - transaction invariant
+                    raise RuntimeError("Hosted setup probe disappeared")
+            actions_run_id = probe.get("actions_run_id")
+            if actions_run_id is None:
+                found = github.find_setup_probe_run(str(probe["nonce"]))
+                if found is None:
+                    return StepOutcome.wait(
+                        "The GitHub-hosted setup probe was dispatched and is being scheduled",
+                        action="Wait for the Actions run to appear, then resume setup",
+                    )
+                actions_run_id = int(found["run_id"])
+                if str(found["workflow_commit"]) != str(probe["workflow_commit"]):
+                    raise SecurityError("Hosted setup probe used an unexpected workflow commit")
+                self.database.execute(
+                    """
+                    UPDATE hosted_setup_probes
+                    SET actions_run_id=?, status='dispatched', updated_at=? WHERE id=?
+                    """,
+                    (actions_run_id, iso_now(), str(probe["id"])),
+                )
+                observed = found
+            else:
+                observed = github.get_setup_probe_run(
+                    int(actions_run_id), nonce=str(probe["nonce"])
+                )
+            if str(observed["status"]) != "completed":
+                return StepOutcome.wait(
+                    "The credential-free GitHub-hosted setup probe is running",
+                    action="Wait for the Actions run to finish, then resume setup",
+                )
+            if str(observed["conclusion"]) != "success":
+                now = iso_now()
+                self.database.execute(
+                    """
+                    UPDATE hosted_setup_probes
+                    SET status='failed', detail=?, completed_at=?, updated_at=? WHERE id=?
+                    """,
+                    (
+                        f"Actions conclusion: {observed['conclusion']}",
+                        now,
+                        now,
+                        str(probe["id"]),
+                    ),
+                )
+                return StepOutcome(
+                    "failed_retryable",
+                    f"GitHub-hosted setup probe concluded {observed['conclusion']}",
+                    action="Inspect the Actions run, then resume to dispatch a fresh probe",
+                )
+            artifact = github.download_setup_probe_evidence(int(actions_run_id))
+            evidence = HostedSetupProbeEvidence.model_validate_json(artifact)
+            expected = {
+                "nonce": str(probe["nonce"]),
+                "repository_id": int(probe["repository_id"]),
+                "workflow_commit": str(probe["workflow_commit"]),
+                "workflow_digest": str(probe["workflow_digest"]),
+                "evaluator_key_id": str(probe["evaluator_key_id"]),
+            }
+            for name, value in expected.items():
+                if getattr(evidence, name) != value:
+                    raise SecurityError(f"Hosted setup probe artifact has the wrong {name}")
+            now = iso_now()
+            artifact_digest = sha256_digest(artifact)
+            self.database.execute(
+                """
+                UPDATE hosted_setup_probes
+                SET status='passed', artifact_digest=?, detail='Hosted probe verified',
+                    completed_at=?, updated_at=? WHERE id=?
+                """,
+                (artifact_digest, now, now, str(probe["id"])),
+            )
+            return StepOutcome.complete(
+                "Credential-free GitHub-hosted CI probe passed",
+                external_ids={
+                    "actions_run_id": int(actions_run_id),
+                    "artifact_digest": artifact_digest,
+                },
+            )
+        finally:
+            github.close()
 
     def _first_assignment(self, run: SetupRun) -> StepOutcome:
         row = self.database.fetch_one(
@@ -521,10 +686,32 @@ class LiveSetupExecutor:
             (run.learner_id,),
         )
         if row is None:
-            return StepOutcome.wait(
-                "The first live assignment pull request has not been published",
-                action="Run adaptive-tutor next after the hosted CI probe passes",
+            github = GitHubClient(self.settings.github)
+            try:
+                orchestrator = TutorOrchestrator(
+                    self.settings,
+                    self.database,
+                    github,
+                    EvaluationService(
+                        self.database,
+                        CodexRunner(self.settings.codex, self.database),
+                    ),
+                )
+                orchestrator.create_next_assignment(LearnerContext())
+            finally:
+                github.close()
+            row = self.database.fetch_one(
+                """
+                SELECT id, pull_number FROM assignments
+                WHERE learner_id=? AND pull_number IS NOT NULL
+                ORDER BY created_at LIMIT 1
+                """,
+                (run.learner_id,),
             )
+            if row is None:
+                return StepOutcome(
+                    "failed_retryable", "First assignment publication did not return a pull request"
+                )
         return StepOutcome.complete(
             "The first live assignment pull request is available",
             external_ids={"assignment_id": str(row["id"]), "pull_number": int(row["pull_number"])},

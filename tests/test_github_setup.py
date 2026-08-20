@@ -28,7 +28,7 @@ from adaptive_tutor.github_setup import (
 )
 from adaptive_tutor.runner import evaluator_kit_digest
 from adaptive_tutor.security import sha256_digest
-from adaptive_tutor.setup import SetupRun, SetupService, StepOutcome
+from adaptive_tutor.setup import LiveSetupExecutor, SetupRun, SetupService, StepOutcome
 
 
 class SetupUntilGitHubApp:
@@ -165,6 +165,7 @@ def test_github_cli_installs_and_reads_back_protected_evaluator_controls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workflow = "name: protected evaluator\n"
+    setup_probe_workflow = "name: hosted setup probe\n"
     verification_key = "ed25519:" + "ab" * 32 + "\n"
     uploaded: dict[str, dict[str, Any]] = {}
     protection: dict[str, Any] = {}
@@ -182,6 +183,11 @@ def test_github_cli_installs_and_reads_back_protected_evaluator_controls(
         if "contents/.github/workflows/adaptive-tutor-evaluate.yml" in " ".join(arguments):
             if "PUT" in arguments:
                 uploaded["workflow"] = json.loads(options["input"])
+                return subprocess.CompletedProcess(command, 0, "{}", "")
+            return subprocess.CompletedProcess(command, 1, "", "HTTP 404")
+        if "contents/.github/workflows/adaptive-tutor-setup-probe.yml" in " ".join(arguments):
+            if "PUT" in arguments:
+                uploaded["probe"] = json.loads(options["input"])
                 return subprocess.CompletedProcess(command, 0, "{}", "")
             return subprocess.CompletedProcess(command, 1, "", "HTTP 404")
         if "contents/.adaptive-tutor/evaluator-signing.pub" in " ".join(arguments):
@@ -217,12 +223,14 @@ def test_github_cli_installs_and_reads_back_protected_evaluator_controls(
         owner="example-owner",
         repository="learning-workspace",
         workflow=workflow,
+        setup_probe_workflow=setup_probe_workflow,
         verification_key=verification_key,
     )
 
     assert installed.workflow_commit == "f" * 40
     assert installed.branch_protected is True
     assert base64.b64decode(uploaded["workflow"]["content"]).decode() == workflow
+    assert base64.b64decode(uploaded["probe"]["content"]).decode() == setup_probe_workflow
     assert base64.b64decode(uploaded["key"]["content"]).decode() == verification_key
     assert protection["enforce_admins"] is True
     assert protection["allow_force_pushes"] is False
@@ -236,16 +244,20 @@ def test_evaluator_control_provisioner_binds_remote_source_and_database(
     config_path, settings, database, run = configured_setup(tmp_path, monkeypatch)
     settings.github.evaluator_ref = "e" * 40
     workflow = "name: protected evaluator\n"
+    setup_probe_workflow = "name: hosted setup probe\n"
 
     class Bootstrap:
         def public_evaluator_source(self, revision: str) -> PublicEvaluatorSource:
             assert revision == "e" * 40
-            return PublicEvaluatorSource(revision, workflow, evaluator_kit_digest())
+            return PublicEvaluatorSource(
+                revision, workflow, setup_probe_workflow, evaluator_kit_digest()
+            )
 
         def install_evaluator_controls(self, **values: Any) -> InstalledEvaluatorControls:
             assert values["owner"] == "example-owner"
             assert values["repository"] == "learning-workspace"
             assert values["workflow"] == workflow
+            assert values["setup_probe_workflow"] == setup_probe_workflow
             assert str(values["verification_key"]).startswith("ed25519:")
             return InstalledEvaluatorControls(
                 repository_id=9876,
@@ -413,3 +425,152 @@ def test_authenticated_setup_page_posts_manifest_to_github(
         assert (
             "form-action 'self' https://github.com" in app_page.headers["content-security-policy"]
         )
+
+
+def test_live_setup_dispatches_and_verifies_real_hosted_probe_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path, settings, database, run = configured_setup(tmp_path, monkeypatch)
+    workflow = "name: hosted setup probe\n"
+    workflow_commit = "f" * 40
+    key_id = "a" * 16
+    now = "2026-08-20T00:00:00+00:00"
+    database.execute(
+        """
+        INSERT INTO evaluator_control_planes(
+            repository_id, repository_full_name, default_branch, workflow_path,
+            workflow_commit, workflow_digest, evaluator_ref, evaluator_kit_digest,
+            evaluator_key_id, configured_at, verified_at
+        ) VALUES (9876, 'example-owner/learning-workspace', 'main', ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            ".github/workflows/adaptive-tutor-evaluate.yml",
+            workflow_commit,
+            "sha256:" + "b" * 64,
+            "e" * 40,
+            "sha256:" + "c" * 64,
+            key_id,
+            now,
+            now,
+        ),
+    )
+    observed: dict[str, str] = {}
+
+    class HostedGitHub:
+        find_calls = 0
+
+        def __init__(self, github: Any) -> None:
+            assert github.owner == "example-owner"
+
+        def get_file(self, path: str, ref: str) -> str:
+            assert path == ".github/workflows/adaptive-tutor-setup-probe.yml"
+            assert ref == workflow_commit
+            return workflow
+
+        def dispatch_setup_probe(self, *, nonce: str, evaluator_key_id: str) -> None:
+            observed["nonce"] = nonce
+            assert evaluator_key_id == key_id
+
+        def find_setup_probe_run(self, nonce: str) -> dict[str, str | int] | None:
+            assert nonce == observed["nonce"]
+            HostedGitHub.find_calls += 1
+            if HostedGitHub.find_calls == 1:
+                return None
+            return {
+                "run_id": 77,
+                "status": "completed",
+                "conclusion": "success",
+                "workflow_commit": workflow_commit,
+                "repository_id": 9876,
+            }
+
+        def get_setup_probe_run(self, run_id: int, *, nonce: str) -> dict[str, str | int]:
+            raise AssertionError((run_id, nonce))
+
+        def download_setup_probe_evidence(self, run_id: int) -> bytes:
+            assert run_id == 77
+            return json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "nonce": observed["nonce"],
+                    "repository_id": 9876,
+                    "workflow_commit": workflow_commit,
+                    "workflow_digest": sha256_digest(workflow),
+                    "evaluator_key_id": key_id,
+                    "runner": "github-hosted:ubuntu-24.04",
+                    "credential_environment": [],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("adaptive_tutor.setup.GitHubClient", HostedGitHub)
+    executor = LiveSetupExecutor(settings, database, config_path=config_path)
+    waiting = executor._hosted_ci_probe(run)
+    assert waiting.status == "waiting_user"
+    assert len(observed["nonce"]) == 32
+
+    complete = executor._hosted_ci_probe(run)
+    assert complete.status == "complete"
+    assert complete.external_ids["actions_run_id"] == 77
+    probe = database.fetch_one("SELECT status, actions_run_id FROM hosted_setup_probes")
+    assert probe == {"status": "passed", "actions_run_id": 77}
+
+
+def test_live_setup_publishes_first_assignment_pull_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path, settings, database, run = configured_setup(tmp_path, monkeypatch)
+
+    class GitHub:
+        def __init__(self, github: Any) -> None:
+            assert github.owner == "example-owner"
+
+        def close(self) -> None:
+            return None
+
+    class Orchestrator:
+        def __init__(
+            self,
+            configured: Any,
+            state: Database,
+            github: Any,
+            evaluations: Any,
+        ) -> None:
+            assert configured is settings
+            self.database = state
+
+        def create_next_assignment(self, context: Any) -> dict[str, Any]:
+            assert context.available_minutes == 45
+            now = "2026-08-20T00:00:00+00:00"
+            self.database.execute(
+                """
+                INSERT INTO assignments(
+                    id, learner_id, curriculum_id, profile_id, slug, title,
+                    exercise_type, difficulty, expected_minutes, status,
+                    branch_name, pull_number, head_sha, bundle_json, created_at, updated_at
+                ) VALUES (
+                    'A-0001', 'default', 'systems-foundations', 'generalist',
+                    'first-assignment', 'First assignment', 'implementation', 4, 45,
+                    'published', 'assignment/0001-first-assignment', 42, ?, '{}', ?, ?
+                )
+                """,
+                ("f" * 40, now, now),
+            )
+            return {"id": "A-0001", "pull_number": 42}
+
+    monkeypatch.setattr("adaptive_tutor.setup.GitHubClient", GitHub)
+    monkeypatch.setattr("adaptive_tutor.setup.TutorOrchestrator", Orchestrator)
+    outcome = LiveSetupExecutor(
+        settings,
+        database,
+        config_path=config_path,
+    )._first_assignment(run)
+
+    assert outcome.status == "complete"
+    assert outcome.external_ids == {"assignment_id": "A-0001", "pull_number": 42}

@@ -198,7 +198,28 @@ def create_app(
         run = SetupService(database).current()
         if run is None:
             raise HTTPException(status_code=404, detail="Guided setup has not been started")
-        return templates.TemplateResponse(request, "setup.html", {"setup": run})
+        return templates.TemplateResponse(
+            request,
+            "setup.html",
+            {"setup": run, "csrf_token": auth.csrf_value},
+        )
+
+    @app.post("/setup/resume", include_in_schema=False)
+    async def resume_setup_from_browser(request: Request) -> RedirectResponse:
+        body = await request.body()
+        if len(body) > 4096:
+            raise HTTPException(status_code=413, detail="Form request is too large")
+        form = parse_qs(body.decode("utf-8", errors="replace"))
+        auth.authorize_browser_write(request, form.get("csrf", [""])[0])
+        if config_path is None:
+            raise HTTPException(status_code=503, detail="Server configuration path is unavailable")
+        try:
+            SetupService(database).resume(
+                LiveSetupExecutor(settings, database, config_path=config_path)
+            )
+        except (TutorError, ValueError, OSError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return RedirectResponse(url="/setup", status_code=303)
 
     @app.get("/setup/github-app", response_class=HTMLResponse, include_in_schema=False)
     def github_app_setup_page(request: Request) -> Any:

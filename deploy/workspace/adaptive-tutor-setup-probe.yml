@@ -1,0 +1,112 @@
+name: Adaptive Tutor Setup Probe
+run-name: "Adaptive Tutor Setup | ${{ inputs.nonce }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      nonce:
+        description: One-use setup probe identifier
+        required: true
+        type: string
+      evaluator_key_id:
+        description: Expected protected evaluator key identifier
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adaptive-tutor-setup-${{ inputs.nonce }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Credential-free hosted setup probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Validate typed probe inputs
+        shell: bash
+        env:
+          PROBE_NONCE: ${{ inputs.nonce }}
+          EVALUATOR_KEY_ID: ${{ inputs.evaluator_key_id }}
+        run: |
+          set -euo pipefail
+          [[ "${PROBE_NONCE}" =~ ^[0-9a-f]{32}$ ]]
+          [[ "${EVALUATOR_KEY_ID}" =~ ^[0-9a-f]{16}$ ]]
+
+      - name: Check out protected setup controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          clean: true
+          sparse-checkout: |
+            .adaptive-tutor/evaluator-signing.pub
+            .github/workflows/adaptive-tutor-setup-probe.yml
+
+      - name: Produce credential-free setup evidence
+        shell: bash
+        env:
+          PROBE_NONCE: ${{ inputs.nonce }}
+          EVALUATOR_KEY_ID: ${{ inputs.evaluator_key_id }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+          WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/adaptive-tutor-setup-probe"
+          install -d -m 0700 "${evidence_dir}"
+          env -i \
+            PATH="/usr/bin:/bin" \
+            LANG="C.UTF-8" \
+            LC_ALL="C.UTF-8" \
+            PROBE_NONCE="${PROBE_NONCE}" \
+            EVALUATOR_KEY_ID="${EVALUATOR_KEY_ID}" \
+            REPOSITORY_ID="${REPOSITORY_ID}" \
+            WORKFLOW_COMMIT="${WORKFLOW_COMMIT}" \
+            EVIDENCE_PATH="${evidence_dir}/adaptive-tutor-setup-probe.json" \
+            python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          key_text = Path(".adaptive-tutor/evaluator-signing.pub").read_text().strip()
+          if re.fullmatch(r"ed25519:[0-9a-f]{64}", key_text) is None:
+              raise SystemExit("protected evaluator key is invalid")
+          key_id = hashlib.sha256(bytes.fromhex(key_text.removeprefix("ed25519:"))).hexdigest()[:16]
+          if key_id != os.environ["EVALUATOR_KEY_ID"]:
+              raise SystemExit("protected evaluator key identifier changed")
+          credential_names = sorted(
+              name
+              for name in os.environ
+              if any(marker in name.upper() for marker in ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "PRIVATE"))
+          )
+          if credential_names:
+              raise SystemExit("credential-like environment reached the hosted probe")
+          workflow = Path(".github/workflows/adaptive-tutor-setup-probe.yml").read_bytes()
+          payload = {
+              "schema_version": "1.0",
+              "nonce": os.environ["PROBE_NONCE"],
+              "repository_id": int(os.environ["REPOSITORY_ID"]),
+              "workflow_commit": os.environ["WORKFLOW_COMMIT"],
+              "workflow_digest": "sha256:" + hashlib.sha256(workflow).hexdigest(),
+              "evaluator_key_id": key_id,
+              "runner": "github-hosted:ubuntu-24.04",
+              "credential_environment": credential_names,
+          }
+          Path(os.environ["EVIDENCE_PATH"]).write_text(
+              json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload setup evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: adaptive-tutor-setup-probe
+          path: ${{ runner.temp }}/adaptive-tutor-setup-probe/adaptive-tutor-setup-probe.json
+          if-no-files-found: error
+          retention-days: 14

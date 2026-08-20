@@ -46,7 +46,9 @@ _APP_SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$")
 _MANIFEST_CODE = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
 _PUBLIC_REPOSITORY = "TGDivy/adaptive-tutor"
 _EVALUATOR_WORKFLOW_SOURCE = "deploy/workspace/adaptive-tutor-evaluate.yml"
+_SETUP_PROBE_WORKFLOW_SOURCE = "deploy/workspace/adaptive-tutor-setup-probe.yml"
 _EVALUATOR_WORKFLOW_PATH = ".github/workflows/adaptive-tutor-evaluate.yml"
+_SETUP_PROBE_WORKFLOW_PATH = ".github/workflows/adaptive-tutor-setup-probe.yml"
 _EVALUATOR_KEY_PATH = ".adaptive-tutor/evaluator-signing.pub"
 
 
@@ -70,6 +72,7 @@ class GitHubAppManifestLaunch:
 class PublicEvaluatorSource:
     revision: str
     workflow: str
+    setup_probe_workflow: str
     kit_digest: str
 
 
@@ -144,6 +147,7 @@ class GitHubCLIBootstrap:
             raise ConfigurationError("Public evaluator revision must be an exact commit")
         self._run(["api", f"repos/{_PUBLIC_REPOSITORY}/commits/{revision}"])
         workflow = self._public_file(revision, _EVALUATOR_WORKFLOW_SOURCE)
+        setup_probe_workflow = self._public_file(revision, _SETUP_PROBE_WORKFLOW_SOURCE)
         digest = hashlib.sha256()
         for name in EVALUATOR_KIT_FILES:
             digest.update(name.encode())
@@ -153,6 +157,7 @@ class GitHubCLIBootstrap:
         return PublicEvaluatorSource(
             revision=revision,
             workflow=workflow,
+            setup_probe_workflow=setup_probe_workflow,
             kit_digest="sha256:" + digest.hexdigest(),
         )
 
@@ -162,6 +167,7 @@ class GitHubCLIBootstrap:
         owner: str,
         repository: str,
         workflow: str,
+        setup_probe_workflow: str,
         verification_key: str,
     ) -> InstalledEvaluatorControls:
         _validate_owner(owner)
@@ -182,6 +188,13 @@ class GitHubCLIBootstrap:
             _EVALUATOR_WORKFLOW_PATH,
             workflow,
             "Install protected Adaptive Tutor evaluator workflow",
+        )
+        self._put_repository_file(
+            full_name,
+            default_branch,
+            _SETUP_PROBE_WORKFLOW_PATH,
+            setup_probe_workflow,
+            "Install protected Adaptive Tutor hosted setup probe",
         )
         self._put_repository_file(
             full_name,
@@ -382,6 +395,7 @@ class EvaluatorControlProvisioner:
             owner=self.settings.github.owner,
             repository=self.settings.github.workspace_repo,
             workflow=source.workflow,
+            setup_probe_workflow=source.setup_probe_workflow,
             verification_key=verification_key,
         )
         expected_repository_id = int(

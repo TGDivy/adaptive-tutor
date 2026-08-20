@@ -50,15 +50,11 @@ def test_download_evidence_accepts_one_safe_contract() -> None:
             return httpx.Response(
                 200,
                 json={
-                    "artifacts": [
-                        {"id": 9, "name": "adaptive-tutor-evidence", "expired": False}
-                    ]
+                    "artifacts": [{"id": 9, "name": "adaptive-tutor-evidence", "expired": False}]
                 },
             )
         if request.url.path.endswith("/artifacts/9/zip"):
-            return httpx.Response(
-                200, content=zipped({"adaptive-tutor-evidence.json": evidence})
-            )
+            return httpx.Response(200, content=zipped({"adaptive-tutor-evidence.json": evidence}))
         return httpx.Response(404)
 
     client = GitHubClient(
@@ -75,9 +71,7 @@ def test_download_evidence_rejects_zip_traversal() -> None:
             return httpx.Response(
                 200,
                 json={
-                    "artifacts": [
-                        {"id": 9, "name": "adaptive-tutor-evidence", "expired": False}
-                    ]
+                    "artifacts": [{"id": 9, "name": "adaptive-tutor-evidence", "expired": False}]
                 },
             )
         return httpx.Response(
@@ -151,12 +145,7 @@ def test_evaluator_run_requires_complete_trusted_provenance(
         "head_sha": "f" * 40,
         "event": "workflow_dispatch",
         "display_title": (
-            "Adaptive Tutor | A-0001 | "
-            + "a" * 40
-            + " | "
-            + "b" * 32
-            + " | "
-            + "d" * 40
+            "Adaptive Tutor | A-0001 | " + "a" * 40 + " | " + "b" * 32 + " | " + "d" * 40
         ),
         "repository": {"id": 123, "full_name": "owner/learning-workspace"},
         "head_repository": {"full_name": "owner/learning-workspace"},
@@ -256,6 +245,103 @@ def test_evaluator_dispatch_uses_trusted_default_branch_and_typed_inputs() -> No
             "evaluator_kit_digest": "sha256:" + "e" * 64,
         },
     }
+
+
+def test_setup_probe_dispatch_and_run_require_hosted_workflow_provenance() -> None:
+    nonce = "b" * 32
+    workflow_path = ".github/workflows/adaptive-tutor-setup-probe.yml"
+    dispatched: dict[str, Any] = {}
+    run = {
+        "id": 77,
+        "workflow_id": 9,
+        "path": workflow_path,
+        "head_branch": "main",
+        "head_sha": "f" * 40,
+        "event": "workflow_dispatch",
+        "status": "completed",
+        "conclusion": "success",
+        "display_title": f"Adaptive Tutor Setup | {nonce}",
+        "repository": {"id": 123, "full_name": "owner/learning-workspace"},
+        "head_repository": {"full_name": "owner/learning-workspace"},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/repos/owner/learning-workspace":
+            return httpx.Response(
+                200,
+                json={
+                    "private": True,
+                    "id": 123,
+                    "full_name": "owner/learning-workspace",
+                    "default_branch": "main",
+                    "permissions": {"push": True},
+                },
+            )
+        if path.endswith("/adaptive-tutor-setup-probe.yml/dispatches"):
+            dispatched.update(json.loads(request.content))
+            return httpx.Response(204)
+        if path.endswith("/adaptive-tutor-setup-probe.yml/runs"):
+            return httpx.Response(200, json={"workflow_runs": [run]})
+        if "/actions/workflows/" in path and path.endswith("/adaptive-tutor-setup-probe.yml"):
+            return httpx.Response(200, json={"id": 9, "path": workflow_path})
+        if path.endswith("/actions/runs/77"):
+            return httpx.Response(200, json=run)
+        return httpx.Response(404)
+
+    client = GitHubClient(
+        GitHubSettings(owner="owner"),
+        auth=StaticAuth(),  # type: ignore[arg-type]
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        client.dispatch_setup_probe(nonce=nonce, evaluator_key_id="a" * 16)
+        assert dispatched == {
+            "ref": "main",
+            "inputs": {"nonce": nonce, "evaluator_key_id": "a" * 16},
+        }
+        expected = {
+            "run_id": 77,
+            "status": "completed",
+            "conclusion": "success",
+            "workflow_commit": "f" * 40,
+            "repository_id": 123,
+        }
+        assert client.find_setup_probe_run(nonce) == expected
+        assert client.get_setup_probe_run(77, nonce=nonce) == expected
+    finally:
+        client.close()
+
+
+def test_setup_probe_artifact_requires_one_safe_named_contract() -> None:
+    evidence = b'{"schema_version":"1.0"}'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/artifacts"):
+            return httpx.Response(
+                200,
+                json={
+                    "artifacts": [
+                        {"id": 19, "name": "adaptive-tutor-setup-probe", "expired": False}
+                    ]
+                },
+            )
+        if request.url.path.endswith("/artifacts/19/zip"):
+            return httpx.Response(
+                200,
+                content=zipped({"adaptive-tutor-setup-probe.json": evidence}),
+            )
+        return httpx.Response(404)
+
+    client = GitHubClient(
+        GitHubSettings(owner="owner"),
+        auth=StaticAuth(),  # type: ignore[arg-type]
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert client.download_setup_probe_evidence(77) == evidence
+    finally:
+        client.close()
 
 
 def test_evaluator_control_is_bound_to_repository_workflow_and_key() -> None:
@@ -475,9 +561,7 @@ def test_github_app_token_exchange(
     if status_code == 201:
         assert auth.token() == "installation-token"
         assert auth.token() == "installation-token"
-        assert observed["url"] == (
-            "https://api.github.com/app/installations/22/access_tokens"
-        )
+        assert observed["url"] == ("https://api.github.com/app/installations/22/access_tokens")
         request = observed["request"]
         assert request["headers"]["Authorization"] == "Bearer jwt"
     else:
@@ -700,12 +784,15 @@ def test_webhook_review_and_comment_writes_are_idempotent() -> None:
         assert client.create_or_verify_webhook("https://tutor.example/hook", "secret") == 17
         assert client.ensure_review(42, "new", marker="review-marker") == 8
         reviews.clear()
-        assert client.ensure_review(
-            42,
-            "new review",
-            marker="review-marker",
-            commit_sha="a" * 40,
-        ) == 18
+        assert (
+            client.ensure_review(
+                42,
+                "new review",
+                marker="review-marker",
+                commit_sha="a" * 40,
+            )
+            == 18
+        )
         assert client.ensure_comment(42, "new", marker="comment-marker") == 9
         comments.clear()
         assert client.ensure_comment(42, "new comment", marker="comment-marker") == 19

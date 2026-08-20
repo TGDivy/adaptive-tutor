@@ -49,9 +49,7 @@ def test_ci_exercises_package_docs_container_and_privacy() -> None:
 def test_workflow_yaml_and_dependabot_are_parseable() -> None:
     for path in WORKFLOW_ROOT.glob("*.yml"):
         assert isinstance(yaml.safe_load(path.read_text(encoding="utf-8")), dict)
-    dependabot = yaml.safe_load(
-        (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
-    )
+    dependabot = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8"))
     ecosystems = {item["package-ecosystem"] for item in dependabot["updates"]}
     assert ecosystems == {"uv", "docker", "github-actions"}
 
@@ -96,6 +94,30 @@ def test_workspace_evaluator_is_ephemeral_credential_free_and_uploads_contract()
     assert "self-hosted" not in content
     assert "stage-request" not in content
     assert "assignment-bundle.json" not in content
-    assert '\n  push:' not in content
+    assert "\n  push:" not in content
+    uses_lines = [line for line in content.splitlines() if "uses:" in line]
+    assert uses_lines and all(PINNED_ACTION.search(line) for line in uses_lines)
+
+
+def test_hosted_setup_probe_is_credential_free_and_provenance_bound() -> None:
+    path = ROOT / "deploy" / "workspace" / "adaptive-tutor-setup-probe.yml"
+    content = path.read_text(encoding="utf-8")
+    assert isinstance(yaml.safe_load(content), dict)
+    for required in (
+        "runs-on: ubuntu-24.04",
+        "workflow_dispatch:",
+        "persist-credentials: false",
+        "ref: ${{ github.workflow_sha }}",
+        "env -i",
+        'PATH="/usr/bin:/bin"',
+        "credential_environment",
+        "github-hosted:ubuntu-24.04",
+        "adaptive-tutor-setup-probe.json",
+        "name: adaptive-tutor-setup-probe",
+        "retention-days: 14",
+    ):
+        assert required in content
+    assert "pull_request_target" not in content
+    assert "self-hosted" not in content
     uses_lines = [line for line in content.splitlines() if "uses:" in line]
     assert uses_lines and all(PINNED_ACTION.search(line) for line in uses_lines)

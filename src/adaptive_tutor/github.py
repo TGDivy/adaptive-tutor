@@ -23,11 +23,13 @@ from .errors import ConfigurationError, ExternalServiceError, SecurityError
 from .security import MAX_ARTIFACT_BYTES, redact, sha256_digest
 
 _EVALUATOR_WORKFLOW = ".github/workflows/adaptive-tutor-evaluate.yml"
+_SETUP_PROBE_WORKFLOW = ".github/workflows/adaptive-tutor-setup-probe.yml"
 _EVALUATOR_KEY = ".adaptive-tutor/evaluator-signing.pub"
 _EVALUATOR_RUN_TITLE = re.compile(
     r"Adaptive Tutor \| (A-\d{4,12}) \| ([0-9a-f]{40,64}) \| "
     r"([0-9a-f]{32}) \| ([0-9a-f]{40})"
 )
+_SETUP_PROBE_RUN_TITLE = re.compile(r"Adaptive Tutor Setup \| ([0-9a-f]{32})")
 
 
 @dataclass
@@ -382,6 +384,103 @@ class GitHubClient:
             },
         )
 
+    def dispatch_setup_probe(
+        self,
+        *,
+        nonce: str,
+        evaluator_key_id: str,
+        workflow_path: str = _SETUP_PROBE_WORKFLOW,
+    ) -> None:
+        if re.fullmatch(r"[0-9a-f]{32}", nonce) is None:
+            raise SecurityError("Invalid hosted setup probe nonce")
+        if re.fullmatch(r"[0-9a-f]{16}", evaluator_key_id) is None:
+            raise SecurityError("Invalid hosted setup probe evaluator key")
+        repository = self.verify_private_repository()
+        self._request(
+            "POST",
+            f"{self.repository_path}/actions/workflows/{workflow_path}/dispatches",
+            expected=(204,),
+            json={
+                "ref": str(repository["default_branch"]),
+                "inputs": {"nonce": nonce, "evaluator_key_id": evaluator_key_id},
+            },
+        )
+
+    def find_setup_probe_run(
+        self,
+        nonce: str,
+        *,
+        workflow_path: str = _SETUP_PROBE_WORKFLOW,
+    ) -> dict[str, str | int] | None:
+        if re.fullmatch(r"[0-9a-f]{32}", nonce) is None:
+            raise SecurityError("Invalid hosted setup probe nonce")
+        repository = self.verify_private_repository()
+        workflow = self._request(
+            "GET", f"{self.repository_path}/actions/workflows/{workflow_path}"
+        ).json()
+        runs = self._request(
+            "GET",
+            f"{self.repository_path}/actions/workflows/{workflow_path}/runs",
+            params={"event": "workflow_dispatch", "per_page": 30},
+        ).json()
+        matches = [
+            item
+            for item in runs.get("workflow_runs", [])
+            if str(item.get("display_title")) == f"Adaptive Tutor Setup | {nonce}"
+        ]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise SecurityError("Hosted setup probe nonce matched multiple Actions runs")
+        return self._verified_setup_probe_payload(matches[0], workflow, repository, nonce)
+
+    def get_setup_probe_run(
+        self,
+        run_id: int,
+        *,
+        nonce: str,
+        workflow_path: str = _SETUP_PROBE_WORKFLOW,
+    ) -> dict[str, str | int]:
+        repository = self.verify_private_repository()
+        workflow = self._request(
+            "GET", f"{self.repository_path}/actions/workflows/{workflow_path}"
+        ).json()
+        run = self._request("GET", f"{self.repository_path}/actions/runs/{run_id}").json()
+        return self._verified_setup_probe_payload(run, workflow, repository, nonce)
+
+    def _verified_setup_probe_payload(
+        self,
+        run: dict[str, Any],
+        workflow: dict[str, Any],
+        repository: dict[str, Any],
+        nonce: str,
+    ) -> dict[str, str | int]:
+        expected_repository = f"{self.settings.owner}/{self.settings.workspace_repo}".casefold()
+        observed_repository = str((run.get("repository") or {}).get("full_name", "")).casefold()
+        head_repository = str((run.get("head_repository") or {}).get("full_name", "")).casefold()
+        title = _SETUP_PROBE_RUN_TITLE.fullmatch(str(run.get("display_title", "")))
+        workflow_commit = str(run.get("head_sha", ""))
+        if (
+            title is None
+            or title.group(1) != nonce
+            or int(run.get("workflow_id") or 0) != int(workflow.get("id") or 0)
+            or str(run.get("path")) != str(workflow.get("path") or _SETUP_PROBE_WORKFLOW)
+            or str(run.get("head_branch")) != str(repository.get("default_branch"))
+            or str(run.get("event")) != "workflow_dispatch"
+            or observed_repository != expected_repository
+            or head_repository != expected_repository
+            or int((run.get("repository") or {}).get("id") or 0) != int(repository.get("id") or 0)
+            or re.fullmatch(r"[0-9a-f]{40,64}", workflow_commit) is None
+        ):
+            raise SecurityError("Hosted setup probe run provenance is invalid")
+        return {
+            "run_id": int(run["id"]),
+            "status": str(run.get("status") or ""),
+            "conclusion": str(run.get("conclusion") or ""),
+            "workflow_commit": workflow_commit,
+            "repository_id": int(repository["id"]),
+        }
+
     def verify_evaluator_control(
         self,
         *,
@@ -441,6 +540,26 @@ class GitHubClient:
     def download_evidence(
         self, run_id: int, *, artifact_name: str = "adaptive-tutor-evidence"
     ) -> bytes:
+        return self._download_artifact_file(
+            run_id,
+            artifact_name=artifact_name,
+            filename="adaptive-tutor-evidence.json",
+        )
+
+    def download_setup_probe_evidence(self, run_id: int) -> bytes:
+        return self._download_artifact_file(
+            run_id,
+            artifact_name="adaptive-tutor-setup-probe",
+            filename="adaptive-tutor-setup-probe.json",
+        )
+
+    def _download_artifact_file(
+        self,
+        run_id: int,
+        *,
+        artifact_name: str,
+        filename: str,
+    ) -> bytes:
         artifacts = self._request(
             "GET", f"{self.repository_path}/actions/runs/{run_id}/artifacts"
         ).json()
@@ -461,7 +580,7 @@ class GitHubClient:
             f"{self.repository_path}/actions/artifacts/{matches[0]['id']}/zip",
             MAX_ARTIFACT_BYTES,
         )
-        return _read_evidence_zip(archive)
+        return _read_named_evidence_zip(archive, filename)
 
     def verify_evaluator_run(
         self,
@@ -598,9 +717,7 @@ def _validate_evaluator_identity(
     evaluator_ref: str = "0" * 40,
 ) -> None:
     assignment = re.fullmatch(r"A-(\d{4,12})", assignment_id)
-    branch_match = re.fullmatch(
-        r"assignment/(\d{4,12})-[a-z0-9][a-z0-9-]{2,100}", branch
-    )
+    branch_match = re.fullmatch(r"assignment/(\d{4,12})-[a-z0-9][a-z0-9-]{2,100}", branch)
     if (
         assignment is None
         or branch_match is None
@@ -620,6 +737,10 @@ def _validate_repository_path(path: str) -> None:
 
 
 def _read_evidence_zip(archive: bytes) -> bytes:
+    return _read_named_evidence_zip(archive, "adaptive-tutor-evidence.json")
+
+
+def _read_named_evidence_zip(archive: bytes, filename: str) -> bytes:
     try:
         with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
             members = zipped.infolist()
@@ -628,9 +749,7 @@ def _read_evidence_zip(archive: bytes) -> bytes:
             names = [PurePosixPath(item.filename) for item in members]
             if any(path.is_absolute() or ".." in path.parts for path in names):
                 raise SecurityError("Actions artifact contains an unsafe path")
-            matches = [
-                member for member in members if member.filename == "adaptive-tutor-evidence.json"
-            ]
+            matches = [member for member in members if member.filename == filename]
             if len(matches) != 1:
                 raise SecurityError("Actions artifact must contain one evidence contract")
             return zipped.read(matches[0])

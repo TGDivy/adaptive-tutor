@@ -31,6 +31,7 @@
             <div class="setup-step-heading"><h2>{{ step.name|replace('_', ' ')|title }}</h2><strong>{{ step.status|replace('_', ' ') }}</strong></div>
             <p>{{ step.detail or 'Pending' }}</p>
             {% if step.name == 'github_app' and step.status in ['waiting_user', 'failed_retryable'] %}<a class="primary-action" href="/setup/github-app">Connect GitHub App <span aria-hidden="true">&rarr;</span></a>{% endif %}
+            {% if step.name != 'github_app' and step.status in ['waiting_user', 'failed_retryable'] %}<form method="post" action="/setup/resume"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="primary-action" type="submit">Continue setup <span aria-hidden="true">&rarr;</span></button></form>{% endif %}
           </div>
         </li>
         {% endfor %}

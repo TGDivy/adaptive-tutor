@@ -57,7 +57,14 @@ def webhook_router(settings: TutorSettings, events: EventStore) -> APIRouter:
             actual = str((payload.get("repository") or {}).get("full_name", "")).lower()
             if not settings.github.owner:
                 raise HTTPException(status_code=503, detail="GitHub owner is not configured")
-            if actual != expected:
+            installation_repositories = {
+                str(item.get("full_name", "")).lower()
+                for item in payload.get("repositories", [])
+                if isinstance(item, dict)
+            }
+            if actual != expected and not (
+                event_type == "installation" and expected in installation_repositories
+            ):
                 raise HTTPException(status_code=403, detail="Event repository is outside scope")
         try:
             event_id, job_id, duplicate = events.ingest(
