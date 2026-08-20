@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Connect GitHub - Adaptive Tutor</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/setup" aria-label="Back to setup"><span class="brand-mark">AT</span><span>Adaptive Tutor</span></a>
+      <form method="post" action="/logout"><button class="quiet" type="submit">Sign out</button></form>
+    </header>
+    <main class="setup-connect">
+      <p class="eyebrow">GitHub workspace</p>
+      <h1>Connect the tutor</h1>
+      <p>The App request is limited to the private learning workspace and the repository permissions needed for assignments, checks, reviews, and signed webhooks.</p>
+      <dl class="permission-list">
+        <div><dt>Repository</dt><dd>{{ setup.steps[3].external_ids.repository }}</dd></div>
+        <div><dt>Content and pull requests</dt><dd>Read and write</dd></div>
+        <div><dt>Actions</dt><dd>Read and dispatch</dd></div>
+        <div><dt>Checks</dt><dd>Read only</dd></div>
+      </dl>
+      <form method="post" action="{{ launch.action_url }}">
+        <input type="hidden" name="manifest" value="{{ launch.manifest_json }}">
+        <button class="primary-action" type="submit">Create private GitHub App <span aria-hidden="true">&rarr;</span></button>
+      </form>
+      <a class="quiet-link setup-cancel" href="/setup">Cancel</a>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Setup - Adaptive Tutor</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Adaptive Tutor home"><span class="brand-mark">AT</span><span>Adaptive Tutor</span></a>
+      <div class="top-actions">
+        <span class="runtime"><i class="status-dot {{ '' if setup.status == 'ready' else 'paused' }}"></i>{{ setup.status|replace('_', ' ')|title }}</span>
+        <form method="post" action="/logout"><button class="quiet" type="submit">Sign out</button></form>
+      </div>
+    </header>
+    <main class="setup-shell">
+      <div class="page-heading">
+        <div><p class="eyebrow">Live installation</p><h1>{{ 'Ready' if setup.status == 'ready' else 'Setup required' }}</h1></div>
+        <p class="date-context">{{ setup.public_url }}</p>
+      </div>
+      <section class="setup-summary">
+        <p class="eyebrow">Learning goal</p>
+        <h2>{{ setup.goal_statement }}</h2>
+      </section>
+      <ol class="setup-steps">
+        {% for step in setup.steps %}
+        <li class="setup-step setup-step-{{ step.status }}">
+          <span class="setup-step-number">{{ step.position }}</span>
+          <div>
+            <div class="setup-step-heading"><h2>{{ step.name|replace('_', ' ')|title }}</h2><strong>{{ step.status|replace('_', ' ') }}</strong></div>
+            <p>{{ step.detail or 'Pending' }}</p>
+            {% if step.name == 'github_app' and step.status in ['waiting_user', 'failed_retryable'] %}<a class="primary-action" href="/setup/github-app">Connect GitHub App <span aria-hidden="true">&rarr;</span></a>{% endif %}
+          </div>
+        </li>
+        {% endfor %}
+      </ol>
+    </main>
+  </body>
+</html>

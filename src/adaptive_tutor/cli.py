@@ -782,7 +782,9 @@ def serve(ctx: typer.Context) -> None:
     """Run the webhook, API, and private dashboard service."""
     settings, database = _runtime(ctx)
     orchestrator = _orchestrator(settings, database) if settings.github.owner else None
-    application = create_app(settings, database, orchestrator)
+    context = _context(ctx)
+    config_path = (context.config_path or DEFAULT_CONFIG_PATH).expanduser().resolve()
+    application = create_app(settings, database, orchestrator, config_path=config_path)
     uvicorn.run(
         application,
         host=settings.server.host,

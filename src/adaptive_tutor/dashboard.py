@@ -20,10 +20,12 @@ from .assignments import AssignmentService
 from .config import TutorSettings
 from .db import Database
 from .errors import TutorError
+from .github_setup import GitHubAppSetupService
 from .jobs import EventStore, JobQueue
 from .models import LearnerContext
 from .orchestrator import TutorOrchestrator
 from .reporting import ReportService
+from .setup import LiveSetupExecutor, SetupService
 from .state import StatusService
 from .webhooks import webhook_router
 
@@ -92,6 +94,8 @@ def create_app(
     settings: TutorSettings,
     database: Database,
     orchestrator: TutorOrchestrator | None = None,
+    *,
+    config_path: Path | None = None,
 ) -> FastAPI:
     if settings.server.host not in {"127.0.0.1", "::1", "localhost"} and not settings.api_token:
         raise ValueError("A dashboard API token is required when binding beyond loopback")
@@ -124,7 +128,8 @@ def create_app(
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; style-src 'self'; img-src 'self' data:; "
-            "script-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+            "script-src 'none'; frame-ancestors 'none'; base-uri 'none'; "
+            "form-action 'self' https://github.com"
         )
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
@@ -183,6 +188,86 @@ def create_app(
         response = RedirectResponse(url="/login", status_code=303)
         response.delete_cookie("adaptive_tutor_session")
         return response
+
+    @app.get("/setup", response_class=HTMLResponse, include_in_schema=False)
+    def setup_status_page(request: Request) -> Any:
+        try:
+            read_auth(request)
+        except HTTPException:
+            return RedirectResponse(url="/login", status_code=303)
+        run = SetupService(database).current()
+        if run is None:
+            raise HTTPException(status_code=404, detail="Guided setup has not been started")
+        return templates.TemplateResponse(request, "setup.html", {"setup": run})
+
+    @app.get("/setup/github-app", response_class=HTMLResponse, include_in_schema=False)
+    def github_app_setup_page(request: Request) -> Any:
+        try:
+            read_auth(request)
+        except HTTPException:
+            return RedirectResponse(url="/login", status_code=303)
+        if config_path is None:
+            raise HTTPException(status_code=503, detail="Server configuration path is unavailable")
+        run = SetupService(database).current()
+        if run is None:
+            raise HTTPException(status_code=404, detail="Guided setup has not been started")
+        service = GitHubAppSetupService(settings, database, config_path)
+        try:
+            launch = service.start(run)
+        except (TutorError, ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            service.close()
+        return templates.TemplateResponse(
+            request,
+            "github_app_setup.html",
+            {"setup": run, "launch": launch},
+        )
+
+    @app.get("/setup/github-app/callback", include_in_schema=False)
+    def github_app_manifest_callback(code: str, state: str) -> RedirectResponse:
+        if config_path is None:
+            raise HTTPException(status_code=503, detail="Server configuration path is unavailable")
+        run = SetupService(database).current()
+        if run is None:
+            raise HTTPException(status_code=404, detail="Guided setup has not been started")
+        service = GitHubAppSetupService(settings, database, config_path)
+        try:
+            installation_url = service.complete_manifest(run, code=code, state=state)
+        except (TutorError, ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            service.close()
+        return RedirectResponse(url=installation_url, status_code=303)
+
+    @app.get("/setup/github-app/installed", include_in_schema=False)
+    def github_app_installed_callback(
+        installation_id: int,
+        state: str,
+        setup_action: str | None = None,
+    ) -> RedirectResponse:
+        if setup_action not in {None, "install", "update"}:
+            raise HTTPException(status_code=400, detail="GitHub installation action is invalid")
+        if config_path is None:
+            raise HTTPException(status_code=503, detail="Server configuration path is unavailable")
+        run = SetupService(database).current()
+        if run is None:
+            raise HTTPException(status_code=404, detail="Guided setup has not been started")
+        service = GitHubAppSetupService(settings, database, config_path)
+        try:
+            service.complete_installation(
+                run,
+                installation_id=installation_id,
+                state=state,
+            )
+            SetupService(database).resume(
+                LiveSetupExecutor(settings, database, config_path=config_path)
+            )
+        except (TutorError, ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            service.close()
+        return RedirectResponse(url="/setup", status_code=303)
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def dashboard(request: Request) -> Any:

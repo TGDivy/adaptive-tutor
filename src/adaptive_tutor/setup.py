@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import subprocess
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -16,9 +15,10 @@ import httpx
 from pydantic import Field, field_validator
 
 from .codex import CodexRunner
-from .config import TutorSettings
+from .config import TutorSettings, update_setup_config
 from .db import Database
-from .errors import ConfigurationError, TutorError
+from .errors import ConfigurationError, ExternalServiceError, TutorError
+from .github_setup import GitHubCLIBootstrap
 from .goals import GoalService
 from .models import StrictModel
 from .security import redact
@@ -352,36 +352,35 @@ class LiveSetupExecutor:
         gh = shutil.which("gh")
         if not gh:
             return StepOutcome.wait(
-                "GitHub CLI is required for repository bootstrap",
-                action="Install gh, run gh auth login, then adaptive-tutor setup resume",
+                "GitHub CLI is required to create the private workspace",
+                action="Install gh, run gh auth login --hostname github.com, then resume setup",
             )
-        if not self.settings.github.owner:
-            return StepOutcome.wait(
-                "GitHub owner is not configured",
-                action="Run gh auth login; repository creation will resume automatically",
+        try:
+            repository = GitHubCLIBootstrap(gh).ensure_private_repository(
+                self.settings.github.owner,
+                self.settings.github.workspace_repo,
             )
-        full_name = f"{self.settings.github.owner}/{self.settings.github.workspace_repo}"
-        viewed = subprocess.run(  # noqa: S603 - fixed gh command and configured identifier
-            [gh, "repo", "view", full_name, "--json", "id,isPrivate,nameWithOwner"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        if viewed.returncode:
+        except ExternalServiceError as exc:
             return StepOutcome.wait(
-                "The configured private workspace does not exist or is inaccessible",
+                f"GitHub CLI could not provision the private workspace: {redact(str(exc))}",
                 action=(
-                    f"Create {full_name} as a private repository or correct github.owner and "
-                    "github.workspace_repo, then resume"
+                    "Run gh auth login --hostname github.com, verify repository access, "
+                    "then resume"
                 ),
             )
-        payload = json.loads(viewed.stdout)
-        if payload.get("isPrivate") is not True:
-            return StepOutcome("failed_terminal", "The learning workspace is not private")
+        if self.settings.github.owner != repository.owner:
+            self.settings = update_setup_config(
+                self.config_path,
+                public_url=run.public_url,
+                github_owner=repository.owner,
+            )
         return StepOutcome.complete(
             "Private GitHub workspace is available",
-            external_ids={"repository_id": str(payload["id"])},
+            external_ids={
+                "repository_id": repository.repository_id,
+                "owner_type": repository.owner_type,
+                "repository": repository.full_name,
+            },
         )
 
     def _github_app(self, run: SetupRun) -> StepOutcome:
@@ -391,6 +390,8 @@ class LiveSetupExecutor:
             and self.settings.github.installation_id
             and key
             and key.is_file()
+            and not key.is_symlink()
+            and key.stat().st_mode & 0o077 == 0
             and self.settings.webhook_secret
         ):
             return StepOutcome.complete(
