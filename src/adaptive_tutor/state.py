@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from .db import Database
 from .learner import LearnerModel
@@ -126,6 +126,7 @@ class StatusService:
         ) or {"invocations": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0}
         return RuntimeStatus(
             paused=self.is_paused(),
+            setup_status=self.setup_status(learner_id),
             active_curriculum=curriculum_id,
             active_assignment=active,
             readiness=readiness,
@@ -138,6 +139,19 @@ class StatusService:
             confidence_calibration=calibration,
             model_usage=usage,
         )
+
+    def setup_status(
+        self, learner_id: str
+    ) -> Literal["not_started", "in_progress", "ready", "local"]:
+        setup = self.database.fetch_one(
+            "SELECT status FROM setup_runs ORDER BY created_at DESC, rowid DESC LIMIT 1"
+        )
+        if setup:
+            return "ready" if setup["status"] == "ready" else "in_progress"
+        assignments = self.database.fetch_one(
+            "SELECT COUNT(*) count FROM assignments WHERE learner_id=?", (learner_id,)
+        )
+        return "local" if assignments and int(assignments["count"]) else "not_started"
 
     def is_paused(self) -> bool:
         row = self.database.fetch_one("SELECT value_json FROM configuration WHERE key='paused'")

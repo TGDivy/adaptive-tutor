@@ -301,6 +301,7 @@ def create_app(
         ).model_dump(mode="json")
         action = _assignment_action(snapshot.get("active_assignment"), settings, database)
         assessed = sum(item["assessed_concept_count"] for item in snapshot["readiness"])
+        setup_required = snapshot["setup_status"] in {"not_started", "in_progress"}
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -315,8 +316,14 @@ def create_app(
                     (snapshot.get("active_assignment") or {}).get("publication_error"),
                 ),
                 "assessed_concepts": assessed,
+                "setup_required": setup_required,
+                "setup_started": snapshot["setup_status"] == "in_progress",
                 "csrf_token": auth.csrf_value,
-                "can_create": orchestrator is not None and auth.csrf_value is not None,
+                "can_create": (
+                    not setup_required
+                    and orchestrator is not None
+                    and auth.csrf_value is not None
+                ),
             },
         )
 

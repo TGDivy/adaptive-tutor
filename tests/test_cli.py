@@ -185,8 +185,14 @@ def test_cli_fresh_install_empty_states_and_errors(
 
     status = runner.invoke(app, [*prefix, "status", "--verbose"])
     assert status.exit_code == 0, status.output
+    assert "SETUP REQUIRED" in status.output
+    assert "adaptive-tutor setup --help" in status.output
     assert "NEXT RECOMMENDATION" in status.output
     assert "Model cost" in status.output
+
+    status_json = runner.invoke(app, [*prefix, "status", "--json"])
+    assert status_json.exit_code == 0, status_json.output
+    assert json.loads(status_json.output)["setup_status"] == "not_started"
 
     current = runner.invoke(app, [*prefix, "current"])
     assert current.exit_code == 0

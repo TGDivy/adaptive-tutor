@@ -305,10 +305,27 @@ def status(
         return
     active = snapshot.active_assignment
     publication_error = str((active or {}).get("publication_error") or "")
-    state = "PAUSED" if snapshot.paused else "ACTION REQUIRED" if publication_error else "READY"
-    state_style = "yellow" if snapshot.paused or publication_error else "green"
+    setup_required = snapshot.setup_status in {"not_started", "in_progress"}
+    state = (
+        "PAUSED"
+        if snapshot.paused
+        else "ACTION REQUIRED"
+        if publication_error
+        else "SETUP REQUIRED"
+        if setup_required
+        else "READY"
+    )
+    state_style = "yellow" if snapshot.paused or publication_error or setup_required else "green"
     console.print(f"[bold]Adaptive Tutor[/bold]  [{state_style}]{state}[/{state_style}]")
     console.print()
+    if setup_required:
+        command = (
+            "adaptive-tutor setup resume"
+            if snapshot.setup_status == "in_progress"
+            else "adaptive-tutor setup --help"
+        )
+        console.print(f"[yellow]Live setup:[/yellow] {command}")
+        console.print()
     if active:
         console.print(f"[green bold]CURRENT · {active['id']}[/green bold]")
         console.print(f"[bold]{active['title']}[/bold]")

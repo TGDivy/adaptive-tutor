@@ -10,7 +10,7 @@
     <header class="topbar">
       <a class="brand" href="/" aria-label="Adaptive Tutor home"><span class="brand-mark">AT</span><span>Adaptive Tutor</span></a>
       <div class="top-actions">
-        <span class="runtime"><i class="status-dot {{ 'paused' if status.paused or (status.active_assignment and status.active_assignment.publication_error) else '' }}"></i>{{ 'Paused' if status.paused else 'Action required' if status.active_assignment and status.active_assignment.publication_error else 'Ready' }}</span>
+        <span class="runtime"><i class="status-dot {{ 'paused' if status.paused or setup_required or (status.active_assignment and status.active_assignment.publication_error) else '' }}"></i>{{ 'Paused' if status.paused else 'Action required' if status.active_assignment and status.active_assignment.publication_error else 'Setup required' if setup_required else 'Ready' }}</span>
         <form method="post" action="/logout"><button class="quiet" type="submit">Sign out</button></form>
       </div>
     </header>
@@ -21,7 +21,7 @@
         <p class="date-context">{{ weekly.attempts }} attempts this week · {{ monthly.attempts }} this month</p>
       </div>
 
-      <section class="session-panel">
+      <section class="session-panel{{ ' setup-required' if setup_required else '' }}">
         <div class="session-main">
           {% if status.active_assignment %}
             <p class="eyebrow">{{ assignment_state }}</p>
@@ -37,6 +37,11 @@
             {% if assignment_action %}
               {% if assignment_action.method == 'post' %}<form method="post" action="{{ assignment_action.url }}"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="primary-action" type="submit">{{ assignment_action.label }} <span aria-hidden="true">→</span></button></form>{% else %}<a class="primary-action" href="{{ assignment_action.url }}"{% if assignment_action.external == 'true' %} target="_blank" rel="noreferrer"{% endif %}>{{ assignment_action.label }} <span aria-hidden="true">→</span></a>{% endif %}
             {% endif %}
+          {% elif setup_required %}
+            <p class="eyebrow">Live setup</p>
+            <h2>Complete server setup before publishing assignments.</h2>
+            <p class="selection-reason">Your curriculum is loaded. Live publication starts after the installation checks pass.</p>
+            {% if setup_started %}<a class="primary-action" href="/setup">Continue setup <span aria-hidden="true">→</span></a>{% else %}<a class="primary-action" href="https://tgdivy.github.io/adaptive-tutor/getting-started/#guided-live-setup" target="_blank" rel="noreferrer">Open setup guide <span aria-hidden="true">→</span></a>{% endif %}
           {% else %}
             <p class="eyebrow">No active assignment</p>
             <h2>Your next session is ready to be selected.</h2>

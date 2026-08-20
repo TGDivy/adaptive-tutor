@@ -121,6 +121,7 @@ h1, h2, h3 { line-height: 1.18; letter-spacing: 0; }
   border-radius: 8px;
   background: var(--surface);
 }
+.session-panel.setup-required { border-left-color: var(--amber); }
 .session-main h2 { max-width: 720px; margin-bottom: 9px; font-size: 27px; }
 .selection-reason { max-width: 760px; margin-bottom: 17px; color: #4f5b56; }
 .action-required {

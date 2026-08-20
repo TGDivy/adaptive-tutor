@@ -358,6 +358,7 @@ class ReadinessDomain(StrictModel):
 
 class RuntimeStatus(StrictModel):
     paused: bool
+    setup_status: Literal["not_started", "in_progress", "ready", "local"]
     active_curriculum: str
     active_assignment: dict[str, Any] | None
     readiness: list[ReadinessDomain]

@@ -57,6 +57,9 @@ def test_dashboard_and_api_require_authentication_and_secure_writes(
         dashboard = client.get("/")
         assert dashboard.status_code == 200
         assert "systems foundations" in dashboard.text
+        assert "Setup required" in dashboard.text
+        assert "Complete server setup before publishing assignments." in dashboard.text
+        assert "Open setup guide" in dashboard.text
         assert "No learner evidence yet" in dashboard.text
         assert "Model usage" not in dashboard.text
         assert client.post("/actions/create-assignment").status_code == 403
