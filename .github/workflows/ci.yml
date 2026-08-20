@@ -107,10 +107,24 @@ jobs:
         with:
           persist-credentials: false
       - name: Build digest-pinned image
-        run: docker build --build-arg SOURCE_REVISION="${GITHUB_SHA}" -t adaptive-tutor:ci .
+        run: docker build --build-arg SOURCE_REVISION="${GITHUB_SHA}" -t adaptive-tutor:local .
       - name: Run credential-free demo in image
         run: |
           docker run --rm --cap-drop ALL --network none \
             --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=128m \
-            adaptive-tutor:ci demo --json > /tmp/container-demo.json
+            adaptive-tutor:local demo --json > /tmp/container-demo.json
           python3 -c "import json; p=json.load(open('/tmp/container-demo.json')); assert p['assignment']['id'] == 'A-0007' and len(p['journey']) == 9"
+      - name: Prove disposable Compose runtime
+        run: |
+          mkdir -p artifacts
+          python3 scripts/prove-deployed-runtime \
+            --skip-build --evidence artifacts/deployed-runtime.json
+          python3 scripts/check-operational-evidence \
+            --evidence artifacts/deployed-runtime.json
+      - name: Upload deployed-runtime evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deployed-runtime-evidence
+          path: artifacts/deployed-runtime.json
+          if-no-files-found: error
+          retention-days: 14

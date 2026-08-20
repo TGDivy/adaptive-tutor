@@ -38,6 +38,8 @@ def test_ci_exercises_package_docs_container_and_privacy() -> None:
         "uv build",
         "adaptive-tutor demo",
         "docker build",
+        "scripts/prove-deployed-runtime",
+        "deployed-runtime-evidence",
         "--network none",
         "bubblewrap",
         "apparmor_restrict_unprivileged_userns",
