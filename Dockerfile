@@ -5,7 +5,7 @@ ARG CODEX_VERSION=0.148.0
 RUN npm install --global --omit=dev "@openai/codex@${CODEX_VERSION}" \
     && npm cache clean --force
 
-FROM python:3.13.7-slim-bookworm@sha256:adafcc17694d715c905b4c7bebd96907a1fd5cf183395f0ebc4d3428bd22d92d AS github-cli
+FROM python:3.14.7-slim-bookworm@sha256:23c59390fc717bf09f9336908199a0ae75d9c4264bf296123f94ad772fea3b52 AS github-cli
 ARG GITHUB_CLI_VERSION=2.97.0
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates curl \
@@ -25,7 +25,7 @@ RUN apt-get update \
         "/tmp/gh_${GITHUB_CLI_VERSION}_linux_${architecture}/bin/gh" \
         /usr/local/bin/gh
 
-FROM python:3.13.7-slim-bookworm@sha256:adafcc17694d715c905b4c7bebd96907a1fd5cf183395f0ebc4d3428bd22d92d AS builder
+FROM python:3.14.7-slim-bookworm@sha256:23c59390fc717bf09f9336908199a0ae75d9c4264bf296123f94ad772fea3b52 AS builder
 COPY --from=uv /uv /usr/local/bin/uv
 WORKDIR /build
 ENV UV_COMPILE_BYTECODE=1 \
@@ -37,7 +37,7 @@ COPY curricula ./curricula
 COPY src ./src
 RUN uv sync --locked --no-dev --no-editable
 
-FROM python:3.13.7-slim-bookworm@sha256:adafcc17694d715c905b4c7bebd96907a1fd5cf183395f0ebc4d3428bd22d92d AS runtime
+FROM python:3.14.7-slim-bookworm@sha256:23c59390fc717bf09f9336908199a0ae75d9c4264bf296123f94ad772fea3b52 AS runtime
 ARG SOURCE_REVISION=unknown
 LABEL org.opencontainers.image.title="Adaptive Tutor" \
       org.opencontainers.image.description="Self-hosted Git-native adaptive learning engine" \
