@@ -112,9 +112,7 @@ def _clean_environment() -> dict[str, str]:
     }
 
 
-def _run_cli(
-    display: str, arguments: list[str], *, force_color: bool = True
-) -> CommandCapture:
+def _run_cli(display: str, arguments: list[str], *, force_color: bool = True) -> CommandCapture:
     environment = _clean_environment()
     if not force_color:
         environment.pop("FORCE_COLOR")
@@ -199,9 +197,7 @@ def _capture_dashboard(browser: Browser, config: Path, port: int) -> list[Path]:
         page = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
         page.on(
             "console",
-            lambda message: errors.append(message.text)
-            if message.type == "error"
-            else None,
+            lambda message: errors.append(message.text) if message.type == "error" else None,
         )
         page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
         page.locator(".dashboard-shell").wait_for(state="visible")
@@ -219,9 +215,7 @@ def _capture_dashboard(browser: Browser, config: Path, port: int) -> list[Path]:
         mobile = browser.new_page(viewport={"width": 390, "height": 844}, device_scale_factor=1)
         mobile.on(
             "console",
-            lambda message: errors.append(message.text)
-            if message.type == "error"
-            else None,
+            lambda message: errors.append(message.text) if message.type == "error" else None,
         )
         mobile.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
         mobile.locator(".dashboard-shell").wait_for(state="visible")
@@ -262,6 +256,19 @@ def _write_terminal_animation(frame_paths: list[Path]) -> Path:
     for frame in frames:
         frame.close()
     return destination
+
+
+def _normalize_png(path: Path) -> None:
+    temporary = path.with_name(f".{path.name}.normalized")
+    try:
+        with Image.open(path) as source:
+            image = source.convert("RGB")
+            image.save(temporary, format="PNG", optimize=True, compress_level=9)
+            image.close()
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def _source_digest() -> str:
@@ -378,6 +385,8 @@ def main() -> int:
             records.append((path, [f"http://127.0.0.1:{port}/"]))
         browser.close()
 
+    for path, _ in records:
+        _normalize_png(path)
     animation = _write_terminal_animation(terminal_paths)
     records.append((animation, ["setup.png", "doctor.png", "status-readiness.png", "report.png"]))
     manifest = {

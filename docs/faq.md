@@ -8,14 +8,17 @@ evidence, deterministic CI, and application code determine the learning loop.
 ## Can I try it without credentials?
 
 Yes. `adaptive-tutor demo` runs generation, trusted reference validation,
-deterministic and qualitative fixture evaluation, learner-state updates, and
-reporting without network access.
+executes bundled passing and failing submissions against public and hidden
+tests, applies qualitative fixture reviews, updates learner state, and reports
+progress without network access or credentials. The submissions are
+product-owned neutral fixtures; arbitrary learner code remains confined to the
+ephemeral evaluator.
 
 ## Does it run my code locally?
 
-The trusted bundled reference harness runs during local assignment validation.
-Learner submissions do not run on the persistent tutor host; remote learner
-code belongs in credential-free ephemeral CI.
+Only trusted bundled references and neutral demo fixtures run during local
+validation. Learner submissions do not run on the persistent tutor host;
+remote learner code belongs in credential-free ephemeral CI.
 
 ## Why SQLite?
 

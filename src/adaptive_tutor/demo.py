@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -34,6 +37,7 @@ from .models import (
 )
 from .reporting import ReportDocument, ReportService
 from .scheduler import AdaptiveScheduler
+from .security import assert_credentials_absent, untrusted_process_environment
 from .state import StatusService
 from .time import iso_now, utc_now
 
@@ -44,9 +48,9 @@ class DemoAttempt:
     confidence: int
     age_days: int
     solved: bool
-    misconception_action: Literal[
-        "suspect", "confirm", "challenge", "resolve", "recur"
-    ] | None = None
+    misconception_action: Literal["suspect", "confirm", "challenge", "resolve", "recur"] | None = (
+        None
+    )
     transfer_context: str | None = None
     misconception_description: str | None = None
 
@@ -91,7 +95,8 @@ def run_demo(data_dir: Path | None = None) -> DemoResult:
         journey: list[dict[str, Any]] = []
 
         invariant_description = (
-            "Treats equal ring-buffer indices as proof that the queue is always empty"
+            "Treats an operation boundary as proof that buffered state is empty instead "
+            "of tracking retained occupancy"
         )
         first, first_bundle, _ = _create_assignment(
             database,
@@ -144,9 +149,9 @@ def run_demo(data_dir: Path | None = None) -> DemoResult:
             database,
             package,
             concept_id="programming.invariants",
-            exercise_type=ExerciseType.EXPLAIN_CODE,
+            exercise_type=ExerciseType.REFACTORING,
             difficulty=4,
-            reason="Challenge the active invariant misconception from a second representation.",
+            reason="Challenge the active invariant misconception through an explicit repair.",
         )
         challenge_id = str(challenge["id"])
         journey.append(
@@ -178,6 +183,7 @@ def run_demo(data_dir: Path | None = None) -> DemoResult:
             exercise_type=ExerciseType.IMPLEMENTATION,
             difficulty=5,
             reason="Test the challenged invariant in a new implementation context.",
+            excluded_blueprints={"bounded-work-queue"},
         )
         transfer_id = str(transfer["id"])
         journey.append(
@@ -194,7 +200,9 @@ def run_demo(data_dir: Path | None = None) -> DemoResult:
                     age_days=10,
                     solved=True,
                     misconception_action="resolve",
-                    transfer_context="implementing a framed parser state machine",
+                    transfer_context=(
+                        "preserving incomplete buffered bytes across fragmented network reads"
+                    ),
                     misconception_description=invariant_description,
                 ),
             )
@@ -262,9 +270,7 @@ def run_demo(data_dir: Path | None = None) -> DemoResult:
                 ),
             )
         )
-        _complete_assignment(
-            database, framing_id, now - timedelta(days=2), now - timedelta(days=4)
-        )
+        _complete_assignment(database, framing_id, now - timedelta(days=2), now - timedelta(days=4))
 
         recurrence, recurrence_bundle, _ = _create_assignment(
             database,
@@ -314,7 +320,13 @@ def run_demo(data_dir: Path | None = None) -> DemoResult:
         active = AssignmentService(database).create(request, active_bundle, validation)
         active_id = str(active["id"])
         active_workspace = workspace_root / active_id / "current"
-        _write_demo_submission(active_bundle, active_workspace, solved=False, confidence=0)
+        _write_demo_submission(
+            active_bundle,
+            active_workspace,
+            solved=False,
+            confidence=0,
+            outcome=None,
+        )
         database.execute(
             """
             INSERT INTO configuration(key, value_json, updated_at)
@@ -328,9 +340,11 @@ def run_demo(data_dir: Path | None = None) -> DemoResult:
         report = ReportService(database).generate(
             "demo-learner", package.metadata.id, "weekly", end=now
         )
-        snapshot = StatusService(database).get_status(
-            "demo-learner", package.metadata.id
-        ).model_dump(mode="json")
+        snapshot = (
+            StatusService(database)
+            .get_status("demo-learner", package.metadata.id)
+            .model_dump(mode="json")
+        )
         config_path = _write_demo_config(root, database_path) if data_dir is not None else None
         return DemoResult(
             database_path=str(database.path),
@@ -368,12 +382,16 @@ def _create_assignment(
     exercise_type: ExerciseType,
     difficulty: int,
     reason: str,
+    excluded_blueprints: set[str] | None = None,
 ) -> tuple[dict[str, Any], AssignmentBundle, ValidationResult]:
     concept = next(item for item in package.concepts if item.id == concept_id)
-    concept_state = database.fetch_one(
-        "SELECT * FROM mastery WHERE learner_id='demo-learner' AND concept_id=?",
-        (concept_id,),
-    ) or {}
+    concept_state = (
+        database.fetch_one(
+            "SELECT * FROM mastery WHERE learner_id='demo-learner' AND concept_id=?",
+            (concept_id,),
+        )
+        or {}
+    )
     request = AssignmentRequest(
         learner_id="demo-learner",
         curriculum_id=package.metadata.id,
@@ -388,6 +406,10 @@ def _create_assignment(
             ORDER BY severity DESC, frequency DESC
             """
         ),
+        recent_assignments=[
+            {"blueprint_id": blueprint, "primary_concept": concept_id}
+            for blueprint in sorted(excluded_blueprints or set())
+        ],
         target_difficulty=difficulty,
         context=LearnerContext(available_minutes=45, allowed_formats=[exercise_type]),
         trusted_references={
@@ -427,15 +449,18 @@ def _request_for_candidate(
         ORDER BY severity DESC, frequency DESC
         """
     )
-    concept_state = database.fetch_one(
-        """
+    concept_state = (
+        database.fetch_one(
+            """
         SELECT mastery_estimate, uncertainty, evidence_count,
                highest_successful_difficulty, recent_performance,
                long_term_performance, next_review, confidence_calibration, trend
         FROM mastery WHERE learner_id='demo-learner' AND concept_id=?
         """,
-        (candidate.concept_id,),
-    ) or {}
+            (candidate.concept_id,),
+        )
+        or {}
+    )
     return AssignmentRequest(
         learner_id="demo-learner",
         curriculum_id=package.metadata.id,
@@ -468,11 +493,10 @@ def _run_attempt(
     now: datetime,
     scenario: DemoAttempt,
 ) -> dict[str, Any]:
-    attempt_number = int(
-        (
-            database.fetch_one("SELECT COUNT(*) count FROM attempts") or {"count": 0}
-        )["count"]
-    ) + 1
+    attempt_number = (
+        int((database.fetch_one("SELECT COUNT(*) count FROM attempts") or {"count": 0})["count"])
+        + 1
+    )
     attempt_id = str(uuid.uuid4())
     commit_sha = f"{attempt_number:040x}"
     observed = now - timedelta(days=scenario.age_days)
@@ -482,6 +506,7 @@ def _run_attempt(
         workspace,
         solved=scenario.solved,
         confidence=scenario.confidence,
+        outcome=scenario.outcome,
     )
     database.execute(
         """
@@ -498,13 +523,15 @@ def _run_attempt(
             observed.isoformat(timespec="seconds"),
         ),
     )
-    automated = _fixture_automated_evaluation(
+    automated = _execute_fixture_evaluation(
         bundle=bundle,
         assignment_id=assignment_id,
         commit_sha=commit_sha,
+        workspace=workspace,
         observed=observed,
-        passed=scenario.solved,
     )
+    if automated.has_operational_error:
+        raise ValueError(f"Demo evaluator failed operationally for {assignment_id}")
     if automated.learner_passed != scenario.solved:
         expected = "pass" if scenario.solved else "fail"
         raise ValueError(f"Demo submission for {assignment_id} did not {expected} as designed")
@@ -517,9 +544,7 @@ def _run_attempt(
         attempt_id=attempt_id,
         automated_evaluation_id=automated_id,
         rubric=bundle.rubric,
-        references={
-            item.path: item.content for item in bundle.files if item.role == "reference"
-        },
+        references={item.path: item.content for item in bundle.files if item.role == "reference"},
         submission={
             item.path: (workspace / item.path).read_text(encoding="utf-8")
             for item in bundle.files
@@ -579,44 +604,93 @@ def _run_attempt(
     }
 
 
-def _fixture_automated_evaluation(
+def _execute_fixture_evaluation(
     *,
     bundle: AssignmentBundle,
     assignment_id: str,
     commit_sha: str,
+    workspace: Path,
     observed: datetime,
-    passed: bool,
 ) -> AutomatedEvaluation:
-    test_status = "pass" if passed else "fail"
+    if bundle.validation_command[:3] != ["python", "-m", "pytest"] or any(
+        argument not in {"-q"} for argument in bundle.validation_command[3:]
+    ):
+        raise ValueError("Demo fixtures require the fixed Python pytest harness")
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="adaptive-tutor-demo-evaluation-") as temporary:
+        evaluation_root = Path(temporary)
+        by_path = {item.path: item for item in bundle.files}
+        for item in bundle.files:
+            if item.role == "starter":
+                source = _demo_workspace_path(workspace, item.path)
+                content = source.read_text(encoding="utf-8")
+            elif item.role in {"instructions", "public_test"}:
+                content = item.content
+            else:
+                continue
+            target = _demo_workspace_path(evaluation_root, item.path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        extras = bundle.hidden_evaluator.get("extra_tests", {})
+        if not isinstance(extras, dict):
+            raise ValueError("Demo evaluator extra_tests must be a mapping")
+        for target_name, source_name in extras.items():
+            source = by_path.get(str(source_name))
+            if source is None or source.role != "evaluator":
+                raise ValueError(f"Demo evaluator is missing {source_name}")
+            target = _demo_workspace_path(evaluation_root, str(target_name))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(source.content, encoding="utf-8")
+        home = evaluation_root / ".home"
+        (home / "tmp").mkdir(parents=True)
+        environment = untrusted_process_environment(home)
+        environment["PYTHONPATH"] = str(evaluation_root)
+        assert_credentials_absent(environment)
+        completed = subprocess.run(  # noqa: S603 - fixed product-owned fixture harness
+            [sys.executable, *bundle.validation_command[1:]],
+            cwd=evaluation_root,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=90,
+            check=False,
+        )
+    duration = max(1, int((time.monotonic() - started) * 1000))
+    if completed.returncode == 0:
+        test_status = "pass"
+        test_summary = "The product-owned submission fixture passed public and hidden tests"
+    elif completed.returncode == 1:
+        test_status = "fail"
+        test_summary = "The product-owned submission fixture produced test failures"
+    else:
+        test_status = "error"
+        test_summary = f"The fixture harness exited unexpectedly ({completed.returncode})"
     checks = [
         AutomatedCheck(
             name="assignment boundary",
             status="pass",
             category="policy",
-            summary="The validated fixture includes only declared assignment files",
+            summary="Only declared product-owned fixture files entered the demo harness",
         ),
         AutomatedCheck(
             name="credential boundary",
             status="pass",
             category="policy",
-            summary="The local fixture evaluator uses no external credentials",
+            summary="The executed fixture process received no credential-like variables",
         ),
         AutomatedCheck(
-            name="fixture evaluator",
+            name="fixture provenance",
             status="pass",
             category="policy",
-            summary="Deterministic demo outcome loaded from the local scenario",
+            summary="The submission and tests came from the bundled neutral curriculum",
         ),
         AutomatedCheck(
             name="public and hidden tests",
             status=test_status,  # type: ignore[arg-type]
             category="test",
-            summary=(
-                "Deterministic fixture checks passed"
-                if passed
-                else "Deterministic fixture checks found the intended learner failure"
-            ),
-            duration_ms=4,
+            summary=test_summary,
+            duration_ms=duration,
         ),
     ]
     return AutomatedEvaluation(
@@ -624,8 +698,8 @@ def _fixture_automated_evaluation(
         commit_sha=commit_sha,
         checks=checks,
         started_at=observed,
-        completed_at=observed + timedelta(milliseconds=4),
-        runner=f"adaptive-tutor-local-fixture:{bundle.slug}",
+        completed_at=observed + timedelta(milliseconds=duration),
+        runner=f"adaptive-tutor-executed-demo-fixture:{bundle.slug}",
         artifact_digest="sha256:" + "0" * 64,
     ).with_computed_digest()
 
@@ -651,16 +725,12 @@ def _qualitative_fixture(
             MisconceptionFinding(
                 concept_id=bundle.concepts[0],
                 description=scenario.misconception_description,
-                evidence="The submitted reasoning repeats the relevant mistaken assumption.",
+                evidence=_misconception_evidence(bundle.slug, scenario.misconception_action),
                 severity=4,
                 action=scenario.misconception_action,
             )
         )
-    summary = {
-        "success": "The solution passes the checks and explains the governing invariant clearly.",
-        "partial": "The implementation works, but the explanation does not yet transfer the idea.",
-        "failure": "The deterministic failure exposes a specific error in the underlying model.",
-    }[scenario.outcome]
+    summary, details, rationale = _fixture_feedback(bundle.slug, scenario.outcome)
     return QualitativeEvaluation(
         overall_score=overall,
         dimensions=[
@@ -688,18 +758,13 @@ def _qualitative_fixture(
                 strength=0.9,
                 difficulty=bundle.difficulty,
                 exercise_type=bundle.exercise_type,
-                rationale=(
-                    "The result is grounded in the assignment rubric and deterministic checks."
-                ),
+                rationale=rationale,
                 transfer_context=scenario.transfer_context,
             )
         ],
         misconceptions=findings,
         feedback_summary=summary,
-        feedback_details=[
-            "The most important observation is tied to a concrete boundary case.",
-            "The next assignment should test the same idea in a different representation.",
-        ],
+        feedback_details=details,
         classification=classifications[scenario.outcome],  # type: ignore[arg-type]
         follow_up="new_assignment",
         follow_up_reason="Collect another observation with a different format or context.",
@@ -794,6 +859,7 @@ def _write_demo_submission(
     *,
     solved: bool,
     confidence: int,
+    outcome: Literal["success", "partial", "failure"] | None,
 ) -> None:
     by_path = {item.path: item for item in bundle.files}
     replacements = bundle.hidden_evaluator.get("reference_replacements", {})
@@ -810,13 +876,208 @@ def _write_demo_submission(
         content = replacement_by_target.get(item.path, item.content)
         if item.path.endswith(("ANSWER.md", "REVIEW.md", "RESPONSE.md", "ANALYSIS.md")):
             content = (
-                "# Analysis\n\nAn explicit occupancy value preserves the empty/full "
-                "invariant through wraparound, and the regression exercises repeated fill "
-                "and drain cycles.\n\n"
-                if solved
-                else "# Analysis\n\nEqual indices mean the structure is empty in every state.\n\n"
-            ) + f"Confidence: {confidence}\n"
+                _demo_response(bundle.slug, outcome, confidence)
+                if outcome is not None
+                else item.content
+            )
         target.write_text(content, encoding="utf-8")
+
+
+def _demo_workspace_path(root: Path, relative: str) -> Path:
+    candidate = (root / relative).resolve()
+    resolved_root = root.resolve()
+    if candidate != resolved_root and resolved_root not in candidate.parents:
+        raise ValueError(f"Demo fixture path escapes its workspace: {relative}")
+    return candidate
+
+
+def _demo_response(
+    slug: str,
+    outcome: Literal["success", "partial", "failure"],
+    confidence: int,
+) -> str:
+    responses = {
+        ("bounded-work-queue", "failure"): (
+            "# Invariant\n\nI treated equal read and write cursors as empty in every state.\n\n"
+            "# Failure mechanism\n\nNo additional occupancy state is needed.\n\n"
+            "# Alternative representation\n\nNone.\n"
+        ),
+        ("bounded-work-queue", "partial"): (
+            "# Invariant\n\n`0 <= size <= capacity`; size zero is empty and size equal "
+            "to capacity is full.\n\n# Failure mechanism\n\nEqual cursors are ambiguous after "
+            "wraparound, so the original code loses occupancy.\n\n"
+            "# Alternative representation\n\nI did not compare an alternative representation.\n"
+        ),
+        ("bounded-work-queue", "success"): (
+            "# Invariant\n\n`0 <= size <= capacity`; the read cursor names the next value "
+            "and the write cursor names the next slot.\n\n# Failure mechanism\n\nCursor "
+            "equality represents both empty and full after wraparound unless occupancy is "
+            "stored separately.\n\n# Alternative representation\n\nReserve one slot and derive "
+            "full from the next write cursor, trading one element of usable capacity for no "
+            "size field.\n"
+        ),
+        ("framed-stream-decoder", "failure"): (
+            "# Buffer invariant\n\nEach transport read contains one complete frame.\n\n"
+            "# Failure analysis\n\nReturning after one payload is sufficient.\n\n"
+            "# Security boundary\n\nThe declared length can be trusted.\n"
+        ),
+        ("framed-stream-decoder", "partial"): (
+            "# Buffer invariant\n\nThe buffer retains an incomplete suffix across calls.\n\n"
+            "# Failure analysis\n\nThe parser must loop over complete frames.\n\n"
+            "# Security boundary\n\nThe maximum length still needs a stated connection policy.\n"
+        ),
+        ("framed-stream-decoder", "success"): (
+            "# Buffer invariant\n\nThe buffer contains exactly the unconsumed suffix; each feed "
+            "emits every complete frame once and retains an incomplete header or payload.\n\n"
+            "# Failure analysis\n\nTransport reads do not preserve message boundaries, so a "
+            "single call may contain part of a frame or several frames.\n\n"
+            "# Security boundary\n\nRejecting an oversized declared length before waiting for its "
+            "payload prevents attacker-controlled unbounded buffering.\n"
+        ),
+        ("rolling-event-counter", "failure"): (
+            "# Invariant\n\nRemoving items while iterating visits every expired timestamp.\n\n"
+            "# Failure mechanism\n\nList iteration adjusts automatically after removal.\n\n"
+            "# Alternative representation\n\nA list is always constant time here.\n"
+        ),
+        ("rolling-event-counter", "partial"): (
+            "# Invariant\n\nOnly timestamps in the half-open window remain.\n\n"
+            "# Failure mechanism\n\nMutation can skip adjacent expired values.\n\n"
+            "# Alternative representation\n\nA deque may avoid prefix copies.\n"
+        ),
+        ("rolling-event-counter", "success"): (
+            "# Invariant\n\nThe retained sorted suffix contains exactly timestamps where "
+            "`now - timestamp < window`.\n\n# Failure mechanism\n\nRemoving during "
+            "iteration shifts the next expired value past the iterator.\n\n"
+            "# Alternative representation\n\nA deque supports amortized constant-time expiry "
+            "from the left and avoids list prefix compaction.\n"
+        ),
+    }
+    body = responses.get((slug, outcome))
+    if body is None:
+        raise ValueError(f"No authored demo response for {slug}:{outcome}")
+    return body + f"\nConfidence: {confidence}\n"
+
+
+def _fixture_feedback(
+    slug: str, outcome: Literal["success", "partial", "failure"]
+) -> tuple[str, list[str], str]:
+    feedback = {
+        ("bounded-work-queue", "failure"): (
+            "The queue still confuses equal cursors with an empty buffer after wraparound.",
+            [
+                "The hidden fill-and-drain cycle fails because occupancy is not retained.",
+                "Track independent occupancy or use a representation where full and empty differ.",
+            ],
+            "The failed wraparound checks and submitted invariant both expose the occupancy error.",
+        ),
+        ("bounded-work-queue", "partial"): (
+            "The queue now passes its boundary checks, but the representation trade-off "
+            "is incomplete.",
+            [
+                "The size invariant correctly distinguishes empty from full.",
+                "Compare the size field with a reserved-slot or tagged-cursor representation.",
+            ],
+            "Passing wraparound checks support the repair, while ANSWER.md omits the "
+            "required comparison.",
+        ),
+        ("bounded-work-queue", "success"): (
+            "The repaired queue preserves occupancy through repeated wraparound cycles.",
+            [
+                "The size invariant matches both public and hidden boundary evidence.",
+                "The reserved-slot alternative identifies a concrete capacity trade-off.",
+            ],
+            "The executed harness and explanation agree on the empty/full invariant.",
+        ),
+        ("framed-stream-decoder", "failure"): (
+            "The decoder still treats transport reads as message boundaries.",
+            [
+                "Coalesced frames are not all emitted and oversized lengths are accepted.",
+                "Retain the incomplete suffix and parse complete frames in a loop.",
+            ],
+            "Fragmentation and coalescing failures directly contradict the submitted "
+            "buffer invariant.",
+        ),
+        ("framed-stream-decoder", "partial"): (
+            "Frame extraction works, but the malformed-input policy is not fully defended.",
+            [
+                "The retained-suffix invariant is correct.",
+                "State what happens to the connection after an oversized declaration.",
+            ],
+            "The harness supports parser correctness while the written security policy "
+            "remains incomplete.",
+        ),
+        ("framed-stream-decoder", "success"): (
+            "The decoder now preserves incomplete input and emits every complete frame "
+            "exactly once.",
+            [
+                "Split headers, split payloads, and coalesced frames pass the executed harness.",
+                "Length validation occurs before waiting for attacker-controlled payload bytes.",
+            ],
+            "Executed boundary checks and REVIEW.md support the retained-suffix invariant "
+            "in a new context.",
+        ),
+        ("rolling-event-counter", "failure"): (
+            "The expiration loop still skips adjacent expired timestamps.",
+            [
+                "Mutation shifts the next old value past the active list iterator.",
+                "Find the retained suffix first or expire from the left of a deque.",
+            ],
+            "The consecutive-expiry test fails in the way predicted by the submitted "
+            "mutation claim.",
+        ),
+        ("rolling-event-counter", "partial"): (
+            "The retained-window invariant is right, but the cost argument needs evidence.",
+            [
+                "The half-open boundary is stated correctly.",
+                "Measure or bound prefix compaction before claiming scalable behavior.",
+            ],
+            "Correctness evidence is supported, while the performance justification is incomplete.",
+        ),
+        ("rolling-event-counter", "success"): (
+            "The counter removes exactly the expired prefix and defends its complexity.",
+            [
+                "The half-open boundary and idempotence checks pass.",
+                "The deque comparison makes the memory-reclamation trade-off explicit.",
+            ],
+            "The executed harness and retained-suffix explanation agree on behavior and cost.",
+        ),
+    }
+    try:
+        return feedback[(slug, outcome)]
+    except KeyError as exc:
+        raise ValueError(f"No authored demo feedback for {slug}:{outcome}") from exc
+
+
+def _misconception_evidence(slug: str, action: str) -> str:
+    evidence = {
+        ("bounded-work-queue", "suspect"): (
+            "ANSWER.md claims equal read and write cursors prove the queue is empty."
+        ),
+        ("bounded-work-queue", "confirm"): (
+            "A second wraparound failure repeats the equal-cursors assumption without "
+            "independent occupancy."
+        ),
+        ("bounded-work-queue", "challenge"): (
+            "The repaired queue now tracks size independently, although its alternative "
+            "representation analysis is incomplete."
+        ),
+        ("framed-stream-decoder", "resolve"): (
+            "The decoder succeeds in a different format and domain by retaining incomplete "
+            "buffered state across operation boundaries."
+        ),
+        ("framed-stream-decoder", "recur"): (
+            "REVIEW.md again treats one operation boundary as a complete message and the "
+            "fragmentation harness fails."
+        ),
+        ("rolling-event-counter", "suspect"): (
+            "ANSWER.md claims list mutation during iteration is safe, while the consecutive "
+            "expiration harness skips old timestamps."
+        ),
+    }
+    try:
+        return evidence[(slug, action)]
+    except KeyError as exc:
+        raise ValueError(f"No authored misconception evidence for {slug}:{action}") from exc
 
 
 def _write_demo_config(root: Path, database_path: Path) -> Path:

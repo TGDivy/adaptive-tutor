@@ -55,8 +55,9 @@ uv run adaptive-tutor status
 ```
 
 The demo uses no credentials or network calls. It loads curriculum data,
-selects and validates an assignment, normalizes deterministic evidence, applies
-a schema-valid fixture review transactionally, and generates a progress report.
+selects and validates assignments, executes product-owned passing and failing
+submissions against public and hidden tests in a scrubbed process, applies
+schema-valid fixture reviews transactionally, and generates a progress report.
 See the [installation guide](https://tgdivy.github.io/adaptive-tutor/getting-started/)
 for isolated installs, dashboard startup, and remote integration.
 

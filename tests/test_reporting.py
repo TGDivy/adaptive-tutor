@@ -33,22 +33,34 @@ def test_local_demo_covers_evaluation_state_and_reporting(tmp_path: Path) -> Non
     assert sum(bool(item["automated_passed"]) for item in result.journey) == 3
     assert len(result.automated_evidence["checks"]) == 4
     assert {check["name"] for check in result.automated_evidence["checks"]} >= {
-        "fixture evaluator",
+        "fixture provenance",
         "public and hidden tests",
     }
-    assert result.automated_evidence["runner"].startswith("adaptive-tutor-local-fixture:")
+    assert result.automated_evidence["runner"].startswith("adaptive-tutor-executed-demo-fixture:")
+    assert all(
+        item["automated_evidence"]["runner"].startswith("adaptive-tutor-executed-demo-fixture:")
+        for item in result.journey
+    )
     assert result.qualitative_evaluation["overall_score"] > 0
     assert result.report.data["study_activity"]["assignments"] >= 3
     assert result.report.data["study_activity"]["attempts"] == 3
     assert result.report.data["mastery_movement"]
     assert result.report.data["retention"]["observations"] == 1
     assert result.report.data["retention"]["due_reviews"] == 3
-    assert any(
-        item["status"] == "recurred" for item in result.status["misconceptions"]
-    )
+    assert any(item["status"] == "recurred" for item in result.status["misconceptions"])
     assert Path(result.database_path).is_file()
     assert result.config_path is not None and Path(result.config_path).is_file()
     assert Path(result.workspace_path, "A-0007", "current", "README.md").is_file()
+    active_response = Path(result.assignment["workspace"], "ANALYSIS.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Equal indices" not in active_response
+    transfer = next(item for item in result.journey if item["assignment_id"] == "A-0003")
+    assert transfer["title"] == "Harden a framed stream decoder"
+    assert (
+        transfer["qualitative_evaluation"]["concept_evidence"][0]["transfer_context"]
+        == "preserving incomplete buffered bytes across fragmented network reads"
+    )
 
 
 def test_report_sums_equal_duration_assignments_without_deduplicating(
@@ -127,12 +139,8 @@ def test_report_hides_unassessed_extremes_and_counts_only_repeat_retrieval(
         "learner", "systems-foundations", end=now + timedelta(seconds=1)
     )
 
-    assert [item["concept_id"] for item in report.data["strengths"]] == [
-        "programming.invariants"
-    ]
-    assert [item["concept_id"] for item in report.data["weaknesses"]] == [
-        "programming.invariants"
-    ]
+    assert [item["concept_id"] for item in report.data["strengths"]] == ["programming.invariants"]
+    assert [item["concept_id"] for item in report.data["weaknesses"]] == ["programming.invariants"]
     assert report.data["retention"] == {
         "observations": 1,
         "successes": 1,

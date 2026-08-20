@@ -4,7 +4,7 @@
       "frames": 1,
       "height": 360,
       "path": "docs/assets/screenshots/setup.png",
-      "sha256": "964e136dc1085ffcaa41de4d75cd201a0699f1c4f79553933011fcf9c5bc1a07",
+      "sha256": "1886c770a262d4873b283571f1a61002763016fee4a8cdbfa04d3188cab095ad",
       "source": [
         "adaptive-tutor --config /tmp/adaptive-tutor-docs-capture/init/config.yaml init"
       ],
@@ -14,7 +14,7 @@
       "frames": 1,
       "height": 580,
       "path": "docs/assets/screenshots/doctor.png",
-      "sha256": "4532c32562889e1e2b2579b746e1d86272193e664c430d44bbacc93d93174deb",
+      "sha256": "2ac754e4cf1ce99737c3707bdc47d0fab3d7da6df9eea1d6051e6d7cda44c32f",
       "source": [
         "adaptive-tutor --config \u2026/config.yaml doctor --offline"
       ],
@@ -24,7 +24,7 @@
       "frames": 1,
       "height": 560,
       "path": "docs/assets/screenshots/status-readiness.png",
-      "sha256": "5f6bbbe0d88bfc23d9e571a2b1bd5fdb04c558d877c854423cfd0ce7bbb70fbd",
+      "sha256": "5bfcdb5bb394b109eb98f54cc65682610b979199553911a5deed4199d7368d6d",
       "source": [
         "adaptive-tutor --config \u2026/config.yaml status",
         "adaptive-tutor --config \u2026/config.yaml readiness"
@@ -35,7 +35,7 @@
       "frames": 1,
       "height": 540,
       "path": "docs/assets/screenshots/assignment-created.png",
-      "sha256": "5ab4343665b8c0fd4c2cda3c806924e54a07e3ca1d031f72ec20e3612e082623",
+      "sha256": "bcdcfe59a4d8d327f31e7e0c0961e5337c78aef27bbe42c38d96947fb3cb390f",
       "source": [
         "adaptive-tutor demo --keep /tmp/adaptive-tutor-docs-capture/demo"
       ],
@@ -45,7 +45,7 @@
       "frames": 1,
       "height": 460,
       "path": "docs/assets/screenshots/report.png",
-      "sha256": "8ee381d5ec186fae6364386913eb66b68512fd52f31efb747843b2a6e65fd54e",
+      "sha256": "c35b9740a326b8694fbefdfdfa1a6704d6e3baa70d80cf28477aeed79fc52357",
       "source": [
         "adaptive-tutor --config \u2026/config.yaml report --period weekly"
       ],
@@ -53,9 +53,9 @@
     },
     {
       "frames": 1,
-      "height": 1650,
+      "height": 1670,
       "path": "docs/assets/screenshots/dashboard.png",
-      "sha256": "c71df38e6dc76b899d7e4293178371a03065547d6a50888ba5f6c6b131f6d716",
+      "sha256": "785879ae319103ae95e348b6404d550db0c551a034b283ec9e942c78906fcd7e",
       "source": [
         "http://127.0.0.1:8876/"
       ],
@@ -65,7 +65,7 @@
       "frames": 1,
       "height": 1101,
       "path": "docs/assets/screenshots/assignment-detail.png",
-      "sha256": "1a97bca075485715d77108835c7ae1dcdc42908544e262a30454550141ca412a",
+      "sha256": "1ab8db75d0d1cd4538161a3dcb4e91fe73ddb36a7c20a0d82edf0f1271033eaf",
       "source": [
         "http://127.0.0.1:8876/"
       ],
@@ -75,7 +75,7 @@
       "frames": 1,
       "height": 2811,
       "path": "docs/assets/screenshots/dashboard-mobile.png",
-      "sha256": "e775c7bf1bf4329cdeb92afa7ff29d711c72cd87750bc8eb4dd1c923fc495f1f",
+      "sha256": "17e5a524ca69b4da9ec84fb72a370e9a452926a11f9e3dc4fb5bd8eccf07caf9",
       "source": [
         "http://127.0.0.1:8876/"
       ],
@@ -85,7 +85,7 @@
       "frames": 5,
       "height": 520,
       "path": "docs/assets/screenshots/terminal-tour.gif",
-      "sha256": "1db3f0a3e2896205075acd4eace0c90d1d5abf47be47ff755964de3f2272d629",
+      "sha256": "7667d0b6adaed584b49d5256ea5b5179678a6eff00f409900eb7432b761037f3",
       "source": [
         "setup.png",
         "doctor.png",
@@ -98,7 +98,7 @@
   "generator": "scripts/capture-screenshots",
   "playwright_version": "1.62.0",
   "schema_version": "1.0",
-  "source_digest": "sha256:3d5c95b34880947c6d70e8b1924d67cf768de30b3b23c84b1695ac950c62cafc",
+  "source_digest": "sha256:f30c7072c629fd035cfba226fa9c4551bbcfc3eae6267936beeb0d58642f0cfe",
   "source_files": [
     "src/adaptive_tutor/cli.py",
     "src/adaptive_tutor/dashboard.py",

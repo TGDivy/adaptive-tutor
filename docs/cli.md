@@ -24,7 +24,7 @@ adaptive-tutor COMMAND --help
 | `history` | List assignment status, attempts, and structured review scores. |
 | `report` | Generate a weekly or monthly console, Markdown, or JSON report. |
 | `pause` / `resume` | Stop or resume new assignment creation without discarding evaluation jobs. |
-| `demo` | Run the deterministic credential-free product flow. |
+| `demo` | Execute the credential-free product flow with bundled neutral submissions. |
 
 ### Context-aware recommendation
 
