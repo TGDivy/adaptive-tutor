@@ -622,8 +622,8 @@ def _execute_fixture_evaluation(
         by_path = {item.path: item for item in bundle.files}
         for item in bundle.files:
             if item.role == "starter":
-                source = _demo_workspace_path(workspace, item.path)
-                content = source.read_text(encoding="utf-8")
+                submission_path = _demo_workspace_path(workspace, item.path)
+                content = submission_path.read_text(encoding="utf-8")
             elif item.role in {"instructions", "public_test"}:
                 content = item.content
             else:
@@ -635,12 +635,12 @@ def _execute_fixture_evaluation(
         if not isinstance(extras, dict):
             raise ValueError("Demo evaluator extra_tests must be a mapping")
         for target_name, source_name in extras.items():
-            source = by_path.get(str(source_name))
-            if source is None or source.role != "evaluator":
+            evaluator_file = by_path.get(str(source_name))
+            if evaluator_file is None or evaluator_file.role != "evaluator":
                 raise ValueError(f"Demo evaluator is missing {source_name}")
             target = _demo_workspace_path(evaluation_root, str(target_name))
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(source.content, encoding="utf-8")
+            target.write_text(evaluator_file.content, encoding="utf-8")
         home = evaluation_root / ".home"
         (home / "tmp").mkdir(parents=True)
         environment = untrusted_process_environment(home)
