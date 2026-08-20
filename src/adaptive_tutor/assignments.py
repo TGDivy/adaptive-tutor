@@ -20,6 +20,11 @@ from .models import (
     AssignmentStatus,
 )
 from .time import iso_now
+from .trusted_bundles import (
+    PublicEvaluatorManifest,
+    public_manifest_digest,
+    serialize_public_manifest,
+)
 
 
 @dataclass(frozen=True)
@@ -301,11 +306,8 @@ class AssignmentService:
         self,
         assignment_id: str,
         *,
-        evaluator_binding: str | None = None,
-        evaluator_key_id: str | None = None,
+        evaluator_manifest: PublicEvaluatorManifest | None = None,
     ) -> dict[str, str]:
-        if (evaluator_binding is None) != (evaluator_key_id is None):
-            raise ConfigurationError("Evaluator binding and key ID must be published together")
         row = self.database.fetch_one(
             "SELECT bundle_json, branch_name, current_stage FROM assignments WHERE id=?",
             (assignment_id,),
@@ -330,10 +332,19 @@ class AssignmentService:
             "tags": bundle.tags,
             "selection_reason": bundle.selection_reason,
         }
-        if evaluator_binding is not None:
+        if evaluator_manifest is not None:
+            if (
+                evaluator_manifest.assignment_id != assignment_id
+                or evaluator_manifest.branch != str(row["branch_name"])
+            ):
+                raise ConfigurationError("Public evaluator manifest does not match the assignment")
             metadata["branch"] = str(row["branch_name"])
-            metadata["evaluator_binding"] = evaluator_binding
-            metadata["evaluator_key_id"] = evaluator_key_id
+            metadata["evaluator_manifest_digest"] = public_manifest_digest(evaluator_manifest)
+            metadata["evaluator_key_id"] = evaluator_manifest.key_id
+            metadata["evaluator_kit_digest"] = evaluator_manifest.evaluator_kit_digest
+            public[".adaptive-tutor/evaluator-manifest.json"] = serialize_public_manifest(
+                evaluator_manifest
+            )
         public[".adaptive-tutor/assignment.json"] = (
             json.dumps(metadata, indent=2, sort_keys=True) + "\n"
         )

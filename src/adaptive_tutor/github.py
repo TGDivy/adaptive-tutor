@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import hmac
 import io
 import re
 import time
@@ -18,12 +20,13 @@ import jwt
 
 from .config import GitHubSettings
 from .errors import ConfigurationError, ExternalServiceError, SecurityError
-from .security import MAX_ARTIFACT_BYTES, redact
+from .security import MAX_ARTIFACT_BYTES, redact, sha256_digest
 
 _EVALUATOR_WORKFLOW = ".github/workflows/adaptive-tutor-evaluate.yml"
+_EVALUATOR_KEY = ".adaptive-tutor/evaluator-signing.pub"
 _EVALUATOR_RUN_TITLE = re.compile(
-    r"Adaptive Tutor \| (A-(\d{4,12})) \| "
-    r"(assignment/(\d{4,12})-[a-z0-9][a-z0-9-]{2,100}) \| ([0-9a-f]{40,64})"
+    r"Adaptive Tutor \| (A-\d{4,12}) \| ([0-9a-f]{40,64}) \| "
+    r"([0-9a-f]{32}) \| ([0-9a-f]{40})"
 )
 
 
@@ -341,9 +344,25 @@ class GitHubClient:
         assignment_id: str,
         branch: str,
         commit_sha: str,
+        dispatch_nonce: str,
+        manifest_digest: str,
+        evaluator_ref: str,
+        evaluator_kit_digest: str,
         workflow_path: str = _EVALUATOR_WORKFLOW,
     ) -> None:
-        _validate_evaluator_identity(assignment_id, branch, commit_sha)
+        _validate_evaluator_identity(
+            assignment_id,
+            branch,
+            commit_sha,
+            dispatch_nonce=dispatch_nonce,
+            evaluator_ref=evaluator_ref,
+        )
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_digest) is None:
+            raise SecurityError("Invalid evaluator manifest digest for dispatch")
+        if re.fullmatch(r"[0-9a-f]{40}", evaluator_ref) is None:
+            raise SecurityError("Invalid evaluator source commit for dispatch")
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", evaluator_kit_digest) is None:
+            raise SecurityError("Invalid evaluator kit digest for dispatch")
         repository = self.verify_private_repository()
         self._request(
             "POST",
@@ -355,9 +374,51 @@ class GitHubClient:
                     "assignment_id": assignment_id,
                     "branch": branch,
                     "commit_sha": commit_sha,
+                    "dispatch_nonce": dispatch_nonce,
+                    "manifest_digest": manifest_digest,
+                    "evaluator_ref": evaluator_ref,
+                    "evaluator_kit_digest": evaluator_kit_digest,
                 },
             },
         )
+
+    def verify_evaluator_control(
+        self,
+        *,
+        expected_repository_id: int,
+        expected_workflow_digest: str,
+        expected_key_id: str,
+        workflow_path: str = _EVALUATOR_WORKFLOW,
+    ) -> dict[str, str | int]:
+        """Verify protected control files and return the exact dispatch provenance."""
+        repository = self.verify_private_repository()
+        repository_id = int(repository.get("id") or 0)
+        if repository_id != expected_repository_id:
+            raise SecurityError("Workspace repository identity changed after setup")
+        default_branch = str(repository["default_branch"])
+        reference = self._request(
+            "GET", f"{self.repository_path}/git/ref/heads/{default_branch}"
+        ).json()
+        workflow_commit = str((reference.get("object") or {}).get("sha", ""))
+        if re.fullmatch(r"[0-9a-f]{40,64}", workflow_commit) is None:
+            raise SecurityError("Protected workflow commit is invalid")
+        workflow_digest = sha256_digest(self.get_file(workflow_path, workflow_commit))
+        if not hmac.compare_digest(workflow_digest, expected_workflow_digest):
+            raise SecurityError("Protected evaluator workflow differs from setup state")
+        key_text = self.get_file(_EVALUATOR_KEY, workflow_commit).strip()
+        if re.fullmatch(r"ed25519:[0-9a-f]{64}", key_text) is None:
+            raise SecurityError("Protected evaluator verification key is invalid")
+        key_id = hashlib.sha256(bytes.fromhex(key_text.removeprefix("ed25519:"))).hexdigest()[:16]
+        if not hmac.compare_digest(key_id, expected_key_id):
+            raise SecurityError("Protected evaluator verification key differs from setup state")
+        return {
+            "repository_id": repository_id,
+            "repository_full_name": str(repository["full_name"]),
+            "default_branch": default_branch,
+            "workflow_commit": workflow_commit,
+            "workflow_digest": workflow_digest,
+            "evaluator_key_id": key_id,
+        }
 
     def get_file(self, path: str, ref: str) -> str:
         _validate_repository_path(path)
@@ -407,7 +468,7 @@ class GitHubClient:
         run_id: int,
         *,
         workflow_path: str = _EVALUATOR_WORKFLOW,
-    ) -> dict[str, str]:
+    ) -> dict[str, str | int]:
         repository = self.verify_private_repository()
         workflow = self._request(
             "GET", f"{self.repository_path}/actions/workflows/{workflow_path}"
@@ -427,32 +488,27 @@ class GitHubClient:
         ):
             raise SecurityError("Actions run provenance does not match the trusted evaluator")
         title_match = _EVALUATOR_RUN_TITLE.fullmatch(str(run.get("display_title", "")))
-        if title_match is None or title_match.group(2) != title_match.group(4):
+        if title_match is None:
             raise SecurityError("Actions run has an invalid evaluator identity")
         assignment_id = title_match.group(1)
-        branch = title_match.group(3)
-        commit_sha = title_match.group(5)
-        _validate_evaluator_identity(assignment_id, branch, commit_sha)
+        commit_sha = title_match.group(2)
+        dispatch_nonce = title_match.group(3)
+        evaluator_ref = title_match.group(4)
         workflow_commit = str(run.get("head_sha", ""))
         if re.fullmatch(r"[0-9a-f]{40,64}", workflow_commit) is None:
             raise SecurityError("Actions run has an invalid trusted workflow commit")
-        trusted = self._request(
-            "GET",
-            f"{self.repository_path}/contents/{workflow_path}",
-            params={"ref": default_branch},
-        ).json()
-        executed = self._request(
-            "GET",
-            f"{self.repository_path}/contents/{workflow_path}",
-            params={"ref": workflow_commit},
-        ).json()
-        if trusted.get("sha") != executed.get("sha"):
-            raise SecurityError("Actions run did not use the trusted default-branch workflow")
+        workflow_digest = sha256_digest(self.get_file(workflow_path, workflow_commit))
+        repository_id = int((run.get("repository") or {}).get("id") or 0)
+        if repository_id != int(repository.get("id") or 0):
+            raise SecurityError("Actions run repository ID does not match the workspace")
         return {
             "assignment_id": assignment_id,
-            "branch": branch,
             "commit_sha": commit_sha,
+            "dispatch_nonce": dispatch_nonce,
+            "evaluator_ref": evaluator_ref,
             "workflow_commit": workflow_commit,
+            "workflow_digest": workflow_digest,
+            "repository_id": repository_id,
         }
 
     def _download_limited(self, path: str, maximum: int) -> bytes:
@@ -533,11 +589,26 @@ class GitHubClient:
         return self.post_comment(issue_number, body)
 
 
-def _validate_evaluator_identity(assignment_id: str, branch: str, commit_sha: str) -> None:
-    match = _EVALUATOR_RUN_TITLE.fullmatch(
-        f"Adaptive Tutor | {assignment_id} | {branch} | {commit_sha}"
+def _validate_evaluator_identity(
+    assignment_id: str,
+    branch: str,
+    commit_sha: str,
+    *,
+    dispatch_nonce: str = "0" * 32,
+    evaluator_ref: str = "0" * 40,
+) -> None:
+    assignment = re.fullmatch(r"A-(\d{4,12})", assignment_id)
+    branch_match = re.fullmatch(
+        r"assignment/(\d{4,12})-[a-z0-9][a-z0-9-]{2,100}", branch
     )
-    if match is None or match.group(2) != match.group(4):
+    if (
+        assignment is None
+        or branch_match is None
+        or assignment.group(1) != branch_match.group(1)
+        or re.fullmatch(r"[0-9a-f]{40,64}", commit_sha) is None
+        or re.fullmatch(r"[0-9a-f]{32}", dispatch_nonce) is None
+        or re.fullmatch(r"[0-9a-f]{40}", evaluator_ref) is None
+    ):
         raise SecurityError("Invalid assignment identity for evaluator dispatch")
 
 

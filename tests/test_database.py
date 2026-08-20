@@ -7,7 +7,17 @@ from adaptive_tutor.db import Database
 
 def test_migrations_are_versioned_and_idempotent(tmp_path: Path) -> None:
     database = Database(tmp_path / "state.sqlite3")
-    assert database.migrate() == ["001", "002", "003", "004", "005", "006", "007", "008"]
+    assert database.migrate() == [
+        "001",
+        "002",
+        "003",
+        "004",
+        "005",
+        "006",
+        "007",
+        "008",
+        "009",
+    ]
     assert database.migrate() == []
     assert database.migration_versions() == [
         "001",
@@ -18,6 +28,7 @@ def test_migrations_are_versioned_and_idempotent(tmp_path: Path) -> None:
         "006",
         "007",
         "008",
+        "009",
     ]
     assert database.integrity_check() == (True, "ok")
 

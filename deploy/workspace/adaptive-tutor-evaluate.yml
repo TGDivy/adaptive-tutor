@@ -1,5 +1,5 @@
 name: Adaptive Tutor Evaluation
-run-name: "Adaptive Tutor | ${{ inputs.assignment_id }} | ${{ inputs.branch }} | ${{ inputs.commit_sha }}"
+run-name: "Adaptive Tutor | ${{ inputs.assignment_id }} | ${{ inputs.commit_sha }} | ${{ inputs.dispatch_nonce }} | ${{ inputs.evaluator_ref }}"
 
 on:
   workflow_dispatch:
@@ -16,87 +16,163 @@ on:
         description: Exact learner commit to evaluate
         required: true
         type: string
+      dispatch_nonce:
+        description: One-attempt replay guard
+        required: true
+        type: string
+      manifest_digest:
+        description: Signed public evaluator manifest digest
+        required: true
+        type: string
+      evaluator_ref:
+        description: Exact Adaptive Tutor source commit
+        required: true
+        type: string
+      evaluator_kit_digest:
+        description: Exact public evaluator source digest
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: adaptive-tutor-evaluate-${{ inputs.assignment_id }}-${{ inputs.commit_sha }}
-  cancel-in-progress: true
+  group: adaptive-tutor-evaluate-${{ inputs.assignment_id }}-${{ inputs.dispatch_nonce }}
+  cancel-in-progress: false
 
 jobs:
   evaluate:
-    name: Credential-free assignment checks
-    runs-on: [self-hosted, adaptive-tutor-ephemeral]
-    timeout-minutes: 10
+    name: Credential-free public checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     env:
       ASSIGNMENT_ID: ${{ inputs.assignment_id }}
       ASSIGNMENT_BRANCH: ${{ inputs.branch }}
       ASSIGNMENT_COMMIT: ${{ inputs.commit_sha }}
+      DISPATCH_NONCE: ${{ inputs.dispatch_nonce }}
+      MANIFEST_DIGEST: ${{ inputs.manifest_digest }}
+      EVALUATOR_REF: ${{ inputs.evaluator_ref }}
+      EVALUATOR_KIT_DIGEST: ${{ inputs.evaluator_kit_digest }}
     steps:
-      - name: Request commit-bound trusted evaluator
+      - name: Validate typed dispatch inputs
         shell: bash
         run: |
           set -euo pipefail
-          trusted_dir="${RUNNER_TEMP}/trusted"
-          install -d -m 0700 "${trusted_dir}" "${trusted_dir}/bin"
-          install -m 0600 /dev/null "${trusted_dir}/stage-request"
-          for _ in $(seq 1 120); do
-            if test -f "${trusted_dir}/assignment-bundle.json" \
-              && test -f "${trusted_dir}/evaluator-signing.pub" \
-              && test -x "${trusted_dir}/bin/adaptive-tutor"; then
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "Trusted evaluator provisioning timed out" >&2
-          exit 1
+          branch_tail="${ASSIGNMENT_BRANCH#assignment/}"
+          [[ "${ASSIGNMENT_ID}" =~ ^A-([0-9]{4,12})$ ]]
+          test "${branch_tail%%-*}" = "${BASH_REMATCH[1]}"
+          [[ "${ASSIGNMENT_BRANCH}" =~ ^assignment/[0-9]{4,12}-[a-z0-9][a-z0-9-]{2,100}$ ]]
+          [[ "${ASSIGNMENT_COMMIT}" =~ ^[0-9a-f]{40,64}$ ]]
+          [[ "${DISPATCH_NONCE}" =~ ^[0-9a-f]{32}$ ]]
+          [[ "${MANIFEST_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${EVALUATOR_REF}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${EVALUATOR_KIT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+      - name: Check out protected workspace controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workspace-control
+          persist-credentials: false
+          clean: true
+          sparse-checkout: |
+            .adaptive-tutor/evaluator-signing.pub
+            .github/workflows/adaptive-tutor-evaluate.yml
+
+      - name: Check out digest-bound public evaluator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: TGDivy/adaptive-tutor
+          ref: ${{ inputs.evaluator_ref }}
+          path: evaluator-control
+          persist-credentials: false
+          clean: true
+
       - name: Check out learner commit without retained credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit_sha }}
+          path: submission
           persist-credentials: false
           clean: true
-      - name: Verify evaluator isolation runtime
+
+      - name: Verify evaluator source digest
         shell: bash
         run: |
           set -euo pipefail
-          command -v bwrap
-          bwrap --version
-      - name: Run trusted evaluator
+          observed="$(python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          names = (
+              "__init__.py",
+              "_evaluator_supervisor.py",
+              "errors.py",
+              "models.py",
+              "public_evaluator.py",
+              "runner.py",
+              "security.py",
+              "time.py",
+              "trusted_bundles.py",
+          )
+          root = Path("evaluator-control/src/adaptive_tutor")
+          digest = hashlib.sha256()
+          for name in names:
+              digest.update(name.encode("utf-8"))
+              digest.update(b"\0")
+              digest.update((root / name).read_bytes())
+              digest.update(b"\0")
+          print("sha256:" + digest.hexdigest())
+          PY
+          )"
+          test "${observed}" = "${EVALUATOR_KIT_DIGEST}"
+
+      - name: Install pinned evaluator runtime
         shell: bash
         run: |
           set -euo pipefail
-          trusted_bundle="${RUNNER_TEMP}/trusted/assignment-bundle.json"
-          verification_key="${RUNNER_TEMP}/trusted/evaluator-signing.pub"
-          evaluator="${RUNNER_TEMP}/trusted/bin/adaptive-tutor"
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends bubblewrap
+
+      - name: Install locked Adaptive Tutor environment
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+          enable-cache: false
+
+      - name: Synchronize evaluator dependencies
+        working-directory: evaluator-control
+        shell: bash
+        run: uv sync --locked --no-dev
+
+      - name: Run signed public evaluator
+        shell: bash
+        run: |
+          set -euo pipefail
           evidence_dir="${RUNNER_TEMP}/adaptive-tutor-evidence"
-          branch_tail="${ASSIGNMENT_BRANCH#assignment/}"
-          [[ "${branch_tail}" =~ ^([0-9]{4,12})-[a-z0-9-]+$ ]]
-          test "${ASSIGNMENT_ID}" = "A-${BASH_REMATCH[1]}"
-          [[ "${ASSIGNMENT_COMMIT}" =~ ^[0-9a-f]{40,64}$ ]]
-          test -f "${trusted_bundle}"
-          test ! -L "${trusted_bundle}"
-          test "$(stat -c '%a' "${trusted_bundle}")" = "600"
-          test -f "${verification_key}"
-          test ! -L "${verification_key}"
-          test "$(stat -c '%a' "${verification_key}")" = "600"
-          test -f "${evaluator}"
-          test ! -L "${evaluator}"
-          test "$(stat -c '%a' "${evaluator}")" = "700"
           install -d -m 0700 "${evidence_dir}"
+          workflow_path="workspace-control/.github/workflows/adaptive-tutor-evaluate.yml"
+          workflow_digest="sha256:$(sha256sum "${workflow_path}" | cut -d' ' -f1)"
           env -i \
-            PATH="${RUNNER_TEMP}/trusted/bin:/usr/bin:/bin" \
+            PATH="${GITHUB_WORKSPACE}/evaluator-control/.venv/bin:/usr/bin:/bin" \
             LANG="C.UTF-8" \
             LC_ALL="C.UTF-8" \
-            adaptive-tutor evaluate \
-              --bundle "${trusted_bundle}" \
-              --verification-key "${verification_key}" \
-              --workspace "${GITHUB_WORKSPACE}" \
+            python -m adaptive_tutor.public_evaluator \
+              --verification-key \
+                "${GITHUB_WORKSPACE}/workspace-control/.adaptive-tutor/evaluator-signing.pub" \
+              --workspace "${GITHUB_WORKSPACE}/submission" \
               --output "${evidence_dir}/adaptive-tutor-evidence.json" \
               --assignment-id "${ASSIGNMENT_ID}" \
               --branch "${ASSIGNMENT_BRANCH}" \
-              --commit-sha "${ASSIGNMENT_COMMIT}"
+              --commit-sha "${ASSIGNMENT_COMMIT}" \
+              --dispatch-nonce "${DISPATCH_NONCE}" \
+              --manifest-digest "${MANIFEST_DIGEST}" \
+              --evaluator-kit-digest "${EVALUATOR_KIT_DIGEST}" \
+              --evaluator-ref "${EVALUATOR_REF}" \
+              --workflow-digest "${workflow_digest}" \
+              --workflow-commit "${{ github.workflow_sha }}" \
+              --repository-id "${{ github.repository_id }}"
+
       - name: Upload normalized evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -105,3 +181,19 @@ jobs:
           path: ${{ runner.temp }}/adaptive-tutor-evidence/adaptive-tutor-evidence.json
           if-no-files-found: error
           retention-days: 14
+
+      - name: Reflect learner check outcome
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["RUNNER_TEMP"]) / "adaptive-tutor-evidence" / "adaptive-tutor-evidence.json"
+          evidence = json.loads(path.read_text(encoding="utf-8"))
+          relevant = [check for check in evidence["checks"] if check["status"] != "skipped"]
+          if not relevant or any(check["status"] != "pass" for check in relevant):
+              raise SystemExit("Learner checks did not pass")
+          PY

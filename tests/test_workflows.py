@@ -68,28 +68,34 @@ def test_workspace_evaluator_is_ephemeral_credential_free_and_uploads_contract()
     content = path.read_text(encoding="utf-8")
     assert isinstance(yaml.safe_load(content), dict)
     for required in (
-        "adaptive-tutor-ephemeral",
+        "runs-on: ubuntu-24.04",
         "persist-credentials: false",
         "env -i",
-        "adaptive-tutor evaluate",
-        "Request commit-bound trusted evaluator",
-        "stage-request",
-        '${RUNNER_TEMP}/trusted/bin/adaptive-tutor',
-        "assignment-bundle.json",
+        "python -m adaptive_tutor.public_evaluator",
+        "Verify evaluator source digest",
+        "repository: TGDivy/adaptive-tutor",
+        "ref: ${{ inputs.evaluator_ref }}",
+        "uv sync --locked --no-dev",
+        "bubblewrap",
         "evaluator-signing.pub",
-        "stat -c '%a'",
-        "command -v bwrap",
-        "bwrap --version",
         "workflow_dispatch:",
         "ref: ${{ inputs.commit_sha }}",
         '--branch "${ASSIGNMENT_BRANCH}"',
         '--commit-sha "${ASSIGNMENT_COMMIT}"',
+        '--dispatch-nonce "${DISPATCH_NONCE}"',
+        '--manifest-digest "${MANIFEST_DIGEST}"',
+        '--evaluator-ref "${EVALUATOR_REF}"',
+        '--workflow-commit "${{ github.workflow_sha }}"',
+        '--repository-id "${{ github.repository_id }}"',
         "adaptive-tutor-evidence.json",
         "name: adaptive-tutor-evidence",
         "retention-days: 14",
     ):
         assert required in content
     assert "pull_request_target" not in content
+    assert "self-hosted" not in content
+    assert "stage-request" not in content
+    assert "assignment-bundle.json" not in content
     assert '\n  push:' not in content
     uses_lines = [line for line in content.splitlines() if "uses:" in line]
     assert uses_lines and all(PINNED_ACTION.search(line) for line in uses_lines)

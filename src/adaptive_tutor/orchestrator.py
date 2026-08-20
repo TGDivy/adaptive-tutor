@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import uuid
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,12 @@ from .models import AssignmentBundle, AssignmentRequest, LearnerContext, Qualita
 from .scheduler import AdaptiveScheduler
 from .security import redact, sha256_digest
 from .time import iso_now
-from .trusted_bundles import TrustedBundleStore
+from .trusted_bundles import (
+    PublicEvaluatorManifest,
+    TrustedBundleStore,
+    public_manifest_digest,
+    verify_public_manifest,
+)
 
 _CONFIDENCE = re.compile(r"(?:^|\b)confidence\s*[:=]\s*(\d{1,3})(?:\b|$)", re.I)
 
@@ -64,9 +70,16 @@ class TutorOrchestrator:
         if active:
             if active["status"] == "validated" and not active.get("pull_number"):
                 self.github.preflight_assignment_publication()
-                return self._publish_assignment(active, active["bundle"], scheduler=None)
+                control = self._verified_control_plane()
+                return self._publish_assignment(
+                    active,
+                    active["bundle"],
+                    scheduler=None,
+                    control=control,
+                )
             return {"existing": True, **active}
         self.github.preflight_assignment_publication()
+        control = self._verified_control_plane()
         candidates = AdaptiveScheduler(self.database).recommend(
             self.settings.learner_id,
             self.settings.active_curriculum,
@@ -132,7 +145,12 @@ class TutorOrchestrator:
         bundle = CurriculumAssignmentGenerator(package).generate(request)
         validation = AssignmentValidator().validate(bundle, request)
         created = self.assignments.create(request, bundle, validation)
-        return self._publish_assignment(created, bundle, scheduler=candidate.model_dump())
+        return self._publish_assignment(
+            created,
+            bundle,
+            scheduler=candidate.model_dump(),
+            control=control,
+        )
 
     def _publish_assignment(
         self,
@@ -140,18 +158,47 @@ class TutorOrchestrator:
         bundle: AssignmentBundle,
         *,
         scheduler: dict[str, Any] | None,
+        control: dict[str, Any],
     ) -> dict[str, Any]:
         assignment_id = str(created["id"])
         branch = str(created["branch_name"])
-        envelope = self.trusted_bundles.seal(
+        self.trusted_bundles.seal(
             assignment_id=assignment_id,
             branch=branch,
             bundle=bundle,
         )
+        stored_manifest = created.get("evaluator_manifest_json")
+        if stored_manifest:
+            manifest = PublicEvaluatorManifest.model_validate_json(str(stored_manifest))
+            verify_public_manifest(
+                manifest,
+                verification_key=self.trusted_bundles.public_verification_key(),
+                expected_assignment_id=assignment_id,
+                expected_branch=branch,
+            )
+        else:
+            manifest = self.trusted_bundles.public_manifest(
+                assignment_id=assignment_id,
+                branch=branch,
+                bundle=bundle,
+                evaluator_kit_digest=str(control["evaluator_kit_digest"]),
+            )
+            self.database.execute(
+                """
+                UPDATE assignments SET evaluator_manifest_json=?, evaluator_manifest_digest=?,
+                    evaluator_key_id=?, updated_at=? WHERE id=?
+                """,
+                (
+                    manifest.model_dump_json(),
+                    public_manifest_digest(manifest),
+                    manifest.key_id,
+                    iso_now(),
+                    assignment_id,
+                ),
+            )
         public_files = self.assignments.public_files(
             assignment_id,
-            evaluator_binding=envelope.binding_digest,
-            evaluator_key_id=envelope.key_id,
+            evaluator_manifest=manifest,
         )
         pull_body = (
             f"{bundle.summary}\n\n"
@@ -217,6 +264,32 @@ class TutorOrchestrator:
             result["scheduler"] = scheduler
         return result
 
+    def _verified_control_plane(self) -> dict[str, Any]:
+        control = self.database.fetch_one(
+            "SELECT * FROM evaluator_control_planes ORDER BY configured_at DESC LIMIT 1"
+        )
+        if control is None:
+            raise ConfigurationError(
+                "GitHub evaluator controls are not configured; run 'adaptive-tutor setup'"
+            )
+        observed = self.github.verify_evaluator_control(
+            expected_repository_id=int(control["repository_id"]),
+            expected_workflow_digest=str(control["workflow_digest"]),
+            expected_key_id=str(control["evaluator_key_id"]),
+        )
+        expected_name = str(control["repository_full_name"]).lower()
+        if str(observed["repository_full_name"]).lower() != expected_name:
+            raise SecurityError("Workspace repository name differs from setup state")
+        now = iso_now()
+        self.database.execute(
+            """
+            UPDATE evaluator_control_planes SET workflow_commit=?, verified_at=?
+            WHERE repository_id=?
+            """,
+            (str(observed["workflow_commit"]), now, int(control["repository_id"])),
+        )
+        return {**control, **observed, "verified_at": now}
+
     def record_submission(self, payload: dict[str, Any]) -> None:
         branch = _branch_from_ref(str(payload.get("ref", "")))
         if not branch:
@@ -261,7 +334,7 @@ class TutorOrchestrator:
         )
         attempt = self.database.fetch_one(
             """
-            SELECT id, evaluation_dispatched_at FROM attempts
+            SELECT * FROM attempts
             WHERE assignment_id=? AND commit_sha=? AND stage_number=?
             """,
             (assignment["id"], commit_sha, assignment["current_stage"]),
@@ -269,10 +342,62 @@ class TutorOrchestrator:
         if attempt is None:  # pragma: no cover - insert/read invariant
             raise RuntimeError("Submission attempt was not recorded")
         if attempt["evaluation_dispatched_at"] is None:
+            manifest_digest = str(assignment.get("evaluator_manifest_digest") or "")
+            evaluator_key_id = str(assignment.get("evaluator_key_id") or "")
+            if not manifest_digest or not evaluator_key_id:
+                raise SecurityError("Assignment has no signed public evaluator manifest")
+            control = self._verified_control_plane()
+            if evaluator_key_id != str(control["evaluator_key_id"]):
+                raise SecurityError("Assignment evaluator key differs from setup state")
+            manifest = PublicEvaluatorManifest.model_validate_json(
+                str(assignment["evaluator_manifest_json"])
+            )
+            if (
+                manifest.evaluator_kit_digest != str(control["evaluator_kit_digest"])
+                or public_manifest_digest(manifest) != manifest_digest
+            ):
+                raise SecurityError("Assignment evaluator manifest differs from setup state")
+            if attempt["dispatch_nonce"] is None:
+                self.database.execute(
+                    """
+                    UPDATE attempts SET dispatch_nonce=?, manifest_digest=?, workflow_digest=?,
+                        workflow_commit=?, evaluator_ref=?, evaluator_kit_digest=?, repository_id=?
+                    WHERE id=? AND dispatch_nonce IS NULL
+                    """,
+                    (
+                        secrets.token_hex(16),
+                        manifest_digest,
+                        str(control["workflow_digest"]),
+                        str(control["workflow_commit"]),
+                        str(control["evaluator_ref"]),
+                        str(control["evaluator_kit_digest"]),
+                        int(control["repository_id"]),
+                        attempt["id"],
+                    ),
+                )
+                attempt = self.database.fetch_one(
+                    "SELECT * FROM attempts WHERE id=?", (attempt["id"],)
+                )
+                if attempt is None:  # pragma: no cover - update/read invariant
+                    raise RuntimeError("Submission dispatch state was not recorded")
+            expected = {
+                "manifest_digest": manifest_digest,
+                "workflow_digest": str(control["workflow_digest"]),
+                "workflow_commit": str(control["workflow_commit"]),
+                "evaluator_ref": str(control["evaluator_ref"]),
+                "evaluator_kit_digest": str(control["evaluator_kit_digest"]),
+                "repository_id": int(control["repository_id"]),
+            }
+            if any(attempt[name] != value for name, value in expected.items()):
+                raise SecurityError("Stored evaluator dispatch differs from current setup state")
             self.github.dispatch_evaluator(
                 assignment_id=str(assignment["id"]),
                 branch=branch,
                 commit_sha=commit_sha,
+                dispatch_nonce=str(attempt["dispatch_nonce"]),
+                manifest_digest=manifest_digest,
+                evaluator_ref=str(control["evaluator_ref"]),
+                evaluator_kit_digest=str(control["evaluator_kit_digest"]),
             )
             self.database.execute(
                 """
@@ -318,11 +443,10 @@ class TutorOrchestrator:
             return
         run_id = int(workflow["id"])
         identity = self.github.verify_evaluator_run(run_id)
-        branch = identity["branch"]
-        commit_sha = identity["commit_sha"]
+        commit_sha = str(identity["commit_sha"])
         assignment = self.database.fetch_one(
-            "SELECT * FROM assignments WHERE id=? AND branch_name=?",
-            (identity["assignment_id"], branch),
+            "SELECT * FROM assignments WHERE id=?",
+            (identity["assignment_id"],),
         )
         if assignment is None:
             raise SecurityError("Actions run does not match a stored assignment")
@@ -332,6 +456,15 @@ class TutorOrchestrator:
         )
         if attempt is None:
             raise SecurityError("Actions run has no dispatched submission attempt")
+        run_bindings = {
+            "dispatch_nonce": identity["dispatch_nonce"],
+            "evaluator_ref": identity["evaluator_ref"],
+            "workflow_commit": identity["workflow_commit"],
+            "workflow_digest": identity["workflow_digest"],
+            "repository_id": identity["repository_id"],
+        }
+        if any(str(attempt[name]) != str(value) for name, value in run_bindings.items()):
+            raise SecurityError("Actions run does not match the stored evaluator dispatch")
         existing = self.database.fetch_one(
             """
             SELECT id, evaluation_json, review_external_id, review_posted_at
@@ -349,12 +482,24 @@ class TutorOrchestrator:
             evidence = EvidenceNormalizer.parse(self.github.download_evidence(run_id))
             if evidence.assignment_id != assignment["id"] or evidence.commit_sha != commit_sha:
                 raise SecurityError("Actions evidence does not match the assignment and commit")
-            trusted_envelope = self.trusted_bundles.load(str(assignment["id"]))
-            if (
-                evidence.evaluator_binding != trusted_envelope.binding_digest
-                or evidence.evaluator_key_id != trusted_envelope.key_id
+            expected_evidence = {
+                "dispatch_nonce": attempt["dispatch_nonce"],
+                "manifest_digest": attempt["manifest_digest"],
+                "workflow_digest": attempt["workflow_digest"],
+                "workflow_commit": attempt["workflow_commit"],
+                "evaluator_ref": attempt["evaluator_ref"],
+                "evaluator_kit_digest": attempt["evaluator_kit_digest"],
+                "repository_id": attempt["repository_id"],
+                "evaluator_key_id": assignment["evaluator_key_id"],
+            }
+            observed_evidence = evidence.model_dump(mode="json")
+            if any(
+                str(observed_evidence[name]) != str(value)
+                for name, value in expected_evidence.items()
             ):
-                raise SecurityError("Actions evidence does not match the trusted evaluator")
+                raise SecurityError(
+                    "Actions evidence does not match the trusted evaluator dispatch"
+                )
             if evidence.has_operational_error:
                 raise InfrastructureError(
                     "Evaluator reported an operational failure", retryable=True

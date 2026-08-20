@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import resource
@@ -17,12 +18,20 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
 from .errors import AssignmentValidationError, SecurityError
 from .models import AssignmentBundle, AutomatedCheck, AutomatedEvaluation
-from .security import assert_credentials_absent, untrusted_process_environment
-from .trusted_bundles import TrustedBundleEnvelope, read_provisioned_envelope
+from .security import assert_credentials_absent, sha256_digest, untrusted_process_environment
+from .trusted_bundles import (
+    PublicEvaluatorLimits,
+    PublicEvaluatorManifest,
+    TrustedBundleEnvelope,
+    public_manifest_digest,
+    read_provisioned_envelope,
+    verify_public_manifest,
+)
 
 MAX_SUBMISSION_BYTES = 5 * 1024 * 1024
 MAX_OUTPUT_BYTES = 2 * 1024 * 1024
@@ -33,12 +42,275 @@ SANDBOX_ROOT = Path("/evaluation")
 SANDBOX_PACKAGE_ROOT = Path("/runtime/adaptive-tutor")
 SANDBOX_TMP = Path("/tmp")  # noqa: S108 - a private tmpfs inside the sandbox
 SANDBOX_HOME = SANDBOX_TMP / "home"
+PUBLIC_MANIFEST_PATH = ".adaptive-tutor/evaluator-manifest.json"
+EVALUATOR_KIT_FILES = (
+    "__init__.py",
+    "_evaluator_supervisor.py",
+    "errors.py",
+    "models.py",
+    "public_evaluator.py",
+    "runner.py",
+    "security.py",
+    "time.py",
+    "trusted_bundles.py",
+)
 
 
 @dataclass(frozen=True)
 class _SupervisedResult:
     status: str
     summary: str
+
+
+def evaluator_kit_digest() -> str:
+    """Digest the exact installed sources that implement public evaluation."""
+    package_root = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    for name in EVALUATOR_KIT_FILES:
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update((package_root / name).read_bytes())
+        digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
+
+
+def evaluate_public_workspace_to_file(
+    *,
+    verification_key_path: Path,
+    workspace: Path,
+    output_path: Path,
+    assignment_id: str,
+    branch: str,
+    commit_sha: str,
+    dispatch_nonce: str,
+    expected_manifest_digest: str,
+    expected_evaluator_kit_digest: str,
+    evaluator_ref: str,
+    workflow_digest: str,
+    workflow_commit: str,
+    repository_id: int,
+) -> AutomatedEvaluation:
+    """Verify a signed public manifest and evaluate one hosted-runner checkout."""
+    workspace_input = workspace.expanduser().absolute()
+    if workspace_input.is_symlink():
+        raise SecurityError("Evaluator workspace must not be a symlink")
+    untrusted_workspace = workspace_input.resolve(strict=True)
+    if not untrusted_workspace.is_dir():
+        raise SecurityError("Evaluator workspace must be a directory")
+    destination = output_path.expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if _is_within(destination, untrusted_workspace):
+        raise SecurityError("Evidence output must be outside the learner workspace")
+    key_path = verification_key_path.expanduser().resolve(strict=True)
+    if _is_within(key_path, untrusted_workspace):
+        raise SecurityError("Evaluator verification key must be outside the learner workspace")
+    try:
+        key_info = key_path.stat()
+        if not stat.S_ISREG(key_info.st_mode) or key_info.st_size > 256:
+            raise SecurityError("Public evaluator verification key is not a bounded regular file")
+        verification_key = key_path.read_text(encoding="ascii")
+        manifest_payload = _read_workspace_file(
+            untrusted_workspace,
+            PUBLIC_MANIFEST_PATH,
+            maximum=MAX_ASSIGNMENT_METADATA_BYTES,
+            label="Public evaluator manifest",
+        )
+        manifest = PublicEvaluatorManifest.model_validate_json(manifest_payload)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise SecurityError(f"Public evaluator control data is invalid: {exc}") from exc
+    observed_manifest_digest = public_manifest_digest(manifest)
+    if not secrets.compare_digest(observed_manifest_digest, expected_manifest_digest):
+        raise SecurityError("Public evaluator manifest does not match the dispatched digest")
+    observed_kit_digest = evaluator_kit_digest()
+    if not secrets.compare_digest(observed_kit_digest, expected_evaluator_kit_digest):
+        raise SecurityError("Public evaluator kit does not match the dispatched digest")
+    verify_public_manifest(
+        manifest,
+        verification_key=verification_key,
+        expected_assignment_id=assignment_id,
+        expected_branch=branch,
+        expected_kit_digest=observed_kit_digest,
+    )
+    evidence = PublicCredentialFreeEvaluator().evaluate(
+        manifest=manifest,
+        assignment_id=assignment_id,
+        commit_sha=commit_sha,
+        workspace=untrusted_workspace,
+        dispatch_nonce=dispatch_nonce,
+        manifest_digest=observed_manifest_digest,
+        workflow_digest=workflow_digest,
+        workflow_commit=workflow_commit,
+        evaluator_ref=evaluator_ref,
+        evaluator_kit_digest=observed_kit_digest,
+        repository_id=repository_id,
+    )
+    _write_evidence(destination, evidence)
+    return evidence
+
+
+class PublicCredentialFreeEvaluator:
+    """Run only signed learner-visible tests under the networkless sandbox."""
+
+    def evaluate(
+        self,
+        *,
+        manifest: PublicEvaluatorManifest,
+        assignment_id: str,
+        commit_sha: str,
+        workspace: Path,
+        dispatch_nonce: str,
+        manifest_digest: str,
+        workflow_digest: str,
+        workflow_commit: str,
+        evaluator_ref: str,
+        evaluator_kit_digest: str,
+        repository_id: int,
+    ) -> AutomatedEvaluation:
+        started = datetime.now(UTC)
+        started_clock = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="adaptive-tutor-public-evaluation-") as temporary:
+            root = Path(temporary)
+            submission = root / "submission"
+            public_tests = root / "trusted-tests" / "public"
+            hidden_tests = root / "trusted-tests" / "hidden"
+            submission.mkdir(parents=True)
+            public_tests.mkdir(parents=True)
+            hidden_tests.mkdir(parents=True)
+            changed = False
+            meaningful = False
+            total = 0
+            for item in manifest.allowed_submissions:
+                content = _read_workspace_file(
+                    workspace,
+                    item.path,
+                    maximum=MAX_SUBMISSION_BYTES - total,
+                    label="Submission file",
+                )
+                total += len(content)
+                if total > MAX_SUBMISSION_BYTES:
+                    raise SecurityError("Submission exceeds the evaluator size limit")
+                changed = changed or sha256_digest(content) != item.digest
+                meaningful = meaningful or bool(content.strip())
+                target = _safe_path(submission, item.path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+            for item in manifest.public_tests:
+                content = _read_workspace_file(
+                    workspace,
+                    item.path,
+                    maximum=MAX_SUBMISSION_BYTES,
+                    label="Public test",
+                )
+                if not secrets.compare_digest(sha256_digest(content), item.digest):
+                    raise SecurityError(f"Public test was modified: {item.path}")
+                target = _safe_path(public_tests, item.path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+
+            environment = untrusted_process_environment(SANDBOX_HOME)
+            assert_credentials_absent(environment)
+            if manifest.command == "python-pytest-v1":
+                output_path = root / "evaluation-output.txt"
+                supervised = _run_supervised_tests(
+                    root,
+                    output_path,
+                    environment,
+                    timeout_seconds=manifest.limits.timeout_seconds,
+                    limits=manifest.limits,
+                )
+                sandbox_status = supervised.status
+                sandbox_summary = (
+                    "Public tests ran in a read-only, networkless PID namespace"
+                    if supervised.status != "error"
+                    else supervised.summary
+                )
+            else:
+                supervised = _SupervisedResult(
+                    "pass" if changed and meaningful else "fail",
+                    "Submission content changed and is non-empty"
+                    if changed and meaningful
+                    else "Submission content must be changed and non-empty",
+                )
+                sandbox_status = "skipped"
+                sandbox_summary = "No learner code is executed for this assignment format"
+            duration = int((time.monotonic() - started_clock) * 1000)
+            checks = [
+                AutomatedCheck(
+                    name="signed public manifest",
+                    status="pass",
+                    category="policy",
+                    summary="Assignment paths, tests, command, and limits are signature-verified",
+                ),
+                AutomatedCheck(
+                    name="submission boundary",
+                    status="pass",
+                    category="policy",
+                    summary="Only signed bounded regular files entered the evaluator",
+                ),
+                AutomatedCheck(
+                    name="credential boundary",
+                    status="pass",
+                    category="policy",
+                    summary="Evaluator environment contains no credential-like variables",
+                ),
+                AutomatedCheck(
+                    name="ephemeral sandbox",
+                    status=sandbox_status,  # type: ignore[arg-type]
+                    category="policy",
+                    summary=sandbox_summary,
+                ),
+                AutomatedCheck(
+                    name=(
+                        "public tests"
+                        if manifest.command == "python-pytest-v1"
+                        else "submission policy"
+                    ),
+                    status=supervised.status,  # type: ignore[arg-type]
+                    category="test" if manifest.command == "python-pytest-v1" else "policy",
+                    summary=supervised.summary,
+                    duration_ms=duration,
+                ),
+            ]
+            evidence = AutomatedEvaluation(
+                assignment_id=assignment_id,
+                commit_sha=commit_sha,
+                checks=checks,
+                started_at=started,
+                completed_at=datetime.now(UTC),
+                runner="adaptive-tutor-github-hosted",
+                evaluator_key_id=manifest.key_id,
+                dispatch_nonce=dispatch_nonce,
+                manifest_digest=manifest_digest,
+                workflow_digest=workflow_digest,
+                workflow_commit=workflow_commit,
+                evaluator_ref=evaluator_ref,
+                evaluator_kit_digest=evaluator_kit_digest,
+                repository_id=repository_id,
+                artifact_digest="sha256:" + "0" * 64,
+            )
+            return evidence.with_computed_digest()
+
+
+def _write_evidence(destination: Path, evidence: AutomatedEvaluation) -> None:
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=destination.parent,
+            prefix=".adaptive-tutor-evidence-",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            json.dump(evidence.model_dump(mode="json"), temporary, sort_keys=True)
+            temporary.write("\n")
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        temporary_path.chmod(0o600)
+        os.replace(temporary_path, destination)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
 
 
 def evaluate_workspace_to_file(
@@ -244,6 +516,9 @@ def _run_supervised_tests(
     root: Path,
     output_path: Path,
     environment: dict[str, str],
+    *,
+    timeout_seconds: int = EVALUATION_TIMEOUT_SECONDS,
+    limits: PublicEvaluatorLimits | None = None,
 ) -> _SupervisedResult:
     bubblewrap = shutil.which("bwrap")
     if os.name != "posix" or bubblewrap is None:
@@ -272,14 +547,14 @@ def _run_supervised_tests(
                 stderr=subprocess.STDOUT,
                 pass_fds=(write_fd, nonce_read_fd),
                 start_new_session=True,
-                preexec_fn=_resource_limits,
+                preexec_fn=partial(_resource_limits, limits),
             )
             os.close(write_fd)
             write_fd = -1
             os.close(nonce_read_fd)
             nonce_read_fd = -1
             try:
-                process.wait(timeout=EVALUATION_TIMEOUT_SECONDS)
+                process.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 _kill_process_group(process.pid)
@@ -300,7 +575,7 @@ def _run_supervised_tests(
     if timed_out:
         return _SupervisedResult(
             status="error",
-            summary=f"Evaluation exceeded the {EVALUATION_TIMEOUT_SECONDS} second limit",
+            summary=f"Evaluation exceeded the {timeout_seconds} second limit",
         )
     if process is None or process.returncode != 0:
         return _SupervisedResult(
@@ -583,14 +858,18 @@ def _is_within(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def _resource_limits() -> None:
-    resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES))
+def _resource_limits(limits: PublicEvaluatorLimits | None = None) -> None:
+    timeout = limits.timeout_seconds if limits is not None else 60
+    output_bytes = limits.max_output_bytes if limits is not None else MAX_OUTPUT_BYTES
+    memory_bytes = (limits.memory_mb * 1024**2) if limits is not None else 1024**3
+    process_limit = limits.pids if limits is not None else 128
+    resource.setrlimit(resource.RLIMIT_CPU, (timeout, timeout))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (output_bytes, output_bytes))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     if hasattr(resource, "RLIMIT_AS"):
-        resource.setrlimit(resource.RLIMIT_AS, (1024**3, 1024**3))
+        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
     if hasattr(resource, "RLIMIT_NPROC"):
-        resource.setrlimit(resource.RLIMIT_NPROC, (128, 128))
+        resource.setrlimit(resource.RLIMIT_NPROC, (process_limit, process_limit))
     if hasattr(resource, "RLIMIT_NOFILE"):
         maximum = min(256, resource.getrlimit(resource.RLIMIT_NOFILE)[1])
         resource.setrlimit(resource.RLIMIT_NOFILE, (maximum, maximum))

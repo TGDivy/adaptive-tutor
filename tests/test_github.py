@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import zipfile
@@ -15,7 +16,7 @@ import pytest
 from adaptive_tutor.config import GitHubSettings
 from adaptive_tutor.errors import ConfigurationError, ExternalServiceError, SecurityError
 from adaptive_tutor.github import GitHubAuth, GitHubClient, InstallationToken
-from adaptive_tutor.security import MAX_ARTIFACT_BYTES
+from adaptive_tutor.security import MAX_ARTIFACT_BYTES, sha256_digest
 
 
 class StaticAuth:
@@ -149,8 +150,15 @@ def test_evaluator_run_requires_complete_trusted_provenance(
         "head_branch": "main",
         "head_sha": "f" * 40,
         "event": "workflow_dispatch",
-        "display_title": "Adaptive Tutor | A-0001 | assignment/0001-example | " + "a" * 40,
-        "repository": {"full_name": "owner/learning-workspace"},
+        "display_title": (
+            "Adaptive Tutor | A-0001 | "
+            + "a" * 40
+            + " | "
+            + "b" * 32
+            + " | "
+            + "d" * 40
+        ),
+        "repository": {"id": 123, "full_name": "owner/learning-workspace"},
         "head_repository": {"full_name": "owner/learning-workspace"},
     }
     if field is not None:
@@ -163,6 +171,7 @@ def test_evaluator_run_requires_complete_trusted_provenance(
                 200,
                 json={
                     "private": True,
+                    "id": 123,
                     "default_branch": "main",
                     "permissions": {"push": True},
                 },
@@ -172,7 +181,14 @@ def test_evaluator_run_requires_complete_trusted_provenance(
         if path.endswith("/actions/runs/77"):
             return httpx.Response(200, json=run)
         if "/contents/.github/workflows/adaptive-tutor-evaluate.yml" in path:
-            return httpx.Response(200, json={"sha": "trusted-workflow-sha"})
+            return httpx.Response(
+                200,
+                json={
+                    "type": "file",
+                    "encoding": "base64",
+                    "content": base64.b64encode(b"trusted workflow\n").decode(),
+                },
+            )
         return httpx.Response(404)
 
     client = GitHubClient(
@@ -183,9 +199,12 @@ def test_evaluator_run_requires_complete_trusted_provenance(
     if field is None:
         assert client.verify_evaluator_run(77) == {
             "assignment_id": "A-0001",
-            "branch": "assignment/0001-example",
             "commit_sha": "a" * 40,
+            "dispatch_nonce": "b" * 32,
+            "evaluator_ref": "d" * 40,
             "workflow_commit": "f" * 40,
+            "workflow_digest": sha256_digest("trusted workflow\n"),
+            "repository_id": 123,
         }
     else:
         with pytest.raises(SecurityError, match="Actions run"):
@@ -201,6 +220,7 @@ def test_evaluator_dispatch_uses_trusted_default_branch_and_typed_inputs() -> No
                 200,
                 json={
                     "private": True,
+                    "id": 123,
                     "default_branch": "main",
                     "permissions": {"push": True},
                 },
@@ -219,6 +239,10 @@ def test_evaluator_dispatch_uses_trusted_default_branch_and_typed_inputs() -> No
         assignment_id="A-0001",
         branch="assignment/0001-example",
         commit_sha="a" * 40,
+        dispatch_nonce="b" * 32,
+        manifest_digest="sha256:" + "c" * 64,
+        evaluator_ref="d" * 40,
+        evaluator_kit_digest="sha256:" + "e" * 64,
     )
     assert observed == {
         "ref": "main",
@@ -226,8 +250,72 @@ def test_evaluator_dispatch_uses_trusted_default_branch_and_typed_inputs() -> No
             "assignment_id": "A-0001",
             "branch": "assignment/0001-example",
             "commit_sha": "a" * 40,
+            "dispatch_nonce": "b" * 32,
+            "manifest_digest": "sha256:" + "c" * 64,
+            "evaluator_ref": "d" * 40,
+            "evaluator_kit_digest": "sha256:" + "e" * 64,
         },
     }
+
+
+def test_evaluator_control_is_bound_to_repository_workflow_and_key() -> None:
+    workflow = "name: protected evaluator\n"
+    public_key = "ed25519:" + "ab" * 32 + "\n"
+    key_id = hashlib.sha256(bytes.fromhex("ab" * 32)).hexdigest()[:16]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/repos/owner/learning-workspace":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 123,
+                    "full_name": "owner/learning-workspace",
+                    "private": True,
+                    "default_branch": "main",
+                    "permissions": {"push": True},
+                },
+            )
+        if path.endswith("/git/ref/heads/main"):
+            return httpx.Response(200, json={"object": {"sha": "f" * 40}})
+        if path.endswith("/contents/.github/workflows/adaptive-tutor-evaluate.yml"):
+            content = workflow
+        elif path.endswith("/contents/.adaptive-tutor/evaluator-signing.pub"):
+            content = public_key
+        else:
+            return httpx.Response(404)
+        return httpx.Response(
+            200,
+            json={
+                "type": "file",
+                "encoding": "base64",
+                "content": base64.b64encode(content.encode()).decode(),
+            },
+        )
+
+    client = GitHubClient(
+        GitHubSettings(owner="owner"),
+        auth=StaticAuth(),  # type: ignore[arg-type]
+        transport=httpx.MockTransport(handler),
+    )
+    assert client.verify_evaluator_control(
+        expected_repository_id=123,
+        expected_workflow_digest=sha256_digest(workflow),
+        expected_key_id=key_id,
+    ) == {
+        "repository_id": 123,
+        "repository_full_name": "owner/learning-workspace",
+        "default_branch": "main",
+        "workflow_commit": "f" * 40,
+        "workflow_digest": sha256_digest(workflow),
+        "evaluator_key_id": key_id,
+    }
+    with pytest.raises(SecurityError, match="workflow differs"):
+        client.verify_evaluator_control(
+            expected_repository_id=123,
+            expected_workflow_digest="sha256:" + "0" * 64,
+            expected_key_id=key_id,
+        )
 
 
 def test_repository_scope_must_be_private_and_writable() -> None:

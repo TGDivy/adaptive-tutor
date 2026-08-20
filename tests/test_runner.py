@@ -21,8 +21,16 @@ from adaptive_tutor.models import (
     ExerciseType,
     LearnerContext,
 )
-from adaptive_tutor.runner import evaluate_workspace_to_file
-from adaptive_tutor.trusted_bundles import TrustedBundleStore
+from adaptive_tutor.runner import (
+    evaluate_public_workspace_to_file,
+    evaluate_workspace_to_file,
+    evaluator_kit_digest,
+)
+from adaptive_tutor.trusted_bundles import (
+    TrustedBundleStore,
+    public_manifest_digest,
+    serialize_public_manifest,
+)
 
 
 def executable_bundle() -> AssignmentBundle:
@@ -118,6 +126,30 @@ def provision_bundle(
     return bundle_path, key_path, branch
 
 
+def provision_public_manifest(
+    bundle: AssignmentBundle,
+    root: Path,
+    workspace: Path,
+    *,
+    assignment_id: str = "A-0042",
+) -> tuple[Path, str, str]:
+    branch = f"assignment/{assignment_id.removeprefix('A-')}-{bundle.slug}"
+    store = TrustedBundleStore(root / "state")
+    manifest = store.public_manifest(
+        assignment_id=assignment_id,
+        branch=branch,
+        bundle=bundle,
+        evaluator_kit_digest=evaluator_kit_digest(),
+    )
+    manifest_path = workspace / ".adaptive-tutor" / "evaluator-manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(serialize_public_manifest(manifest), encoding="utf-8")
+    key_path = root / "control" / "evaluator-signing.pub"
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_text(store.public_verification_key(), encoding="ascii")
+    return key_path, branch, public_manifest_digest(manifest)
+
+
 def solved_source(bundle: AssignmentBundle) -> tuple[str, str]:
     files = {item.path: item for item in bundle.files}
     replacements = bundle.hidden_evaluator["reference_replacements"]
@@ -177,6 +209,90 @@ def test_hidden_cli_evaluator_writes_verified_credential_free_evidence(
     assert not bundle_path.exists()
     assert not key_path.exists()
     assert "passed" in result.output
+
+
+def test_public_cli_evaluator_writes_fully_bound_hosted_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = executable_bundle()
+    workspace = tmp_path / "workspace"
+    evidence_path = tmp_path / "evidence" / "adaptive-tutor-evidence.json"
+    write_solved_workspace(bundle, workspace)
+    key_path, branch, manifest_digest = provision_public_manifest(bundle, tmp_path, workspace)
+    kit_digest = evaluator_kit_digest()
+    monkeypatch.setenv("GITHUB_TOKEN", "must-not-enter-tests")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "evaluate-public",
+            "--verification-key",
+            str(key_path),
+            "--workspace",
+            str(workspace),
+            "--output",
+            str(evidence_path),
+            "--assignment-id",
+            "A-0042",
+            "--branch",
+            branch,
+            "--commit-sha",
+            "a" * 40,
+            "--dispatch-nonce",
+            "b" * 32,
+            "--manifest-digest",
+            manifest_digest,
+            "--evaluator-kit-digest",
+            kit_digest,
+            "--evaluator-ref",
+            "e" * 40,
+            "--workflow-digest",
+            "sha256:" + "c" * 64,
+            "--workflow-commit",
+            "d" * 40,
+            "--repository-id",
+            "12345",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    evidence = EvidenceNormalizer.parse(evidence_path.read_bytes())
+    assert evidence.learner_passed is True
+    assert evidence.runner == "adaptive-tutor-github-hosted"
+    assert evidence.dispatch_nonce == "b" * 32
+    assert evidence.manifest_digest == manifest_digest
+    assert evidence.workflow_digest == "sha256:" + "c" * 64
+    assert evidence.workflow_commit == "d" * 40
+    assert evidence.evaluator_ref == "e" * 40
+    assert evidence.evaluator_kit_digest == kit_digest
+    assert evidence.repository_id == 12345
+    assert evidence.artifact_digest == evidence.computed_digest()
+
+
+def test_public_evaluator_rejects_modified_public_tests(tmp_path: Path) -> None:
+    bundle = executable_bundle()
+    workspace = tmp_path / "workspace"
+    write_solved_workspace(bundle, workspace)
+    key_path, branch, manifest_digest = provision_public_manifest(bundle, tmp_path, workspace)
+    test_path = next(item.path for item in bundle.files if item.role == "public_test")
+    (workspace / test_path).write_text("def test_forged():\n    assert True\n", encoding="utf-8")
+
+    with pytest.raises(SecurityError, match="Public test was modified"):
+        evaluate_public_workspace_to_file(
+            verification_key_path=key_path,
+            workspace=workspace,
+            output_path=tmp_path / "evidence.json",
+            assignment_id="A-0042",
+            branch=branch,
+            commit_sha="a" * 40,
+            dispatch_nonce="b" * 32,
+            expected_manifest_digest=manifest_digest,
+            expected_evaluator_kit_digest=evaluator_kit_digest(),
+            evaluator_ref="e" * 40,
+            workflow_digest="sha256:" + "c" * 64,
+            workflow_commit="d" * 40,
+            repository_id=12345,
+        )
 
 
 def test_evaluator_requires_trusted_input_and_output_outside_workspace(

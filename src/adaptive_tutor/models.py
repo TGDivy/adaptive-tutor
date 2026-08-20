@@ -258,6 +258,13 @@ class AutomatedEvaluation(StrictModel):
     runner: str
     evaluator_binding: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     evaluator_key_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{16}$")
+    dispatch_nonce: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+    manifest_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    workflow_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    workflow_commit: str | None = Field(default=None, pattern=r"^[0-9a-f]{40,64}$")
+    evaluator_ref: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    evaluator_kit_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    repository_id: int | None = Field(default=None, ge=1)
     artifact_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
     @property

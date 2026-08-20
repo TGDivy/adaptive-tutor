@@ -25,7 +25,17 @@ from adaptive_tutor.models import (
     QualitativeEvaluation,
 )
 from adaptive_tutor.orchestrator import TutorOrchestrator
-from adaptive_tutor.trusted_bundles import TrustedBundleStore
+from adaptive_tutor.runner import evaluator_kit_digest
+from adaptive_tutor.trusted_bundles import (
+    PublicEvaluatorManifest,
+    TrustedBundleStore,
+    public_manifest_digest,
+)
+
+WORKFLOW_DIGEST = "sha256:" + "c" * 64
+WORKFLOW_COMMIT = "f" * 40
+EVALUATOR_REF = "e" * 40
+REPOSITORY_ID = 12345
 
 
 class ControlledGitHub:
@@ -41,11 +51,27 @@ class ControlledGitHub:
         self.tamper_evaluator_binding = False
         self.evaluator_error = False
         self.preflight_failure = False
+        self.control: dict[str, Any] = {}
 
     def preflight_assignment_publication(self) -> dict[str, Any]:
         if self.preflight_failure:
             raise ConfigurationError("GitHub owner and workspace repository are required")
         return {"private": True, "permissions": {"push": True}}
+
+    def verify_evaluator_control(self, **kwargs: Any) -> dict[str, str | int]:
+        assert kwargs == {
+            "expected_repository_id": REPOSITORY_ID,
+            "expected_workflow_digest": WORKFLOW_DIGEST,
+            "expected_key_id": self.control["evaluator_key_id"],
+        }
+        return {
+            "repository_id": REPOSITORY_ID,
+            "repository_full_name": "owner/learning-workspace",
+            "default_branch": "main",
+            "workflow_commit": WORKFLOW_COMMIT,
+            "workflow_digest": WORKFLOW_DIGEST,
+            "evaluator_key_id": self.control["evaluator_key_id"],
+        }
 
     def publish_assignment(self, **kwargs: Any) -> dict[str, Any]:
         metadata = json.loads(kwargs["files"][".adaptive-tutor/assignment.json"])
@@ -71,9 +97,8 @@ class ControlledGitHub:
     def download_evidence(self, run_id: int) -> bytes:
         commit_sha = {700: "a" * 40, 701: "b" * 40}[run_id]
         now = datetime.now(UTC)
-        assert self.trusted_spool is not None
-        data_dir = self.trusted_spool.parent.parent
-        trusted = TrustedBundleStore(data_dir).load("A-0001")
+        dispatch = self.dispatches[0 if run_id == 700 else -1]
+        metadata = json.loads(self.files[".adaptive-tutor/assignment.json"])
         evidence = AutomatedEvaluation(
             assignment_id="A-0001",
             commit_sha=commit_sha,
@@ -92,10 +117,18 @@ class ControlledGitHub:
             started_at=now,
             completed_at=now,
             runner="github-actions",
-            evaluator_binding=(
-                "sha256:" + "0" * 64 if self.tamper_evaluator_binding else trusted.binding_digest
+            evaluator_key_id=metadata["evaluator_key_id"],
+            dispatch_nonce=dispatch["dispatch_nonce"],
+            manifest_digest=(
+                "sha256:" + "0" * 64
+                if self.tamper_evaluator_binding
+                else dispatch["manifest_digest"]
             ),
-            evaluator_key_id=trusted.key_id,
+            workflow_digest=WORKFLOW_DIGEST,
+            workflow_commit=WORKFLOW_COMMIT,
+            evaluator_ref=dispatch["evaluator_ref"],
+            evaluator_kit_digest=dispatch["evaluator_kit_digest"],
+            repository_id=REPOSITORY_ID,
             artifact_digest="sha256:"
             + hashlib.sha256(f"controlled:{commit_sha}".encode()).hexdigest(),
         ).with_computed_digest()
@@ -104,14 +137,18 @@ class ControlledGitHub:
     def dispatch_evaluator(self, **kwargs: str) -> None:
         self.dispatches.append(dict(kwargs))
 
-    def verify_evaluator_run(self, run_id: int, **kwargs: Any) -> dict[str, str]:
+    def verify_evaluator_run(self, run_id: int, **kwargs: Any) -> dict[str, str | int]:
         commit_sha = {700: "a" * 40, 701: "b" * 40}[run_id]
+        dispatch = self.dispatches[0 if run_id == 700 else -1]
         assert kwargs == {}
         return {
             "assignment_id": "A-0001",
-            "branch": "assignment/0001-bounded-work-queue",
             "commit_sha": commit_sha,
-            "workflow_commit": "f" * 40,
+            "dispatch_nonce": dispatch["dispatch_nonce"],
+            "evaluator_ref": dispatch["evaluator_ref"],
+            "workflow_commit": WORKFLOW_COMMIT,
+            "workflow_digest": WORKFLOW_DIGEST,
+            "repository_id": REPOSITORY_ID,
         }
 
     def post_review(self, pull_number: int, body: str, **_: Any) -> int:
@@ -152,6 +189,38 @@ def fixture() -> QualitativeEvaluation:
     )
 
 
+def configure_evaluator_control(
+    database: Database,
+    settings: TutorSettings,
+    github: ControlledGitHub,
+) -> None:
+    key_text = TrustedBundleStore(settings.data_dir).public_verification_key().strip()
+    key_id = hashlib.sha256(bytes.fromhex(key_text.removeprefix("ed25519:"))).hexdigest()[:16]
+    configured_at = datetime.now(UTC).isoformat()
+    database.execute(
+        """
+        INSERT INTO evaluator_control_planes(
+            repository_id, repository_full_name, default_branch, workflow_path,
+            workflow_commit, workflow_digest, evaluator_ref, evaluator_kit_digest,
+            evaluator_key_id, configured_at, verified_at
+        ) VALUES (?, ?, 'main', '.github/workflows/adaptive-tutor-evaluate.yml',
+                  ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            REPOSITORY_ID,
+            "owner/learning-workspace",
+            WORKFLOW_COMMIT,
+            WORKFLOW_DIGEST,
+            EVALUATOR_REF,
+            evaluator_kit_digest(),
+            key_id,
+            configured_at,
+            configured_at,
+        ),
+    )
+    github.control = {"evaluator_key_id": key_id}
+
+
 def test_controlled_end_to_end_assignment_evaluation_and_next_selection(
     initialized: tuple[Database, object], tmp_path: Path
 ) -> None:
@@ -163,6 +232,7 @@ def test_controlled_end_to_end_assignment_evaluation_and_next_selection(
         github=GitHubSettings(owner="owner", workspace_repo="learning-workspace"),
     )
     github.trusted_spool = settings.data_dir / "trusted-evaluators" / "spool"
+    configure_evaluator_control(database, settings, github)
     orchestrator = TutorOrchestrator(
         settings,
         database,
@@ -175,11 +245,16 @@ def test_controlled_end_to_end_assignment_evaluation_and_next_selection(
     assert "reference/bounded_queue.py" not in github.files
     metadata = json.loads(github.files[".adaptive-tutor/assignment.json"])
     envelope = TrustedBundleStore(settings.data_dir).load("A-0001")
+    manifest = PublicEvaluatorManifest.model_validate_json(
+        github.files[".adaptive-tutor/evaluator-manifest.json"]
+    )
     assert metadata["id"] == envelope.assignment_id
     assert metadata["branch"] == envelope.branch
-    assert metadata["evaluator_binding"] == envelope.binding_digest
+    assert metadata["evaluator_manifest_digest"] == public_manifest_digest(manifest)
     assert metadata["evaluator_key_id"] == envelope.key_id
+    assert metadata["evaluator_kit_digest"] == evaluator_kit_digest()
     assert "hidden_evaluator" not in github.files[".adaptive-tutor/assignment.json"]
+    assert "hidden_evaluator" not in github.files[".adaptive-tutor/evaluator-manifest.json"]
     branch = created["branch_name"]
     orchestrator.record_submission(
         {
@@ -204,9 +279,18 @@ def test_controlled_end_to_end_assignment_evaluation_and_next_selection(
             "head_commit": {"message": "solution\n\nConfidence: 85"},
         }
     )
-    assert github.dispatches == [
-        {"assignment_id": "A-0001", "branch": branch, "commit_sha": "a" * 40}
-    ]
+    assert len(github.dispatches) == 1
+    first_dispatch = github.dispatches[0]
+    assert first_dispatch == {
+        "assignment_id": "A-0001",
+        "branch": branch,
+        "commit_sha": "a" * 40,
+        "dispatch_nonce": first_dispatch["dispatch_nonce"],
+        "manifest_digest": metadata["evaluator_manifest_digest"],
+        "evaluator_ref": EVALUATOR_REF,
+        "evaluator_kit_digest": evaluator_kit_digest(),
+    }
+    assert len(first_dispatch["dispatch_nonce"]) == 32
     orchestrator.process_ci_result(
         {
             "action": "completed",
@@ -241,11 +325,17 @@ def test_controlled_end_to_end_assignment_evaluation_and_next_selection(
             "head_commit": {"message": "stage two\n\nConfidence: 88"},
         }
     )
-    assert github.dispatches[-1] == {
+    second_dispatch = github.dispatches[-1]
+    assert second_dispatch == {
         "assignment_id": "A-0001",
         "branch": branch,
         "commit_sha": "b" * 40,
+        "dispatch_nonce": second_dispatch["dispatch_nonce"],
+        "manifest_digest": metadata["evaluator_manifest_digest"],
+        "evaluator_ref": EVALUATOR_REF,
+        "evaluator_kit_digest": evaluator_kit_digest(),
     }
+    assert second_dispatch["dispatch_nonce"] != first_dispatch["dispatch_nonce"]
     orchestrator.process_ci_result(
         {
             "action": "completed",
@@ -298,6 +388,7 @@ def test_assignment_publication_resumes_without_generating_a_duplicate(
         github=GitHubSettings(owner="owner", workspace_repo="learning-workspace"),
     )
     github.trusted_spool = settings.data_dir / "trusted-evaluators" / "spool"
+    configure_evaluator_control(database, settings, github)
     orchestrator = TutorOrchestrator(
         settings,
         database,
@@ -360,6 +451,7 @@ def test_ci_evidence_must_match_the_trusted_spool_identity(
         github=GitHubSettings(owner="owner", workspace_repo="learning-workspace"),
     )
     github.trusted_spool = settings.data_dir / "trusted-evaluators" / "spool"
+    configure_evaluator_control(database, settings, github)
     orchestrator = TutorOrchestrator(
         settings,
         database,
@@ -399,6 +491,7 @@ def test_evaluator_operational_error_never_becomes_learner_evidence(
         github=GitHubSettings(owner="owner", workspace_repo="learning-workspace"),
     )
     github.trusted_spool = settings.data_dir / "trusted-evaluators" / "spool"
+    configure_evaluator_control(database, settings, github)
     orchestrator = TutorOrchestrator(
         settings,
         database,
@@ -443,6 +536,7 @@ def test_review_delivery_resumes_after_grading_or_delivery_crash(
         github=GitHubSettings(owner="owner", workspace_repo="learning-workspace"),
     )
     github.trusted_spool = settings.data_dir / "trusted-evaluators" / "spool"
+    configure_evaluator_control(database, settings, github)
     orchestrator = TutorOrchestrator(
         settings,
         database,

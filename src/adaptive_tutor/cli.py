@@ -44,7 +44,7 @@ from .learner import LearnerModel
 from .models import AssignmentBundle, LearnerContext
 from .orchestrator import TutorOrchestrator
 from .reporting import ReportDocument, ReportService
-from .runner import evaluate_workspace_to_file
+from .runner import evaluate_public_workspace_to_file, evaluate_workspace_to_file
 from .scheduler import AdaptiveScheduler
 from .state import StatusService
 from .trusted_bundles import TrustedBundleStore
@@ -759,6 +759,51 @@ def evaluate_command(
     console.print(f"Deterministic evaluation {state}; evidence written to {output}")
 
 
+@app.command("evaluate-public", hidden=True)
+def evaluate_public_command(
+    verification_key: Path = typer.Option(
+        ..., exists=True, dir_okay=False, help="Protected evaluator verification key."
+    ),
+    workspace: Path = typer.Option(
+        ..., exists=True, file_okay=False, help="Untrusted learner checkout."
+    ),
+    output: Path = typer.Option(
+        ..., dir_okay=False, help="Evidence path outside the learner checkout."
+    ),
+    assignment_id: str = typer.Option(..., help="Assignment identifier."),
+    branch: str = typer.Option(..., help="Assignment branch."),
+    commit_sha: str = typer.Option(..., help="Exact evaluated learner commit."),
+    dispatch_nonce: str = typer.Option(..., help="One-attempt dispatch nonce."),
+    manifest_digest: str = typer.Option(..., help="Expected signed manifest digest."),
+    evaluator_kit_digest: str = typer.Option(..., help="Expected evaluator-kit digest."),
+    evaluator_ref: str = typer.Option(..., help="Exact Adaptive Tutor source commit."),
+    workflow_digest: str = typer.Option(..., help="Protected workflow content digest."),
+    workflow_commit: str = typer.Option(..., help="Protected workflow commit."),
+    repository_id: int = typer.Option(..., min=1, help="Immutable GitHub repository ID."),
+) -> None:
+    """Run the signed public evaluator on a GitHub-hosted runner."""
+    try:
+        evidence = evaluate_public_workspace_to_file(
+            verification_key_path=verification_key,
+            workspace=workspace,
+            output_path=output,
+            assignment_id=assignment_id,
+            branch=branch,
+            commit_sha=commit_sha,
+            dispatch_nonce=dispatch_nonce,
+            expected_manifest_digest=manifest_digest,
+            expected_evaluator_kit_digest=evaluator_kit_digest,
+            evaluator_ref=evaluator_ref,
+            workflow_digest=workflow_digest,
+            workflow_commit=workflow_commit,
+            repository_id=repository_id,
+        )
+    except (TutorError, ValueError, OSError) as exc:
+        _abort(str(exc))
+    state = "passed" if evidence.learner_passed else "failed"
+    console.print(f"Public deterministic evaluation {state}; evidence written to {output}")
+
+
 @app.command("stage-evaluator", hidden=True)
 def stage_evaluator_command(
     ctx: typer.Context,
@@ -793,7 +838,6 @@ def stage_evaluator_command(
             github.close()
         if (
             run_identity["assignment_id"] != assignment_id
-            or run_identity["branch"] != branch
             or run_identity["commit_sha"] != commit_sha
         ):
             raise ValueError("Queued evaluator run does not match the requested assignment")
