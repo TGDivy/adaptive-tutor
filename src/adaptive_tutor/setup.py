@@ -17,8 +17,8 @@ from pydantic import Field, field_validator
 from .codex import CodexRunner
 from .config import TutorSettings, update_setup_config
 from .db import Database
-from .errors import ConfigurationError, ExternalServiceError, TutorError
-from .github_setup import GitHubCLIBootstrap
+from .errors import ConfigurationError, ExternalServiceError, SecurityError, TutorError
+from .github_setup import EvaluatorControlProvisioner, GitHubCLIBootstrap
 from .goals import GoalService
 from .models import StrictModel
 from .security import redact
@@ -364,8 +364,7 @@ class LiveSetupExecutor:
             return StepOutcome.wait(
                 f"GitHub CLI could not provision the private workspace: {redact(str(exc))}",
                 action=(
-                    "Run gh auth login --hostname github.com, verify repository access, "
-                    "then resume"
+                    "Run gh auth login --hostname github.com, verify repository access, then resume"
                 ),
             )
         if self.settings.github.owner != repository.owner:
@@ -407,16 +406,39 @@ class LiveSetupExecutor:
         )
 
     def _evaluator_controls(self, run: SetupRun) -> StepOutcome:
-        row = self.database.fetch_one(
-            "SELECT repository_id, evaluator_key_id FROM evaluator_control_planes LIMIT 1"
-        )
-        if row is None:
+        gh = shutil.which("gh")
+        if not gh:
             return StepOutcome.wait(
-                "Protected evaluator workflow and signing key are not provisioned",
-                action="Complete GitHub App installation, then run adaptive-tutor setup resume",
+                "GitHub CLI is required to install protected evaluator controls",
+                action="Install gh, authenticate as the repository owner, then resume setup",
             )
+        try:
+            row = EvaluatorControlProvisioner(
+                self.settings,
+                self.database,
+                self.config_path,
+                bootstrap=GitHubCLIBootstrap(gh),
+            ).ensure(run)
+        except ConfigurationError as exc:
+            return StepOutcome.wait(
+                str(exc),
+                action=(
+                    "Set the exact public source commit with --evaluator-ref or "
+                    "ADAPTIVE_TUTOR_SOURCE_REVISION, then resume"
+                ),
+            )
+        except ExternalServiceError as exc:
+            return StepOutcome.wait(
+                f"GitHub could not install protected evaluator controls: {redact(str(exc))}",
+                action=(
+                    "Verify gh owner authentication and private-repository branch-protection "
+                    "support, then resume"
+                ),
+            )
+        except SecurityError as exc:
+            return StepOutcome("failed_terminal", redact(str(exc)))
         return StepOutcome.complete(
-            "Protected evaluator controls are recorded",
+            "Protected evaluator workflow and signing key are verified",
             external_ids={
                 "repository_id": int(row["repository_id"]),
                 "evaluator_key_id": str(row["evaluator_key_id"]),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import stat
 import subprocess
@@ -18,7 +19,15 @@ from adaptive_tutor.curriculum import CurriculumLoader, bundled_curriculum_path
 from adaptive_tutor.dashboard import create_app
 from adaptive_tutor.db import Database
 from adaptive_tutor.errors import ConfigurationError, SecurityError
-from adaptive_tutor.github_setup import GitHubAppSetupService, GitHubCLIBootstrap
+from adaptive_tutor.github_setup import (
+    EvaluatorControlProvisioner,
+    GitHubAppSetupService,
+    GitHubCLIBootstrap,
+    InstalledEvaluatorControls,
+    PublicEvaluatorSource,
+)
+from adaptive_tutor.runner import evaluator_kit_digest
+from adaptive_tutor.security import sha256_digest
 from adaptive_tutor.setup import SetupRun, SetupService, StepOutcome
 
 
@@ -150,6 +159,138 @@ def test_github_cli_bootstrap_rejects_public_workspace(
         GitHubCLIBootstrap("/usr/bin/gh").ensure_private_repository(
             "example-owner", "learning-workspace"
         )
+
+
+def test_github_cli_installs_and_reads_back_protected_evaluator_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = "name: protected evaluator\n"
+    verification_key = "ed25519:" + "ab" * 32 + "\n"
+    uploaded: dict[str, dict[str, Any]] = {}
+    protection: dict[str, Any] = {}
+
+    def run(command: list[str], **options: Any) -> subprocess.CompletedProcess[str]:
+        arguments = command[1:]
+        if arguments == ["api", "repos/example-owner/learning-workspace"]:
+            payload = {
+                "id": 9876,
+                "full_name": "example-owner/learning-workspace",
+                "private": True,
+                "default_branch": "main",
+            }
+            return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+        if "contents/.github/workflows/adaptive-tutor-evaluate.yml" in " ".join(arguments):
+            if "PUT" in arguments:
+                uploaded["workflow"] = json.loads(options["input"])
+                return subprocess.CompletedProcess(command, 0, "{}", "")
+            return subprocess.CompletedProcess(command, 1, "", "HTTP 404")
+        if "contents/.adaptive-tutor/evaluator-signing.pub" in " ".join(arguments):
+            if "PUT" in arguments:
+                uploaded["key"] = json.loads(options["input"])
+                return subprocess.CompletedProcess(command, 0, "{}", "")
+            return subprocess.CompletedProcess(command, 1, "", "HTTP 404")
+        if arguments[-2:] == ["--input", "-"] and "protection" in arguments[-3]:
+            protection.update(json.loads(options["input"]))
+            return subprocess.CompletedProcess(command, 0, "{}", "")
+        if arguments == [
+            "api",
+            "repos/example-owner/learning-workspace/git/ref/heads/main",
+        ]:
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps({"object": {"sha": "f" * 40}}), ""
+            )
+        if arguments == [
+            "api",
+            "repos/example-owner/learning-workspace/branches/main/protection",
+        ]:
+            response = {
+                "required_pull_request_reviews": {"required_approving_review_count": 1},
+                "enforce_admins": {"enabled": True},
+                "allow_force_pushes": {"enabled": False},
+                "allow_deletions": {"enabled": False},
+            }
+            return subprocess.CompletedProcess(command, 0, json.dumps(response), "")
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr("adaptive_tutor.github_setup.subprocess.run", run)
+    installed = GitHubCLIBootstrap("/usr/bin/gh").install_evaluator_controls(
+        owner="example-owner",
+        repository="learning-workspace",
+        workflow=workflow,
+        verification_key=verification_key,
+    )
+
+    assert installed.workflow_commit == "f" * 40
+    assert installed.branch_protected is True
+    assert base64.b64decode(uploaded["workflow"]["content"]).decode() == workflow
+    assert base64.b64decode(uploaded["key"]["content"]).decode() == verification_key
+    assert protection["enforce_admins"] is True
+    assert protection["allow_force_pushes"] is False
+    assert protection["required_pull_request_reviews"]["required_approving_review_count"] == 1
+
+
+def test_evaluator_control_provisioner_binds_remote_source_and_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path, settings, database, run = configured_setup(tmp_path, monkeypatch)
+    settings.github.evaluator_ref = "e" * 40
+    workflow = "name: protected evaluator\n"
+
+    class Bootstrap:
+        def public_evaluator_source(self, revision: str) -> PublicEvaluatorSource:
+            assert revision == "e" * 40
+            return PublicEvaluatorSource(revision, workflow, evaluator_kit_digest())
+
+        def install_evaluator_controls(self, **values: Any) -> InstalledEvaluatorControls:
+            assert values["owner"] == "example-owner"
+            assert values["repository"] == "learning-workspace"
+            assert values["workflow"] == workflow
+            assert str(values["verification_key"]).startswith("ed25519:")
+            return InstalledEvaluatorControls(
+                repository_id=9876,
+                repository_full_name="example-owner/learning-workspace",
+                default_branch="main",
+                workflow_commit="f" * 40,
+                branch_protected=True,
+            )
+
+    class InstalledAppClient:
+        def __init__(self, github: Any) -> None:
+            assert github.evaluator_ref == "e" * 40
+
+        def verify_evaluator_control(self, **expected: Any) -> dict[str, str | int]:
+            assert expected["expected_repository_id"] == 9876
+            assert expected["expected_workflow_digest"] == sha256_digest(workflow)
+            return {
+                "repository_id": 9876,
+                "repository_full_name": "example-owner/learning-workspace",
+                "default_branch": "main",
+                "workflow_commit": "f" * 40,
+                "workflow_digest": sha256_digest(workflow),
+                "evaluator_key_id": str(expected["expected_key_id"]),
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("adaptive_tutor.github_setup.GitHubClient", InstalledAppClient)
+    stored = EvaluatorControlProvisioner(
+        settings,
+        database,
+        config_path,
+        bootstrap=Bootstrap(),  # type: ignore[arg-type]
+    ).ensure(run)
+
+    assert stored["repository_id"] == 9876
+    assert stored["workflow_digest"] == sha256_digest(workflow)
+    assert stored["evaluator_ref"] == "e" * 40
+    assert stored["evaluator_kit_digest"] == evaluator_kit_digest()
+    assert len(str(stored["evaluator_key_id"])) == 16
+    assert (
+        stat.S_IMODE((settings.data_dir / "trusted-evaluators" / "signing.key").stat().st_mode)
+        == 0o600
+    )
 
 
 def test_github_app_manifest_flow_persists_owner_only_credentials_and_scope(

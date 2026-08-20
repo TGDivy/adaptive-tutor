@@ -108,6 +108,7 @@ def test_setup_config_and_secret_updates_are_atomic_and_private(tmp_path: Path) 
         installation_id=456,
         private_key_path=data_dir / "github-app.pem",
         codex_enabled=True,
+        evaluator_ref="a" * 40,
     )
     upsert_secret(secrets_path, "ADAPTIVE_TUTOR_WEBHOOK_SECRET", "rotated-webhook-value")
 
@@ -115,6 +116,7 @@ def test_setup_config_and_secret_updates_are_atomic_and_private(tmp_path: Path) 
     assert settings.github.owner == "example-owner"
     assert settings.github.app_id == 123
     assert settings.github.installation_id == 456
+    assert settings.github.evaluator_ref == "a" * 40
     assert settings.codex.enabled is True
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
     assert stat.S_IMODE(secrets_path.stat().st_mode) == 0o600

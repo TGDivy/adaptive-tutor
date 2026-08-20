@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import tempfile
 from pathlib import Path
@@ -34,6 +35,7 @@ class GitHubSettings(StrictModel):
     token_env: str = "ADAPTIVE_TUTOR_GITHUB_TOKEN"  # noqa: S105 - environment name
     webhook_secret_env: str = "ADAPTIVE_TUTOR_WEBHOOK_SECRET"  # noqa: S105
     webhook_url: str | None = None
+    evaluator_ref: str | None = None
 
     @field_validator("api_url")
     @classmethod
@@ -51,6 +53,13 @@ class GitHubSettings(StrictModel):
         if not value.startswith("https://"):
             raise ValueError("webhook_url must use HTTPS")
         return value.rstrip("/")
+
+    @field_validator("evaluator_ref")
+    @classmethod
+    def immutable_evaluator_ref(cls, value: str | None) -> str | None:
+        if value is not None and re.fullmatch(r"[0-9a-f]{40}", value) is None:
+            raise ValueError("evaluator_ref must be an exact 40-character commit")
+        return value
 
 
 class CodexSettings(StrictModel):
@@ -158,6 +167,7 @@ def write_initial_config(
     installation_id: int | None = None,
     private_key_path: Path | None = None,
     webhook_url: str | None = None,
+    evaluator_ref: str | None = None,
     server_host: str = "127.0.0.1",
 ) -> tuple[Path, Path]:
     config_path = (path or DEFAULT_CONFIG_PATH).expanduser()
@@ -185,6 +195,7 @@ def write_initial_config(
             if private_key_path
             else None,
             "webhook_url": webhook_url,
+            "evaluator_ref": evaluator_ref,
         },
         "codex": {"command": "codex", "enabled": False, "sandbox": "read-only"},
         "server": {
@@ -227,6 +238,7 @@ def update_setup_config(
     installation_id: int | None = None,
     private_key_path: Path | None = None,
     codex_enabled: bool | None = None,
+    evaluator_ref: str | None = None,
 ) -> TutorSettings:
     """Atomically update non-secret setup fields in an existing private config."""
     config_path = path.expanduser().resolve()
@@ -248,6 +260,8 @@ def update_setup_config(
         github["installation_id"] = installation_id
     if private_key_path is not None:
         github["private_key_path"] = str(private_key_path.expanduser().resolve())
+    if evaluator_ref is not None:
+        github["evaluator_ref"] = evaluator_ref
     if codex_enabled is not None:
         payload.setdefault("codex", {})["enabled"] = codex_enabled
     settings = TutorSettings.model_validate(payload)

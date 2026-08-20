@@ -109,6 +109,9 @@ def init_command(
     installation_id: int | None = typer.Option(None, help="GitHub App installation identifier."),
     private_key: Path | None = typer.Option(None, help="Owner-only GitHub App private-key file."),
     webhook_url: str | None = typer.Option(None, help="Public HTTPS service base URL."),
+    evaluator_ref: str | None = typer.Option(
+        None, help="Exact public Adaptive Tutor commit; normally detected automatically."
+    ),
     server_host: str = typer.Option(
         "127.0.0.1",
         help="Dashboard bind host; use 0.0.0.0 only behind a loopback-bound container port.",
@@ -130,6 +133,7 @@ def init_command(
             installation_id=installation_id,
             private_key_path=private_key,
             webhook_url=webhook_url,
+            evaluator_ref=evaluator_ref,
             server_host=server_host,
         )
         settings = load_settings(config_path, require_file=True)
@@ -169,6 +173,9 @@ def setup_command(
     workspace_repo: str | None = typer.Option(
         None, help="Private learner repository; defaults to learning-workspace."
     ),
+    evaluator_ref: str | None = typer.Option(
+        None, help="Exact public Adaptive Tutor commit; normally detected automatically."
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ) -> None:
     """Start guided setup when no setup subcommand is supplied."""
@@ -186,6 +193,7 @@ def setup_command(
                 public_url=public_url,
                 github_owner=github_owner,
                 workspace_repo=workspace_repo,
+                evaluator_ref=evaluator_ref,
             )
             if data_dir is not None and data_dir.expanduser().resolve() != current.data_dir:
                 raise ValueError("--data-dir cannot change an existing setup's private state")
@@ -196,6 +204,7 @@ def setup_command(
                 github_owner=github_owner or "",
                 workspace_repo=workspace_repo or "learning-workspace",
                 webhook_url=public_url,
+                evaluator_ref=evaluator_ref,
             )
             settings = load_settings(config_path, require_file=True)
         database = _bootstrap(settings, force_load=True)
