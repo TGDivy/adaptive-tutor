@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
-from adaptive_tutor.config import load_settings, write_initial_config
+from adaptive_tutor.config import load_settings, update_setup_config, write_initial_config
 from adaptive_tutor.curriculum import CurriculumLoader, bundled_curriculum_path
 from adaptive_tutor.dashboard import create_app
 from adaptive_tutor.db import Database
@@ -351,6 +351,13 @@ def test_github_app_manifest_flow_persists_owner_only_credentials_and_scope(
         "metadata": "read",
         "pull_requests": "write",
     }
+    assert set(manifest["default_events"]) == {
+        "check_suite",
+        "issue_comment",
+        "pull_request",
+        "push",
+        "workflow_run",
+    }
 
     installation_url = service.complete_manifest(
         run,
@@ -380,6 +387,10 @@ def test_github_app_manifest_flow_persists_owner_only_credentials_and_scope(
                 "permissions": {"push": True},
             }
 
+        def verify_app_configuration(self, callback_url: str) -> dict[str, Any]:
+            observed["callback_url"] = callback_url
+            return {"app_id": 12345, "active": True}
+
         def verify_app_installation_scope(self) -> dict[str, Any]:
             return {
                 "repository_id": 9876,
@@ -398,7 +409,11 @@ def test_github_app_manifest_flow_persists_owner_only_credentials_and_scope(
     service.close()
 
     assert repository["id"] == 9876
-    assert observed == {"app_id": 12345, "installation_id": 67890}
+    assert observed == {
+        "app_id": 12345,
+        "installation_id": 67890,
+        "callback_url": "https://tutor.example.test/webhooks/github",
+    }
     reloaded = load_settings(config_path, require_file=True)
     assert reloaded.github.app_id == 12345
     assert reloaded.github.installation_id == 67890
@@ -424,9 +439,34 @@ def test_authenticated_setup_page_posts_manifest_to_github(
         status_page = client.get("/setup")
         assert status_page.status_code == 200
         assert "Setup required" in status_page.text
+        update_setup_config(
+            config_path,
+            public_url="https://tutor.example.test",
+            github_owner="example-org",
+        )
+        database.execute(
+            """
+            UPDATE setup_steps SET external_ids_json=?
+            WHERE run_id=(SELECT id FROM setup_runs ORDER BY created_at DESC LIMIT 1)
+              AND name='github_repository'
+            """,
+            (
+                json.dumps(
+                    {
+                        "repository_id": 9876,
+                        "owner_type": "Organization",
+                        "repository": "example-org/learning-workspace",
+                    }
+                ),
+            ),
+        )
         app_page = client.get("/setup/github-app")
         assert app_page.status_code == 200
-        assert 'action="https://github.com/settings/apps/new?state=' in app_page.text
+        assert (
+            'action="https://github.com/organizations/example-org/settings/apps/new?state='
+            in app_page.text
+        )
+        assert settings.github.owner == "example-org"
         assert 'name="manifest"' in app_page.text
         assert "webhook_secret" not in app_page.text
         assert (

@@ -79,8 +79,27 @@ def validate_compose(payload: dict[str, Any], failures: list[str]) -> None:
     require("grader.env" in grader_env, "grader-only environment file is missing", failures)
     grader_volumes = grader.get("volumes", []) if isinstance(grader, dict) else []
     worker_volumes = worker.get("volumes", []) if isinstance(worker, dict) else []
+    tutor_volumes = tutor.get("volumes", []) if isinstance(tutor, dict) else []
     grader_targets = _volume_targets(grader_volumes)
     worker_targets = _volume_targets(worker_volumes)
+    tutor_config_mounts = [
+        str(volume) for volume in tutor_volumes if ":/etc/adaptive-tutor" in str(volume)
+    ]
+    worker_config_mounts = [
+        str(volume) for volume in worker_volumes if ":/etc/adaptive-tutor" in str(volume)
+    ]
+    require(
+        len(tutor_config_mounts) == 1
+        and tutor_config_mounts[0].endswith(":/etc/adaptive-tutor"),
+        "tutor config mount must support authenticated browser setup writes",
+        failures,
+    )
+    require(
+        len(worker_config_mounts) == 1
+        and worker_config_mounts[0].endswith(":/etc/adaptive-tutor:ro"),
+        "worker config mount must remain read-only",
+        failures,
+    )
     require(
         "/var/lib/adaptive-tutor" not in grader_targets,
         "grader can read tutor state",
@@ -179,6 +198,17 @@ def validate_dockerfile(failures: list[str]) -> None:
     require("USER 10001:10001" in content, "container must run as a non-root user", failures)
     require("uv sync --locked" in content, "container dependencies must use uv.lock", failures)
     require("@openai/codex@${CODEX_VERSION}" in content, "Codex CLI must be pinned", failures)
+    require(
+        "GITHUB_CLI_VERSION=2.97.0" in content
+        and "COPY --from=github-cli /usr/local/bin/gh /usr/local/bin/gh" in content,
+        "GitHub CLI must be pinned and installed in the runtime image",
+        failures,
+    )
+    require(
+        "ca-certificates git libstdc++6" in content,
+        "Git must be installed in the runtime image",
+        failures,
+    )
 
     ignore_path = ROOT / ".dockerignore"
     try:

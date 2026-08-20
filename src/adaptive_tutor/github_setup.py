@@ -31,7 +31,7 @@ from .config import (
 )
 from .db import Database
 from .errors import ConfigurationError, ExternalServiceError, SecurityError
-from .github import GITHUB_APP_PERMISSIONS, GitHubClient
+from .github import GITHUB_APP_EVENTS, GITHUB_APP_PERMISSIONS, GitHubClient
 from .runner import EVALUATOR_KIT_FILES, evaluator_kit_digest
 from .security import redact, sha256_digest
 from .time import iso_now, utc_now
@@ -562,13 +562,7 @@ class GitHubAppSetupService:
             "public": False,
             "request_oauth_on_install": False,
             "default_permissions": GITHUB_APP_PERMISSIONS,
-            "default_events": [
-                "check_suite",
-                "issue_comment",
-                "pull_request",
-                "push",
-                "workflow_run",
-            ],
+            "default_events": list(GITHUB_APP_EVENTS),
         }
         if owner_type == "Organization":
             target = f"https://github.com/organizations/{quote(owner)}/settings/apps/new"
@@ -668,6 +662,7 @@ class GitHubAppSetupService:
         client = GitHubClient(candidate_github)
         try:
             repository = client.verify_private_repository()
+            client.verify_app_configuration(run.public_url + "/webhooks/github")
             client.verify_app_installation_scope()
         finally:
             client.close()

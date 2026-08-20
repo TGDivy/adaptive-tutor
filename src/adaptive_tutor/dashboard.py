@@ -17,7 +17,7 @@ from markdown_it import MarkdownIt
 from markupsafe import Markup
 
 from .assignments import AssignmentService
-from .config import TutorSettings
+from .config import TutorSettings, load_settings
 from .db import Database
 from .errors import TutorError
 from .github_setup import GitHubAppSetupService
@@ -115,6 +115,25 @@ def create_app(
     reports = ReportService(database)
     app.include_router(webhook_router(settings, EventStore(database, JobQueue(database))))
 
+    def refresh_setup_settings() -> None:
+        if config_path is None:
+            raise HTTPException(status_code=503, detail="Server configuration path is unavailable")
+        try:
+            refreshed = load_settings(config_path, require_file=True)
+        except (TutorError, ValueError, OSError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if refreshed.database_path != settings.database_path:
+            raise HTTPException(
+                status_code=409,
+                detail="The configured database changed; restart the tutor service",
+            )
+        settings.github = refreshed.github
+        settings.codex = refreshed.codex
+        settings.active_curriculum = refreshed.active_curriculum
+        settings.active_profile = refreshed.active_profile
+        settings.learner_id = refreshed.learner_id
+        settings.curriculum_paths = refreshed.curriculum_paths
+
     def review_projection(assignment_id: str | None = None) -> dict[str, Any] | None:
         return status_service.review(
             settings.learner_id,
@@ -195,6 +214,7 @@ def create_app(
             read_auth(request)
         except HTTPException:
             return RedirectResponse(url="/login", status_code=303)
+        refresh_setup_settings()
         run = SetupService(database).current()
         if run is None:
             raise HTTPException(status_code=404, detail="Guided setup has not been started")
@@ -214,6 +234,7 @@ def create_app(
         if config_path is None:
             raise HTTPException(status_code=503, detail="Server configuration path is unavailable")
         try:
+            refresh_setup_settings()
             SetupService(database).resume(
                 LiveSetupExecutor(settings, database, config_path=config_path)
             )
@@ -227,8 +248,8 @@ def create_app(
             read_auth(request)
         except HTTPException:
             return RedirectResponse(url="/login", status_code=303)
-        if config_path is None:
-            raise HTTPException(status_code=503, detail="Server configuration path is unavailable")
+        refresh_setup_settings()
+        assert config_path is not None  # refresh_setup_settings checks this invariant
         run = SetupService(database).current()
         if run is None:
             raise HTTPException(status_code=404, detail="Guided setup has not been started")
@@ -247,14 +268,15 @@ def create_app(
 
     @app.get("/setup/github-app/callback", include_in_schema=False)
     def github_app_manifest_callback(code: str, state: str) -> RedirectResponse:
-        if config_path is None:
-            raise HTTPException(status_code=503, detail="Server configuration path is unavailable")
+        refresh_setup_settings()
+        assert config_path is not None  # refresh_setup_settings checks this invariant
         run = SetupService(database).current()
         if run is None:
             raise HTTPException(status_code=404, detail="Guided setup has not been started")
         service = GitHubAppSetupService(settings, database, config_path)
         try:
             installation_url = service.complete_manifest(run, code=code, state=state)
+            refresh_setup_settings()
         except (TutorError, ValueError, OSError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         finally:
@@ -269,8 +291,8 @@ def create_app(
     ) -> RedirectResponse:
         if setup_action not in {None, "install", "update"}:
             raise HTTPException(status_code=400, detail="GitHub installation action is invalid")
-        if config_path is None:
-            raise HTTPException(status_code=503, detail="Server configuration path is unavailable")
+        refresh_setup_settings()
+        assert config_path is not None  # refresh_setup_settings checks this invariant
         run = SetupService(database).current()
         if run is None:
             raise HTTPException(status_code=404, detail="Guided setup has not been started")
@@ -281,6 +303,7 @@ def create_app(
                 installation_id=installation_id,
                 state=state,
             )
+            refresh_setup_settings()
             SetupService(database).resume(
                 LiveSetupExecutor(settings, database, config_path=config_path)
             )

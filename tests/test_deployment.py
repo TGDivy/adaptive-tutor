@@ -30,6 +30,15 @@ def test_compose_is_loopback_rootless_and_credential_separated() -> None:
     assert tutor["read_only"] is True
     assert tutor["cap_drop"] == ["ALL"]
     assert tutor["user"] == "${TUTOR_UID:-1000}:${TUTOR_GID:-1000}"
+    assert any(
+        str(volume).endswith(":/etc/adaptive-tutor") for volume in tutor["volumes"]
+    )
+    assert all(
+        not str(volume).endswith(":/etc/adaptive-tutor:ro") for volume in tutor["volumes"]
+    )
+    assert any(
+        str(volume).endswith(":/etc/adaptive-tutor:ro") for volume in worker["volumes"]
+    )
     assert "worker.env" not in str(tutor["env_file"])
     assert "worker.env" in str(worker["env_file"])
     assert "grader.env" not in str(worker["env_file"])
@@ -123,3 +132,6 @@ def test_container_virtualenv_uses_its_runtime_path() -> None:
     assert "UV_PROJECT_ENVIRONMENT=/opt/adaptive-tutor" in content
     assert "COPY --from=builder /opt/adaptive-tutor /opt/adaptive-tutor" in content
     assert "COPY --from=builder /build/.venv" not in content
+    assert "GITHUB_CLI_VERSION=2.97.0" in content
+    assert "COPY --from=github-cli /usr/local/bin/gh /usr/local/bin/gh" in content
+    assert "ca-certificates git libstdc++6" in content

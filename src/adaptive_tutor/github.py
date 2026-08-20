@@ -39,6 +39,13 @@ GITHUB_APP_PERMISSIONS = {
     "metadata": "read",
     "pull_requests": "write",
 }
+GITHUB_APP_EVENTS = (
+    "check_suite",
+    "issue_comment",
+    "pull_request",
+    "push",
+    "workflow_run",
+)
 
 
 @dataclass
@@ -79,6 +86,20 @@ class GitHubAuth:
             self._installation_token.repository_selection,
         )
 
+    def app_jwt(self) -> str:
+        if not self.settings.app_id:
+            raise ConfigurationError("GitHub App ID is not configured")
+        if not self.settings.private_key_path or not self.settings.private_key_path.is_file():
+            raise ConfigurationError("GitHub App private key file is missing")
+        key = self.settings.private_key_path.read_text(encoding="utf-8")
+        issued = int(time.time())
+        encoded = jwt.encode(
+            {"iat": issued - 60, "exp": issued + 540, "iss": str(self.settings.app_id)},
+            key,
+            algorithm="RS256",
+        )
+        return encoded.decode() if isinstance(encoded, bytes) else encoded
+
     def _fallback_token(self) -> str | None:
         import os
 
@@ -90,15 +111,7 @@ class GitHubAuth:
             minutes=2
         ):
             return self._installation_token.value
-        if not self.settings.private_key_path or not self.settings.private_key_path.is_file():
-            raise ConfigurationError("GitHub App private key file is missing")
-        key = self.settings.private_key_path.read_text(encoding="utf-8")
-        issued = int(time.time())
-        app_jwt = jwt.encode(
-            {"iat": issued - 60, "exp": issued + 540, "iss": str(self.settings.app_id)},
-            key,
-            algorithm="RS256",
-        )
+        app_jwt = self.app_jwt()
         with httpx.Client(timeout=20) as client:
             response = client.post(
                 f"{self.settings.api_url}/app/installations/{self.settings.installation_id}/access_tokens",
@@ -184,6 +197,36 @@ class GitHubClient:
             )
         return response
 
+    def _app_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        expected: tuple[int, ...] = (200,),
+        **kwargs: Any,
+    ) -> httpx.Response:
+        headers = dict(kwargs.pop("headers", {}))
+        headers.update(
+            {
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {self.auth.app_jwt()}",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "adaptive-tutor",
+            }
+        )
+        try:
+            response = self.client.request(method, path, headers=headers, **kwargs)
+        except httpx.HTTPError as exc:
+            raise ExternalServiceError(f"GitHub App request failed: {exc}", retryable=True) from exc
+        if response.status_code not in expected:
+            retryable = response.status_code in {408, 429} or response.status_code >= 500
+            raise ExternalServiceError(
+                f"GitHub App {method} {path} returned {response.status_code}: "
+                f"{redact(response.text[:1500])}",
+                retryable=retryable,
+            )
+        return response
+
     def repository(self) -> dict[str, Any]:
         return dict(self._request("GET", self.repository_path).json())
 
@@ -222,6 +265,37 @@ class GitHubClient:
             "repository_selection": selection,
         }
 
+    def verify_app_configuration(self, callback_url: str) -> dict[str, Any]:
+        metadata = self._verified_app_metadata()
+        hook = metadata.get("hook_config") or {}
+        if hook.get("url") != callback_url or hook.get("active") is not True:
+            raise SecurityError("GitHub App webhook URL is not active or does not match setup")
+        return {
+            "app_id": int(metadata["id"]),
+            "permissions": dict(metadata["permissions"]),
+            "events": list(metadata["events"]),
+            "webhook_url": str(hook["url"]),
+            "active": True,
+        }
+
+    def _verified_app_metadata(self) -> dict[str, Any]:
+        if self.auth.mode() != "github_app":
+            raise SecurityError("GitHub integration is not using App authentication")
+        payload = dict(self._app_request("GET", "/app").json())
+        permissions = {
+            str(name): str(level) for name, level in (payload.get("permissions") or {}).items()
+        }
+        events = [str(event) for event in (payload.get("events") or [])]
+        if int(payload.get("id") or 0) != self.settings.app_id:
+            raise SecurityError("Authenticated GitHub App identity differs from configuration")
+        if permissions != GITHUB_APP_PERMISSIONS:
+            raise SecurityError("GitHub App permissions differ from the least-privilege contract")
+        if len(events) != len(GITHUB_APP_EVENTS) or set(events) != set(GITHUB_APP_EVENTS):
+            raise SecurityError("GitHub App events differ from the required webhook contract")
+        payload["permissions"] = permissions
+        payload["events"] = events
+        return payload
+
     def verify_assignment_pull_request(
         self,
         pull_number: int,
@@ -259,13 +333,7 @@ class GitHubClient:
                     expected=(200,),
                     json={
                         "active": True,
-                        "events": [
-                            "push",
-                            "pull_request",
-                            "workflow_run",
-                            "check_suite",
-                            "issue_comment",
-                        ],
+                        "events": list(GITHUB_APP_EVENTS),
                         "config": {
                             "url": callback_url,
                             "content_type": "json",
@@ -282,13 +350,7 @@ class GitHubClient:
             json={
                 "name": "web",
                 "active": True,
-                "events": [
-                    "push",
-                    "pull_request",
-                    "workflow_run",
-                    "check_suite",
-                    "issue_comment",
-                ],
+                "events": list(GITHUB_APP_EVENTS),
                 "config": {
                     "url": callback_url,
                     "content_type": "json",
@@ -300,6 +362,17 @@ class GitHubClient:
         return int(response.json()["id"])
 
     def webhook_status(self, callback_url: str) -> dict[str, Any] | None:
+        if self.auth.mode() == "github_app":
+            metadata = self._verified_app_metadata()
+            hook = metadata.get("hook_config") or {}
+            if hook.get("url") != callback_url:
+                return None
+            return {
+                "id": int(metadata["id"]),
+                "active": bool(hook.get("active")),
+                "events": list(metadata["events"]),
+                "last_response": dict(metadata.get("last_response") or {}),
+            }
         hooks = self._request("GET", f"{self.repository_path}/hooks").json()
         for hook in hooks:
             if hook.get("config", {}).get("url") == callback_url:

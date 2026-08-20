@@ -15,13 +15,22 @@ import pytest
 
 from adaptive_tutor.config import GitHubSettings
 from adaptive_tutor.errors import ConfigurationError, ExternalServiceError, SecurityError
-from adaptive_tutor.github import GitHubAuth, GitHubClient, InstallationToken
+from adaptive_tutor.github import (
+    GITHUB_APP_EVENTS,
+    GITHUB_APP_PERMISSIONS,
+    GitHubAuth,
+    GitHubClient,
+    InstallationToken,
+)
 from adaptive_tutor.security import MAX_ARTIFACT_BYTES, sha256_digest
 
 
 class StaticAuth:
     def token(self) -> str:
         return "test-token"
+
+    def mode(self) -> str:
+        return "token"
 
 
 class ScopedAppAuth(StaticAuth):
@@ -40,6 +49,9 @@ class ScopedAppAuth(StaticAuth):
             },
             "selected",
         )
+
+    def app_jwt(self) -> str:
+        return "test-app-jwt"
 
 
 class ChunkedBytes(httpx.SyncByteStream):
@@ -542,6 +554,44 @@ def test_webhook_status_reports_matching_hook_health() -> None:
             "id": 17,
             "active": True,
             "events": ["push", "pull_request"],
+            "last_response": {"code": 200, "status": "active"},
+        }
+        assert client.webhook_status("https://other.example.test/webhooks/github") is None
+    finally:
+        client.close()
+
+
+def test_github_app_webhook_status_uses_authenticated_app_metadata() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/app"
+        assert request.headers["Authorization"] == "Bearer test-app-jwt"
+        return httpx.Response(
+            200,
+            json={
+                "id": 11,
+                "permissions": GITHUB_APP_PERMISSIONS,
+                "events": list(GITHUB_APP_EVENTS),
+                "hook_config": {
+                    "url": "https://tutor.example.test/webhooks/github",
+                    "active": True,
+                },
+                "last_response": {"code": 200, "status": "active"},
+            },
+        )
+
+    client = GitHubClient(
+        GitHubSettings(owner="owner", app_id=11, installation_id=22),
+        auth=ScopedAppAuth(),  # type: ignore[arg-type]
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert client.verify_app_configuration(
+            "https://tutor.example.test/webhooks/github"
+        )["app_id"] == 11
+        assert client.webhook_status("https://tutor.example.test/webhooks/github") == {
+            "id": 11,
+            "active": True,
+            "events": list(GITHUB_APP_EVENTS),
             "last_response": {"code": 200, "status": "active"},
         }
         assert client.webhook_status("https://other.example.test/webhooks/github") is None
