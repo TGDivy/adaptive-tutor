@@ -310,7 +310,7 @@ def _replace_default_tree(
 ) -> str:
     _remove_protection(api, owner, repo)
     reference = api.client.get(f"/repos/{owner}/{repo}/git/ref/heads/main")
-    if reference.status_code == 404:
+    if reference.status_code in {404, 409}:
         initialized = api.request(
             "PUT",
             f"/repos/{owner}/{repo}/contents/.adaptive-tutor-bootstrap",

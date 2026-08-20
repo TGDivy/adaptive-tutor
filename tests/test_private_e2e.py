@@ -116,13 +116,14 @@ def test_private_proof_has_no_self_hosted_runner_handoff() -> None:
     assert "_run_ephemeral_runner" not in source
 
 
+@pytest.mark.parametrize("empty_status", [404, 409])
 def test_private_proof_bootstraps_an_empty_repository(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, empty_status: int
 ) -> None:
     calls: list[tuple[str, str]] = []
 
     class Response:
-        status_code = 404
+        status_code = empty_status
 
     class Client:
         @staticmethod
