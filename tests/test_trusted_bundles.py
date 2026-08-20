@@ -24,10 +24,14 @@ from adaptive_tutor.models import (
     LearnerContext,
 )
 from adaptive_tutor.trusted_bundles import (
+    PublicEvaluatorManifest,
     TrustedBundleStore,
     assignment_binding_digest,
     assignment_bundle_digest,
+    public_manifest_digest,
     read_provisioned_envelope,
+    serialize_public_manifest,
+    verify_public_manifest,
 )
 
 
@@ -46,6 +50,72 @@ def bundle() -> AssignmentBundle:
 
 def identity(value: AssignmentBundle) -> tuple[str, str]:
     return "A-0042", f"assignment/0042-{value.slug}"
+
+
+def test_public_manifest_is_signed_redacted_and_bound_to_the_evaluator_kit(
+    tmp_path: Path,
+) -> None:
+    value = bundle()
+    assignment_id, branch = identity(value)
+    store = TrustedBundleStore(tmp_path / "state")
+    kit_digest = "sha256:" + "a" * 64
+
+    manifest = store.public_manifest(
+        assignment_id=assignment_id,
+        branch=branch,
+        bundle=value,
+        evaluator_kit_digest=kit_digest,
+    )
+    serialized = serialize_public_manifest(manifest)
+    verify_public_manifest(
+        PublicEvaluatorManifest.model_validate_json(serialized),
+        verification_key=store.public_verification_key(),
+        expected_assignment_id=assignment_id,
+        expected_branch=branch,
+        expected_kit_digest=kit_digest,
+    )
+
+    assert public_manifest_digest(manifest).startswith("sha256:")
+    assert manifest.command == "python-pytest-v1"
+    assert {item.path for item in manifest.allowed_submissions}
+    assert {item.path for item in manifest.public_tests}
+    for forbidden in (
+        "hidden_evaluator",
+        "reference_expectations",
+        '"rubric"',
+        "reference_replacements",
+        "extra_tests",
+    ):
+        assert forbidden not in serialized
+    private_contents = {
+        item.content for item in value.files if item.role in {"reference", "evaluator"}
+    }
+    assert all(content not in serialized for content in private_contents)
+
+
+def test_public_manifest_rejects_tampering_and_wrong_runtime(tmp_path: Path) -> None:
+    value = bundle()
+    assignment_id, branch = identity(value)
+    store = TrustedBundleStore(tmp_path / "state")
+    manifest = store.public_manifest(
+        assignment_id=assignment_id,
+        branch=branch,
+        bundle=value,
+        evaluator_kit_digest="sha256:" + "b" * 64,
+    )
+    tampered = manifest.model_copy(update={"command": "submission-policy-v1"})
+
+    with pytest.raises(SecurityError, match="signature verification failed"):
+        verify_public_manifest(
+            tampered,
+            verification_key=store.public_verification_key(),
+        )
+    with pytest.raises(SecurityError, match="trusted runtime"):
+        verify_public_manifest(
+            manifest,
+            verification_key=store.public_verification_key(),
+            expected_kit_digest="sha256:" + "c" * 64,
+        )
 
 
 def test_bundle_is_signed_spooled_and_staged_with_owner_only_permissions(

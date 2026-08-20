@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from .errors import SecurityError
 from .models import AssignmentBundle, StrictModel
@@ -34,6 +34,60 @@ _BRANCH = re.compile(r"assignment/\d{4,12}-[a-z0-9][a-z0-9-]{2,100}")
 _COMMIT_SHA = re.compile(r"[0-9a-f]{40,64}")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _SIGNATURE = re.compile(r"ed25519:[0-9a-f]{128}")
+
+
+class PublicEvaluatorFile(StrictModel):
+    """One learner-visible file whose original bytes are signed."""
+
+    path: str = Field(pattern=r"^[A-Za-z0-9_.\-/]+$")
+    digest: str = Field(pattern=_DIGEST.pattern)
+
+    @field_validator("path")
+    @classmethod
+    def path_is_safe(cls, value: str) -> str:
+        candidate = Path(value)
+        if candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
+            raise ValueError("public evaluator paths must be normalized and relative")
+        return value
+
+
+class PublicEvaluatorLimits(StrictModel):
+    """Resource limits enforced by the credential-free evaluator kit."""
+
+    timeout_seconds: int = Field(default=90, ge=5, le=300)
+    memory_mb: int = Field(default=768, ge=128, le=2048)
+    pids: int = Field(default=64, ge=8, le=256)
+    max_output_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=8 * 1024 * 1024)
+
+
+class PublicEvaluatorManifest(StrictModel):
+    """Signed learner-visible evaluator contract with no private grading material."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    assignment_id: str = Field(pattern=_ASSIGNMENT_ID.pattern)
+    branch: str = Field(pattern=_BRANCH.pattern)
+    issued_at: str = Field(min_length=20, max_length=40)
+    allowed_submissions: list[PublicEvaluatorFile] = Field(min_length=1, max_length=64)
+    public_tests: list[PublicEvaluatorFile] = Field(default_factory=list, max_length=64)
+    command: Literal["python-pytest-v1", "submission-policy-v1"]
+    limits: PublicEvaluatorLimits = Field(default_factory=PublicEvaluatorLimits)
+    evaluator_kit_digest: str = Field(pattern=_DIGEST.pattern)
+    key_id: str = Field(pattern=r"[0-9a-f]{16}")
+    signature: str = Field(pattern=_SIGNATURE.pattern)
+
+    @model_validator(mode="after")
+    def paths_are_disjoint_and_unique(self) -> PublicEvaluatorManifest:
+        submissions = [item.path for item in self.allowed_submissions]
+        tests = [item.path for item in self.public_tests]
+        if len(submissions) != len(set(submissions)) or len(tests) != len(set(tests)):
+            raise ValueError("public evaluator paths must be unique")
+        if set(submissions) & set(tests):
+            raise ValueError("submission and public-test paths must be disjoint")
+        if self.command == "python-pytest-v1" and not tests:
+            raise ValueError("the pytest evaluator requires public tests")
+        if self.command == "submission-policy-v1" and tests:
+            raise ValueError("the submission policy evaluator cannot include test files")
+        return self
 
 
 class TrustedBundleEnvelope(StrictModel):
@@ -80,6 +134,54 @@ def assignment_binding_digest(assignment_id: str, branch: str, bundle_digest: st
     )
 
 
+def public_manifest_digest(manifest: PublicEvaluatorManifest) -> str:
+    """Return the stable digest used to bind dispatches and Actions evidence."""
+    return sha256_digest(_canonical_json(manifest.model_dump(mode="json")))
+
+
+def serialize_public_manifest(manifest: PublicEvaluatorManifest) -> str:
+    return json.dumps(manifest.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
+
+
+def public_verification_key_text(public_key: Ed25519PublicKey) -> str:
+    return "ed25519:" + _public_key_bytes(public_key).hex() + "\n"
+
+
+def verify_public_manifest(
+    manifest: PublicEvaluatorManifest,
+    *,
+    verification_key: str,
+    expected_assignment_id: str | None = None,
+    expected_branch: str | None = None,
+    expected_kit_digest: str | None = None,
+) -> None:
+    """Verify a public manifest signature and its externally supplied bindings."""
+    public_key = _parse_public_verification_key(verification_key)
+    key_id = hashlib.sha256(_public_key_bytes(public_key)).hexdigest()[:16]
+    if not hmac.compare_digest(manifest.key_id, key_id):
+        raise SecurityError("Public evaluator manifest uses an unknown verification key")
+    if expected_assignment_id is not None and manifest.assignment_id != expected_assignment_id:
+        raise SecurityError("Public evaluator manifest assignment does not match the dispatch")
+    if expected_branch is not None and manifest.branch != expected_branch:
+        raise SecurityError("Public evaluator manifest branch does not match the dispatch")
+    if expected_kit_digest is not None and not hmac.compare_digest(
+        manifest.evaluator_kit_digest, expected_kit_digest
+    ):
+        raise SecurityError("Public evaluator manifest kit does not match the trusted runtime")
+    _validate_public_identity(manifest.assignment_id, manifest.branch)
+    issued = parse_time(manifest.issued_at)
+    if issued is None or issued > utc_now() + timedelta(minutes=5):
+        raise SecurityError("Public evaluator manifest has an invalid issue time")
+    try:
+        signature = bytes.fromhex(manifest.signature.removeprefix("ed25519:"))
+        public_key.verify(
+            signature,
+            _canonical_json(manifest.model_dump(mode="json", exclude={"signature"})),
+        )
+    except (InvalidSignature, ValueError) as exc:
+        raise SecurityError("Public evaluator manifest signature verification failed") from exc
+
+
 class TrustedBundleStore:
     """Owner-only signed spool used by trusted ephemeral-runner provisioners."""
 
@@ -118,6 +220,33 @@ class TrustedBundleStore:
         stored = self.load(assignment_id)
         _require_expected(stored, assignment_id, branch, bundle)
         return stored
+
+    def public_manifest(
+        self,
+        *,
+        assignment_id: str,
+        branch: str,
+        bundle: AssignmentBundle,
+        evaluator_kit_digest: str,
+    ) -> PublicEvaluatorManifest:
+        """Derive a signed, learner-visible contract without private bundle fields."""
+        _validate_identity(assignment_id, branch, bundle)
+        if _DIGEST.fullmatch(evaluator_kit_digest) is None:
+            raise SecurityError("Evaluator kit digest is invalid")
+        self._prepare()
+        private_key, _ = self._key_pair()
+        return _signed_public_manifest(
+            private_key=private_key,
+            assignment_id=assignment_id,
+            branch=branch,
+            bundle=bundle,
+            evaluator_kit_digest=evaluator_kit_digest,
+        )
+
+    def public_verification_key(self) -> str:
+        self._prepare()
+        _, public_key = self._key_pair()
+        return public_verification_key_text(public_key)
 
     def load(self, assignment_id: str) -> TrustedBundleEnvelope:
         _validate_assignment_id(assignment_id)
@@ -344,6 +473,61 @@ def _signed_envelope(
     )
 
 
+def _signed_public_manifest(
+    *,
+    private_key: Ed25519PrivateKey,
+    assignment_id: str,
+    branch: str,
+    bundle: AssignmentBundle,
+    evaluator_kit_digest: str,
+) -> PublicEvaluatorManifest:
+    if bundle.validation_command == ["python", "-m", "pytest", "-q"]:
+        command = "python-pytest-v1"
+    elif not bundle.validation_command:
+        command = "submission-policy-v1"
+    else:
+        raise SecurityError("Assignment uses an unsupported public evaluator command")
+    allowed = [
+        PublicEvaluatorFile(path=item.path, digest=sha256_digest(item.content))
+        for item in bundle.files
+        if item.role == "starter"
+    ]
+    public_tests = [
+        PublicEvaluatorFile(path=item.path, digest=sha256_digest(item.content))
+        for item in bundle.files
+        if item.role == "public_test"
+    ]
+    public_key = private_key.public_key()
+    unsigned: dict[str, Any] = {
+        "schema_version": "1.0",
+        "assignment_id": assignment_id,
+        "branch": branch,
+        "issued_at": utc_now().astimezone(UTC).isoformat(timespec="seconds"),
+        "allowed_submissions": [item.model_dump(mode="json") for item in allowed],
+        "public_tests": [item.model_dump(mode="json") for item in public_tests],
+        "command": command,
+        "limits": PublicEvaluatorLimits().model_dump(mode="json"),
+        "evaluator_kit_digest": evaluator_kit_digest,
+        "key_id": hashlib.sha256(_public_key_bytes(public_key)).hexdigest()[:16],
+    }
+    signature = private_key.sign(_canonical_json(unsigned)).hex()
+    return PublicEvaluatorManifest.model_validate(
+        {**unsigned, "signature": "ed25519:" + signature}
+    )
+
+
+def _parse_public_verification_key(value: str) -> Ed25519PublicKey:
+    normalized = value.strip()
+    if re.fullmatch(r"ed25519:[0-9a-f]{64}", normalized) is None:
+        raise SecurityError("Public evaluator verification key is invalid")
+    try:
+        return Ed25519PublicKey.from_public_bytes(
+            bytes.fromhex(normalized.removeprefix("ed25519:"))
+        )
+    except ValueError as exc:  # pragma: no cover - regex validates the byte length
+        raise SecurityError("Public evaluator verification key is invalid") from exc
+
+
 def _require_expected(
     envelope: TrustedBundleEnvelope,
     assignment_id: str,
@@ -366,6 +550,13 @@ def _validate_identity(assignment_id: str, branch: str, bundle: AssignmentBundle
     expected = f"assignment/{counter}-{bundle.slug}"
     if branch != expected:
         raise SecurityError("Assignment branch does not match the evaluator bundle identity")
+
+
+def _validate_public_identity(assignment_id: str, branch: str) -> None:
+    _validate_assignment_id(assignment_id)
+    match = _BRANCH.fullmatch(branch)
+    if match is None or branch.split("/", 1)[1].split("-", 1)[0] != assignment_id[2:]:
+        raise SecurityError("Public evaluator branch does not match the assignment identity")
 
 
 def _validate_assignment_id(assignment_id: str) -> None:
