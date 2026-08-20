@@ -1,4 +1,4 @@
-"""Authenticated storage and provisioning for hidden evaluator bundles."""
+"""Tutor-host private bundles and signed public evaluator manifests."""
 
 from __future__ import annotations
 
@@ -100,6 +100,7 @@ class TrustedBundleEnvelope(StrictModel):
     bundle: AssignmentBundle
     signature: str = Field(pattern=_SIGNATURE.pattern)
 
+
 def assignment_bundle_digest(bundle: AssignmentBundle) -> str:
     return sha256_digest(_canonical_json(bundle.model_dump(mode="json")))
 
@@ -166,7 +167,7 @@ def verify_public_manifest(
 
 
 class TrustedBundleStore:
-    """Owner-only signed spool used by trusted ephemeral-runner provisioners."""
+    """Owner-only private bundle store and public-manifest signer."""
 
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir.expanduser().resolve()
@@ -345,9 +346,7 @@ def _signed_envelope(
         "bundle": bundle.model_dump(mode="json"),
     }
     signature = private_key.sign(_canonical_json(unsigned)).hex()
-    return TrustedBundleEnvelope.model_validate(
-        {**unsigned, "signature": "ed25519:" + signature}
-    )
+    return TrustedBundleEnvelope.model_validate({**unsigned, "signature": "ed25519:" + signature})
 
 
 def _signed_public_manifest(
@@ -388,9 +387,7 @@ def _signed_public_manifest(
         "key_id": hashlib.sha256(_public_key_bytes(public_key)).hexdigest()[:16],
     }
     signature = private_key.sign(_canonical_json(unsigned)).hex()
-    return PublicEvaluatorManifest.model_validate(
-        {**unsigned, "signature": "ed25519:" + signature}
-    )
+    return PublicEvaluatorManifest.model_validate({**unsigned, "signature": "ed25519:" + signature})
 
 
 def _parse_public_verification_key(value: str) -> Ed25519PublicKey:
@@ -548,4 +545,3 @@ def _write_once_private(path: Path, payload: bytes) -> None:
         path.unlink(missing_ok=True)
         raise
     _assert_private_regular_file(path, "Private evaluator file")
-
