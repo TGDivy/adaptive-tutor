@@ -86,6 +86,17 @@ for installation and authentication.
 Use `https://api.github.com` exactly. The public build rejects alternate API
 hosts.
 
+Assignment publication performs this check before reserving assignment state.
+If GitHub fails after branch publication has begun, the tutor retains the
+validated assignment, shows **Publication paused**, and safely resumes the same
+branch and pull request when you run:
+
+```bash
+adaptive-tutor next
+```
+
+Do not delete the assignment row or its trusted evaluator spool while retrying.
+
 ## Webhook is missing or rejected
 
 Run:

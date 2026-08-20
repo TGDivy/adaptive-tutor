@@ -109,6 +109,9 @@ def test_evaluation_updates_state_only_after_both_valid_contracts(
     assert result.overall_score == 86
     assert flags == []
     assert "<UNTRUSTED_SUBMISSION" in grader.prompts[0]
+    assert "# TRUSTED ASSIGNMENT CONTEXT" in grader.prompts[0]
+    assert '"stage_number": 1' in grader.prompts[0]
+    assert '"title": "Correctness repair"' in grader.prompts[0]
     mastery = database.fetch_one(
         "SELECT mastery_estimate FROM mastery WHERE concept_id='programming.invariants'"
     )
@@ -116,6 +119,38 @@ def test_evaluation_updates_state_only_after_both_valid_contracts(
     review = render_review(result, injection_flags=flags)
     assert "Score:** 86/100" in review
     assert "prompt-injection" not in review
+
+
+def test_successful_progressive_stage_cannot_skip_authored_follow_up(
+    initialized: tuple[Database, object],
+) -> None:
+    database, _ = initialized
+    attempt_id, automated = setup_attempt(database)
+    invalid = qualitative_fixture().model_copy(
+        update={
+            "follow_up": "new_assignment",
+            "follow_up_reason": "Skip the authored follow-up.",
+        }
+    )
+    service = EvaluationService(database, FixtureCodexRunner(invalid))
+    automated_id = service.persist_automated(attempt_id, automated)
+
+    with pytest.raises(ModelSchemaError, match="advance the authored assignment"):
+        service.grade_attempt(
+            learner_id="learner",
+            assignment_id="A-0001",
+            attempt_id=attempt_id,
+            automated_evaluation_id=automated_id,
+            rubric={"correctness": 1.0},
+            references={},
+            submission={"ANSWER.md": "A passing stage-one response."},
+            trusted_instructions="Grade the current stage.",
+            prompt_version="v1",
+            learner_confidence=80,
+        )
+
+    assert database.fetch_one("SELECT COUNT(*) count FROM qualitative_evaluations") == {"count": 0}
+    assert database.fetch_one("SELECT COUNT(*) count FROM mastery_evidence") == {"count": 0}
 
 
 def test_prompt_injection_is_quarantined_before_state_changes(
@@ -140,9 +175,7 @@ def test_prompt_injection_is_quarantined_before_state_changes(
             learner_confidence=80,
         )
 
-    assert database.fetch_one("SELECT COUNT(*) count FROM qualitative_evaluations") == {
-        "count": 0
-    }
+    assert database.fetch_one("SELECT COUNT(*) count FROM qualitative_evaluations") == {"count": 0}
     assert database.fetch_one("SELECT COUNT(*) count FROM mastery_evidence") == {"count": 0}
 
 
@@ -154,9 +187,9 @@ def test_qualitative_evidence_is_scoped_and_committed_atomically(
     fixture = qualitative_fixture().model_copy(
         update={
             "concept_evidence": [
-                qualitative_fixture().concept_evidence[0].model_copy(
-                    update={"concept_id": "networking.transport"}
-                )
+                qualitative_fixture()
+                .concept_evidence[0]
+                .model_copy(update={"concept_id": "networking.transport"})
             ]
         }
     )
@@ -175,9 +208,7 @@ def test_qualitative_evidence_is_scoped_and_committed_atomically(
             prompt_version="v1",
             learner_confidence=80,
         )
-    assert database.fetch_one("SELECT COUNT(*) count FROM qualitative_evaluations") == {
-        "count": 0
-    }
+    assert database.fetch_one("SELECT COUNT(*) count FROM qualitative_evaluations") == {"count": 0}
 
     class FailingLearnerModel(LearnerModel):
         def _apply_concept_evidence(self, *_args: object, **_kwargs: object) -> None:
@@ -201,9 +232,7 @@ def test_qualitative_evidence_is_scoped_and_committed_atomically(
             prompt_version="v1",
             learner_confidence=80,
         )
-    assert database.fetch_one("SELECT COUNT(*) count FROM qualitative_evaluations") == {
-        "count": 0
-    }
+    assert database.fetch_one("SELECT COUNT(*) count FROM qualitative_evaluations") == {"count": 0}
     assert database.fetch_one("SELECT COUNT(*) count FROM mastery_evidence") == {"count": 0}
 
 
@@ -239,6 +268,4 @@ def test_appeal_preserves_original_and_appends_independent_result(
     appeal = next(row for row in rows if row["id"] == result_id)
     assert appeal["review_kind"] == "appeal"
     assert appeal["supersedes_id"] == original_id
-    assert database.fetch_one("SELECT status FROM evaluation_appeals") == {
-        "status": "resolved"
-    }
+    assert database.fetch_one("SELECT status FROM evaluation_appeals") == {"status": "resolved"}

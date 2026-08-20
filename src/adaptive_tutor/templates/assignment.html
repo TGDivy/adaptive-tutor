@@ -15,13 +15,16 @@
       <p class="eyebrow">{{ assignment.id }} · {{ assignment_state }}</p>
       <h1>{{ assignment.title }}</h1>
       <p class="assignment-summary">{{ bundle.summary }}</p>
+      {% if assignment.publication_error %}<p class="action-required"><strong>Publication paused.</strong> {{ assignment.publication_error }}</p>{% endif %}
       <div class="assignment-meta">
         <span>{{ assignment.exercise_type|replace('_', ' ') }}</span>
         <span>Difficulty {{ assignment.difficulty }}/10</span>
         <span>{{ assignment.expected_minutes }} min</span>
         <span>Stage {{ assignment.current_stage }}</span>
       </div>
-      {% if assignment_action and assignment_action.external == 'true' %}
+      {% if assignment_action and assignment_action.method == 'post' %}
+        <form method="post" action="{{ assignment_action.url }}"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="primary-action" type="submit">{{ assignment_action.label }} <span aria-hidden="true">→</span></button></form>
+      {% elif assignment_action and assignment_action.external == 'true' %}
         <a class="primary-action" href="{{ assignment_action.url }}" target="_blank" rel="noreferrer">Open pull request <span aria-hidden="true">→</span></a>
       {% endif %}
 
@@ -36,7 +39,7 @@
             <p>{{ bundle.selection_reason }}</p>
           </section>
           <section>
-            <p class="eyebrow">Working branch</p>
+            <p class="eyebrow">{{ 'Working branch' if assignment.pull_number else 'Planned branch' }}</p>
             <code>{{ assignment.branch_name }}</code>
           </section>
           {% if workspace_path %}<section><p class="eyebrow">Workspace</p><code>{{ workspace_path }}</code></section>{% endif %}

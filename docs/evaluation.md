@@ -99,11 +99,19 @@ atomically outside the sandbox with mode `0600` and a canonical SHA-256 digest.
 The review builder emits visibly delimited sections for:
 
 1. trusted grading instructions;
-2. trusted rubric;
-3. trusted references;
-4. normalized CI evidence;
-5. learner context; and
-6. untrusted submission text.
+2. trusted assignment and current-stage context;
+3. trusted rubric;
+4. trusted references;
+5. normalized CI evidence;
+6. learner context; and
+7. untrusted submission text.
+
+The assignment context is reconstructed from persisted tutor state, not from
+the repository. It includes the exact authored stage instructions, unlock
+condition, stage count, target concepts, and reference expectations. A passing
+review cannot skip an authored follow-up stage, and a final-stage review cannot
+request a stage that does not exist. Every stage remains a distinct attempt in
+the same pull request.
 
 Submission content is data even when it says “ignore previous instructions,”
 imitates system messages, or asks for secrets. Safety heuristics record likely

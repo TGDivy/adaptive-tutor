@@ -25,7 +25,7 @@
     "The regression test covers the boundary that originally failed."
   ],
   "classification": "correct",
-  "follow_up": "new_assignment",
-  "follow_up_reason": "Use the same invariant in a different representation.",
+  "follow_up": "new_stage",
+  "follow_up_reason": "Advance to the authored representation follow-up.",
   "escalation_recommended": false
 }

@@ -54,9 +54,7 @@ class DashboardAuth:
         token = self.settings.api_token
         authorization = request.headers.get("Authorization", "")
         bearer = (
-            authorization.removeprefix("Bearer ")
-            if authorization.startswith("Bearer ")
-            else ""
+            authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
         )
         if token and bearer and hmac.compare_digest(token, bearer):
             return "bearer"
@@ -199,7 +197,8 @@ def create_app(
                 "reports": reports.recent(settings.learner_id, limit=4),
                 "assignment_action": action,
                 "assignment_state": _learner_assignment_state(
-                    (snapshot.get("active_assignment") or {}).get("status")
+                    (snapshot.get("active_assignment") or {}).get("status"),
+                    (snapshot.get("active_assignment") or {}).get("publication_error"),
                 ),
                 "assessed_concepts": assessed,
                 "csrf_token": auth.csrf_value,
@@ -255,8 +254,11 @@ def create_app(
                 ),
                 "public_files": public_files,
                 "assignment_action": _assignment_action(active, settings, database),
-                "assignment_state": _learner_assignment_state(str(active["status"])),
+                "assignment_state": _learner_assignment_state(
+                    str(active["status"]), active.get("publication_error")
+                ),
                 "workspace_path": _demo_workspace(database),
+                "csrf_token": auth.csrf_value,
             },
         )
 
@@ -355,6 +357,14 @@ def _assignment_action(
                 f"{settings.github.workspace_repo}/pull/{pull_number}"
             ),
             "external": "true",
+            "method": "get",
+        }
+    if assignment.get("status") == "validated" and _demo_workspace(database) is None:
+        return {
+            "label": "Retry publication",
+            "url": "/actions/create-assignment",
+            "external": "false",
+            "method": "post",
         }
     return {
         "label": (
@@ -366,13 +376,12 @@ def _assignment_action(
         ),
         "url": f"/assignment/{assignment['id']}",
         "external": "false",
+        "method": "get",
     }
 
 
 def _demo_workspace(database: Database) -> str | None:
-    row = database.fetch_one(
-        "SELECT value_json FROM configuration WHERE key='demo_workspace_path'"
-    )
+    row = database.fetch_one("SELECT value_json FROM configuration WHERE key='demo_workspace_path'")
     if row is None:
         return None
     try:
@@ -382,7 +391,9 @@ def _demo_workspace(database: Database) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _learner_assignment_state(value: str | None) -> str:
+def _learner_assignment_state(value: str | None, publication_error: object = None) -> str:
+    if publication_error:
+        return "Setup action required"
     return {
         "validated": "Ready to start",
         "published": "Ready to start",

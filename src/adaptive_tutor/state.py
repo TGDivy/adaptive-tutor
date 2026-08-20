@@ -15,13 +15,12 @@ class StatusService:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    def get_status(
-        self, learner_id: str, curriculum_id: str
-    ) -> RuntimeStatus:
+    def get_status(self, learner_id: str, curriculum_id: str) -> RuntimeStatus:
         active = self.database.fetch_one(
             """
             SELECT id, title, status, difficulty, exercise_type, expected_minutes,
                    branch_name, pull_number, current_stage, created_at, updated_at,
+                   publication_attempted_at, publication_error,
                    json_extract(bundle_json, '$.summary') summary,
                    json_extract(bundle_json, '$.selection_reason') selection_reason,
                    (SELECT ac.concept_id FROM assignment_concepts ac
@@ -141,9 +140,7 @@ class StatusService:
         )
 
     def is_paused(self) -> bool:
-        row = self.database.fetch_one(
-            "SELECT value_json FROM configuration WHERE key='paused'"
-        )
+        row = self.database.fetch_one("SELECT value_json FROM configuration WHERE key='paused'")
         return bool(json.loads(row["value_json"])) if row else False
 
     def set_paused(self, paused: bool) -> None:

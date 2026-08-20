@@ -164,6 +164,10 @@ class GitHubClient:
             raise SecurityError("Integration lacks required repository content permission")
         return payload
 
+    def preflight_assignment_publication(self) -> dict[str, Any]:
+        """Authenticate and verify the exact private write scope before state is created."""
+        return self.verify_private_repository()
+
     def create_or_verify_webhook(self, callback_url: str, secret: str) -> int:
         hooks = self._request("GET", f"{self.repository_path}/hooks").json()
         for hook in hooks:
@@ -285,9 +289,7 @@ class GitHubClient:
             "GET", f"{self.repository_path}/git/ref/heads/{default_branch}"
         ).json()
         base_sha = str(base_ref["object"]["sha"])
-        base_commit = self._request(
-            "GET", f"{self.repository_path}/git/commits/{base_sha}"
-        ).json()
+        base_commit = self._request("GET", f"{self.repository_path}/git/commits/{base_sha}").json()
         entries = []
         for path, content in sorted(files.items()):
             _validate_repository_path(path)
@@ -297,9 +299,7 @@ class GitHubClient:
                 expected=(201,),
                 json={"content": content, "encoding": "utf-8"},
             ).json()
-            entries.append(
-                {"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]}
-            )
+            entries.append({"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
         tree = self._request(
             "POST",
             f"{self.repository_path}/git/trees",
@@ -468,8 +468,7 @@ class GitHubClient:
                     raise ExternalServiceError(
                         f"GitHub GET {path} returned {response.status_code}: "
                         f"{redact(response.read().decode(errors='replace')[:1500])}",
-                        retryable=response.status_code in {408, 429}
-                        or response.status_code >= 500,
+                        retryable=response.status_code in {408, 429} or response.status_code >= 500,
                     )
                 declared = response.headers.get("Content-Length")
                 if declared and int(declared) > maximum:

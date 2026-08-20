@@ -11,7 +11,12 @@ import pytest
 from adaptive_tutor.codex import FixtureCodexRunner
 from adaptive_tutor.config import GitHubSettings, TutorSettings
 from adaptive_tutor.db import Database
-from adaptive_tutor.errors import ExternalServiceError, InfrastructureError, SecurityError
+from adaptive_tutor.errors import (
+    ConfigurationError,
+    ExternalServiceError,
+    InfrastructureError,
+    SecurityError,
+)
 from adaptive_tutor.evaluation import EvaluationService
 from adaptive_tutor.models import (
     AutomatedCheck,
@@ -35,6 +40,12 @@ class ControlledGitHub:
         self.dispatches: list[dict[str, str]] = []
         self.tamper_evaluator_binding = False
         self.evaluator_error = False
+        self.preflight_failure = False
+
+    def preflight_assignment_publication(self) -> dict[str, Any]:
+        if self.preflight_failure:
+            raise ConfigurationError("GitHub owner and workspace repository are required")
+        return {"private": True, "permissions": {"push": True}}
 
     def publish_assignment(self, **kwargs: Any) -> dict[str, Any]:
         metadata = json.loads(kwargs["files"][".adaptive-tutor/assignment.json"])
@@ -58,14 +69,14 @@ class ControlledGitHub:
         return self.files[path]
 
     def download_evidence(self, run_id: int) -> bytes:
-        assert run_id == 700
+        commit_sha = {700: "a" * 40, 701: "b" * 40}[run_id]
         now = datetime.now(UTC)
         assert self.trusted_spool is not None
         data_dir = self.trusted_spool.parent.parent
         trusted = TrustedBundleStore(data_dir).load("A-0001")
         evidence = AutomatedEvaluation(
             assignment_id="A-0001",
-            commit_sha="a" * 40,
+            commit_sha=commit_sha,
             checks=[
                 AutomatedCheck(
                     name="unit and hidden tests",
@@ -82,12 +93,11 @@ class ControlledGitHub:
             completed_at=now,
             runner="github-actions",
             evaluator_binding=(
-                "sha256:" + "0" * 64
-                if self.tamper_evaluator_binding
-                else trusted.binding_digest
+                "sha256:" + "0" * 64 if self.tamper_evaluator_binding else trusted.binding_digest
             ),
             evaluator_key_id=trusted.key_id,
-            artifact_digest="sha256:" + hashlib.sha256(b"controlled").hexdigest(),
+            artifact_digest="sha256:"
+            + hashlib.sha256(f"controlled:{commit_sha}".encode()).hexdigest(),
         ).with_computed_digest()
         return evidence.model_dump_json().encode()
 
@@ -95,12 +105,12 @@ class ControlledGitHub:
         self.dispatches.append(dict(kwargs))
 
     def verify_evaluator_run(self, run_id: int, **kwargs: Any) -> dict[str, str]:
-        assert run_id == 700
+        commit_sha = {700: "a" * 40, 701: "b" * 40}[run_id]
         assert kwargs == {}
         return {
             "assignment_id": "A-0001",
             "branch": "assignment/0001-bounded-work-queue",
-            "commit_sha": "a" * 40,
+            "commit_sha": commit_sha,
             "workflow_commit": "f" * 40,
         }
 
@@ -210,8 +220,59 @@ def test_controlled_end_to_end_assignment_evaluation_and_next_selection(
     )
     assert len(github.reviews) == 1
     assert "Adaptive Tutor review" in github.reviews[0]
-    assignment = database.fetch_one("SELECT status FROM assignments WHERE id='A-0001'")
-    assert assignment == {"status": "completed"}
+    assignment = database.fetch_one(
+        "SELECT status, current_stage FROM assignments WHERE id='A-0001'"
+    )
+    assert assignment == {"status": "follow_up", "current_stage": 2}
+    assert len(github.comments) == 1
+    assert "Stage 2: Representation follow-up" in github.comments[0]
+    orchestrator.evaluations.grader = FixtureCodexRunner(
+        fixture().model_copy(
+            update={
+                "follow_up": "new_assignment",
+                "follow_up_reason": "Stage two is complete; schedule transfer work.",
+            }
+        )
+    )
+    orchestrator.record_submission(
+        {
+            "ref": f"refs/heads/{branch}",
+            "after": "b" * 40,
+            "head_commit": {"message": "stage two\n\nConfidence: 88"},
+        }
+    )
+    assert github.dispatches[-1] == {
+        "assignment_id": "A-0001",
+        "branch": branch,
+        "commit_sha": "b" * 40,
+    }
+    orchestrator.process_ci_result(
+        {
+            "action": "completed",
+            "workflow_run": {
+                "id": 701,
+                "head_branch": branch,
+                "head_sha": "b" * 40,
+                "conclusion": "success",
+            },
+        }
+    )
+    assignment = database.fetch_one(
+        "SELECT status, current_stage FROM assignments WHERE id='A-0001'"
+    )
+    assert assignment == {"status": "completed", "current_stage": 2}
+    assert len(github.reviews) == 2
+    orchestrator.process_ci_result(
+        {
+            "action": "completed",
+            "workflow_run": {"id": 700, "conclusion": "success"},
+        }
+    )
+    assert database.fetch_one(
+        "SELECT status, current_stage FROM assignments WHERE id='A-0001'"
+    ) == {"status": "completed", "current_stage": 2}
+    assert len(github.reviews) == 2
+    assert len(github.comments) == 1
     mastery = database.fetch_one(
         """
         SELECT evidence_count, mastery_estimate FROM mastery
@@ -219,7 +280,7 @@ def test_controlled_end_to_end_assignment_evaluation_and_next_selection(
         """
     )
     assert mastery is not None
-    assert mastery["evidence_count"] == 1
+    assert mastery["evidence_count"] == 2
     assert mastery["mastery_estimate"] > 0.2
     next_created = orchestrator.create_next_assignment(LearnerContext(available_minutes=45))
     assert next_created["id"] == "A-0002"
@@ -250,11 +311,42 @@ def test_assignment_publication_resumes_without_generating_a_duplicate(
         "id": "A-0001",
         "status": "validated",
     }
+    failed = database.fetch_one(
+        "SELECT publication_attempted_at, publication_error FROM assignments"
+    )
+    assert failed is not None and failed["publication_attempted_at"]
+    assert failed["publication_error"] == "temporary publish failure"
 
     resumed = orchestrator.create_next_assignment(LearnerContext())
     assert resumed["id"] == "A-0001"
     assert resumed["pull_number"] == 42
     assert database.fetch_one("SELECT COUNT(*) count FROM assignments") == {"count": 1}
+    assert database.fetch_one("SELECT publication_error FROM assignments") == {
+        "publication_error": None
+    }
+
+
+def test_assignment_preflight_failure_does_not_create_stranded_state(
+    initialized: tuple[Database, object], tmp_path: Path
+) -> None:
+    database, _ = initialized
+    github = ControlledGitHub()
+    github.preflight_failure = True
+    orchestrator = TutorOrchestrator(
+        TutorSettings(data_dir=tmp_path, learner_id="learner"),
+        database,
+        github,  # type: ignore[arg-type]
+        EvaluationService(database, FixtureCodexRunner(fixture())),
+    )
+
+    with pytest.raises(ConfigurationError, match="owner and workspace"):
+        orchestrator.create_next_assignment(LearnerContext())
+
+    assert database.fetch_one("SELECT COUNT(*) count FROM assignments") == {"count": 0}
+    assert (
+        database.fetch_one("SELECT value_json FROM configuration WHERE key='assignment_counter'")
+        is None
+    )
 
 
 def test_ci_evidence_must_match_the_trusted_spool_identity(
@@ -292,9 +384,7 @@ def test_ci_evidence_must_match_the_trusted_spool_identity(
                 "workflow_run": {"id": 700, "conclusion": "success"},
             }
         )
-    assert database.fetch_one("SELECT COUNT(*) count FROM automated_evaluations") == {
-        "count": 0
-    }
+    assert database.fetch_one("SELECT COUNT(*) count FROM automated_evaluations") == {"count": 0}
     assert database.fetch_one("SELECT COUNT(*) count FROM mastery_evidence") == {"count": 0}
 
 
@@ -380,9 +470,7 @@ def test_review_delivery_resumes_after_grading_or_delivery_crash(
 
     with pytest.raises(ExternalServiceError):
         orchestrator.process_ci_result(payload)
-    assert database.fetch_one("SELECT COUNT(*) count FROM qualitative_evaluations") == {
-        "count": 1
-    }
+    assert database.fetch_one("SELECT COUNT(*) count FROM qualitative_evaluations") == {"count": 1}
     assert database.fetch_one("SELECT COUNT(*) count FROM mastery_evidence") == {"count": 1}
     assert len(github.reviews) == int(failure_mode == "after")
 
@@ -391,8 +479,9 @@ def test_review_delivery_resumes_after_grading_or_delivery_crash(
     assert database.fetch_one(
         "SELECT review_posted_at IS NOT NULL posted FROM qualitative_evaluations"
     ) == {"posted": 1}
-    assert database.fetch_one("SELECT COUNT(*) count FROM qualitative_evaluations") == {
-        "count": 1
-    }
+    assert database.fetch_one("SELECT COUNT(*) count FROM qualitative_evaluations") == {"count": 1}
     assert database.fetch_one("SELECT COUNT(*) count FROM mastery_evidence") == {"count": 1}
-    assert database.fetch_one("SELECT status FROM assignments") == {"status": "completed"}
+    assert database.fetch_one("SELECT status, current_stage FROM assignments") == {
+        "status": "follow_up",
+        "current_stage": 2,
+    }

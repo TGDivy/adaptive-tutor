@@ -7,11 +7,14 @@ import pytest
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
+from adaptive_tutor.assignments import AssignmentService, AssignmentValidator
 from adaptive_tutor.config import ServerSettings, TutorSettings, load_settings
+from adaptive_tutor.curriculum import CurriculumLoader, bundled_curriculum_path
 from adaptive_tutor.dashboard import DashboardAuth, create_app
 from adaptive_tutor.db import Database
 from adaptive_tutor.demo import run_demo
-from adaptive_tutor.models import LearnerContext
+from adaptive_tutor.generation import CurriculumAssignmentGenerator
+from adaptive_tutor.models import AssignmentRequest, LearnerContext
 
 
 def test_dashboard_and_api_require_authentication_and_secure_writes(
@@ -26,9 +29,7 @@ def test_dashboard_and_api_require_authentication_and_secure_writes(
         data_dir=tmp_path / "private-state",
         database_path=database.path,
         learner_id="learner",
-        server=ServerSettings(
-            host="127.0.0.1", allow_unauthenticated_loopback=False
-        ),
+        server=ServerSettings(host="127.0.0.1", allow_unauthenticated_loopback=False),
     )
     app = create_app(settings, database)
 
@@ -46,9 +47,7 @@ def test_dashboard_and_api_require_authentication_and_secure_writes(
         assert anonymous_dashboard.status_code == 303
         assert anonymous_dashboard.headers["location"] == "/login"
 
-        bad_login = client.post(
-            "/login", data={"token": "wrong"}, follow_redirects=False
-        )
+        bad_login = client.post("/login", data={"token": "wrong"}, follow_redirects=False)
         assert bad_login.status_code == 401
         login = client.post("/login", data={"token": token}, follow_redirects=False)
         assert login.status_code == 303
@@ -61,10 +60,13 @@ def test_dashboard_and_api_require_authentication_and_secure_writes(
         assert client.post("/actions/create-assignment").status_code == 403
         csrf = DashboardAuth(settings).csrf_value
         assert csrf is not None
-        assert client.post(
-            "/actions/create-assignment",
-            data={"csrf": csrf},
-        ).status_code == 503
+        assert (
+            client.post(
+                "/actions/create-assignment",
+                data={"csrf": csrf},
+            ).status_code
+            == 503
+        )
 
         assert client.get("/api/v1/get_status").status_code == 200
         assert client.post("/api/v1/pause").status_code == 401
@@ -72,19 +74,20 @@ def test_dashboard_and_api_require_authentication_and_secure_writes(
         assert client.post("/api/v1/pause", headers=headers).json() == {"paused": True}
         assert client.get("/api/v1/get_status", headers=headers).json()["paused"] is True
         assert client.post("/api/v1/resume", headers=headers).json() == {"paused": False}
-        generated = client.post(
-            "/api/v1/generate_report?period=weekly", headers=headers
-        )
+        generated = client.post("/api/v1/generate_report?period=weekly", headers=headers)
         assert generated.status_code == 200
         assert generated.json()["period"] == "weekly"
-        assert client.post(
-            "/api/v1/generate_report?period=yearly", headers=headers
-        ).status_code == 422
-        assert client.post(
-            "/api/v1/create_assignment",
-            headers=headers,
-            json={"available_minutes": 30, "energy": "medium"},
-        ).status_code == 503
+        assert (
+            client.post("/api/v1/generate_report?period=yearly", headers=headers).status_code == 422
+        )
+        assert (
+            client.post(
+                "/api/v1/create_assignment",
+                headers=headers,
+                json={"available_minutes": 30, "energy": "medium"},
+            ).status_code
+            == 503
+        )
 
 
 def test_exposed_dashboard_refuses_to_start_without_token(
@@ -101,6 +104,56 @@ def test_exposed_dashboard_refuses_to_start_without_token(
 
     with pytest.raises(ValueError, match="API token is required"):
         create_app(settings, database)
+
+
+def test_dashboard_exposes_recoverable_assignment_publication_failure(
+    initialized: tuple[Database, object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database, _ = initialized
+    request = AssignmentRequest(
+        learner_id="learner",
+        curriculum_id="systems-foundations",
+        profile_id="generalist",
+        target_concepts=["programming.invariants"],
+        target_difficulty=4,
+        context=LearnerContext(),
+    )
+    bundle = CurriculumAssignmentGenerator(
+        CurriculumLoader().load(bundled_curriculum_path())
+    ).generate(request)
+    validation = AssignmentValidator().validate(bundle, request, run_reference=False)
+    created = AssignmentService(database).create(request, bundle, validation)
+    database.execute(
+        "UPDATE assignments SET publication_error='GitHub is temporarily unavailable' WHERE id=?",
+        (created["id"],),
+    )
+
+    token = "publication-state-token"
+    monkeypatch.setenv("ADAPTIVE_TUTOR_API_TOKEN", token)
+    settings = TutorSettings(
+        data_dir=tmp_path,
+        database_path=database.path,
+        learner_id="learner",
+    )
+
+    class RetryOrchestrator:
+        def create_next_assignment(self, context: LearnerContext) -> dict[str, Any]:
+            assert context.available_minutes == 45
+            return {"existing": True, "id": created["id"]}
+
+    app = create_app(settings, database, RetryOrchestrator())  # type: ignore[arg-type]
+    with TestClient(app) as client:
+        assert client.post("/login", data={"token": token}).status_code == 200
+        dashboard = client.get("/")
+        assert "Setup action required" in dashboard.text
+        assert "Publication paused" in dashboard.text
+        assert 'action="/actions/create-assignment"' in dashboard.text
+        assert "Retry publication" in dashboard.text
+        detail = client.get(f"/assignment/{created['id']}")
+        assert "Planned branch" in detail.text
+        assert "GitHub is temporarily unavailable" in detail.text
 
 
 def test_rich_dashboard_assignment_and_agent_api_flow(
@@ -191,9 +244,7 @@ def test_rich_dashboard_assignment_and_agent_api_flow(
         assert orchestrator.contexts[-1].available_minutes == 20
 
         orchestrator.failure = "publication failed"
-        failed_action = client.post(
-            "/actions/create-assignment", data={"csrf": csrf}
-        )
+        failed_action = client.post("/actions/create-assignment", data={"csrf": csrf})
         assert failed_action.status_code == 502
         assert failed_action.json()["detail"] == "publication failed"
 

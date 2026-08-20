@@ -14,7 +14,7 @@
       "frames": 1,
       "height": 580,
       "path": "docs/assets/screenshots/doctor.png",
-      "sha256": "2ac754e4cf1ce99737c3707bdc47d0fab3d7da6df9eea1d6051e6d7cda44c32f",
+      "sha256": "8a0447eb31b39c0a9807678e6f8ff56260b4227f8e9478de89201d1ea7dcc47b",
       "source": [
         "adaptive-tutor --config \u2026/config.yaml doctor --offline"
       ],
@@ -65,7 +65,7 @@
       "frames": 1,
       "height": 1101,
       "path": "docs/assets/screenshots/assignment-detail.png",
-      "sha256": "1ab8db75d0d1cd4538161a3dcb4e91fe73ddb36a7c20a0d82edf0f1271033eaf",
+      "sha256": "7ff6e62b11abadd035468626b1f9642eb16e8f7fe4a6a171dea342aa37dc7a6f",
       "source": [
         "http://127.0.0.1:8876/"
       ],
@@ -85,7 +85,7 @@
       "frames": 5,
       "height": 520,
       "path": "docs/assets/screenshots/terminal-tour.gif",
-      "sha256": "7667d0b6adaed584b49d5256ea5b5179678a6eff00f409900eb7432b761037f3",
+      "sha256": "9c87d8fa55aa5c3d25db4f5db0441176cdb70401c2e2fad58d17f424f0f2fe43",
       "source": [
         "setup.png",
         "doctor.png",
@@ -98,7 +98,7 @@
   "generator": "scripts/capture-screenshots",
   "playwright_version": "1.62.0",
   "schema_version": "1.0",
-  "source_digest": "sha256:f30c7072c629fd035cfba226fa9c4551bbcfc3eae6267936beeb0d58642f0cfe",
+  "source_digest": "sha256:f6afdc9b4125f7d9b5c1b1b9a160cecfce4e823d7940375feb70eb15ca14c54a",
   "source_files": [
     "src/adaptive_tutor/cli.py",
     "src/adaptive_tutor/dashboard.py",

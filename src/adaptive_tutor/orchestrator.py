@@ -15,14 +15,14 @@ from .assignments import (
 from .config import TutorSettings
 from .curriculum import CurriculumLoader
 from .db import Database
-from .errors import ExternalServiceError, InfrastructureError, SecurityError
+from .errors import ConfigurationError, ExternalServiceError, InfrastructureError, SecurityError
 from .evaluation import EvaluationService, EvidenceNormalizer, render_review
 from .generation import CurriculumAssignmentGenerator
 from .github import GitHubClient
 from .jobs import JobQueue
 from .models import AssignmentBundle, AssignmentRequest, LearnerContext, QualitativeEvaluation
 from .scheduler import AdaptiveScheduler
-from .security import sha256_digest
+from .security import redact, sha256_digest
 from .time import iso_now
 from .trusted_bundles import TrustedBundleStore
 
@@ -63,8 +63,10 @@ class TutorOrchestrator:
         active = self.assignments.active(self.settings.learner_id)
         if active:
             if active["status"] == "validated" and not active.get("pull_number"):
+                self.github.preflight_assignment_publication()
                 return self._publish_assignment(active, active["bundle"], scheduler=None)
             return {"existing": True, **active}
+        self.github.preflight_assignment_publication()
         candidates = AdaptiveScheduler(self.database).recommend(
             self.settings.learner_id,
             self.settings.active_curriculum,
@@ -101,15 +103,18 @@ class TutorOrchestrator:
             path: (package.root / "references" / path).read_text(encoding="utf-8")
             for path in concept.reference_files
         }
-        concept_state = self.database.fetch_one(
-            """
+        concept_state = (
+            self.database.fetch_one(
+                """
             SELECT mastery_estimate, uncertainty, evidence_count,
                    highest_successful_difficulty, recent_performance,
                    long_term_performance, next_review, confidence_calibration, trend
             FROM mastery WHERE learner_id=? AND concept_id=?
             """,
-            (self.settings.learner_id, candidate.concept_id),
-        ) or {}
+                (self.settings.learner_id, candidate.concept_id),
+            )
+            or {}
+        )
         request = AssignmentRequest(
             learner_id=self.settings.learner_id,
             curriculum_id=self.settings.active_curriculum,
@@ -156,17 +161,48 @@ class TutorOrchestrator:
             "the tutor posts structured feedback after CI evidence is available.\n\n"
             f"<!-- adaptive-tutor-assignment:{assignment_id} -->"
         )
-        published = self.github.publish_assignment(
-            branch=branch,
-            title=f"{assignment_id}: {bundle.title}",
-            body=pull_body,
-            files=public_files,
-        )
         now = iso_now()
+        self.database.execute(
+            "UPDATE assignments SET publication_attempted_at=?, publication_error=NULL, "
+            "updated_at=? WHERE id=?",
+            (now, now, assignment_id),
+        )
+        try:
+            published = self.github.publish_assignment(
+                branch=branch,
+                title=f"{assignment_id}: {bundle.title}",
+                body=pull_body,
+                files=public_files,
+            )
+        except (
+            ConfigurationError,
+            ExternalServiceError,
+            InfrastructureError,
+            SecurityError,
+        ) as exc:
+            detail = redact(str(exc))
+            self.database.execute(
+                "UPDATE assignments SET publication_error=?, updated_at=? WHERE id=?",
+                (detail, iso_now(), assignment_id),
+            )
+            self.database.execute(
+                """
+                INSERT INTO activity(id, learner_id, kind, summary, metadata_json, occurred_at)
+                VALUES (?, ?, 'assignment_publication_failed', ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    self.settings.learner_id,
+                    f"Publication paused for {assignment_id}",
+                    json.dumps({"assignment_id": assignment_id, "detail": detail}, sort_keys=True),
+                    iso_now(),
+                ),
+            )
+            raise
         self.database.execute(
             """
             UPDATE assignments SET status='published', pull_number=?, head_sha=?,
-                publication_sha=?, updated_at=? WHERE id=?
+                publication_sha=?, publication_error=NULL, updated_at=? WHERE id=?
             """,
             (
                 published["pull_number"],
@@ -310,9 +346,7 @@ class TutorOrchestrator:
             )
         bundle = AssignmentBundle.model_validate_json(assignment["bundle_json"])
         if existing is None:
-            evidence = EvidenceNormalizer.parse(
-                self.github.download_evidence(run_id)
-            )
+            evidence = EvidenceNormalizer.parse(self.github.download_evidence(run_id))
             if evidence.assignment_id != assignment["id"] or evidence.commit_sha != commit_sha:
                 raise SecurityError("Actions evidence does not match the assignment and commit")
             trusted_envelope = self.trusted_bundles.load(str(assignment["id"]))
@@ -502,9 +536,11 @@ class TutorOrchestrator:
             ("success" if evaluation.overall_score >= 70 else "failure", attempt["id"]),
         )
         if evaluation.follow_up == "new_stage":
+            attempt_stage = int(attempt.get("stage_number") or 1)
+            current_stage = int(assignment["current_stage"])
             next_stage = (
-                int(assignment["current_stage"])
-                if assignment["status"] == "follow_up"
+                current_stage
+                if current_stage > attempt_stage
                 else self.assignments.unlock_follow_up(str(assignment["id"]))
             )
             if next_stage and assignment["pull_number"]:
@@ -522,6 +558,8 @@ class TutorOrchestrator:
                         f"{stage['instructions']}\n\n{marker}",
                         marker=marker,
                     )
+            if next_stage is None:
+                raise RuntimeError("Validated stage progression has no authored next stage")
             return
         status = "reviewing" if evaluation.follow_up == "human_review" else "completed"
         self.database.execute(
@@ -562,9 +600,7 @@ class TutorOrchestrator:
         return CurriculumLoader().load(Path(str(row["source_path"])))
 
     def _paused(self) -> bool:
-        row = self.database.fetch_one(
-            "SELECT value_json FROM configuration WHERE key='paused'"
-        )
+        row = self.database.fetch_one("SELECT value_json FROM configuration WHERE key='paused'")
         return bool(json.loads(row["value_json"])) if row else False
 
     def _set_paused(self, paused: bool) -> None:

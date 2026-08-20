@@ -766,8 +766,12 @@ def _qualitative_fixture(
         feedback_summary=summary,
         feedback_details=details,
         classification=classifications[scenario.outcome],  # type: ignore[arg-type]
-        follow_up="new_assignment",
-        follow_up_reason="Collect another observation with a different format or context.",
+        follow_up="new_stage" if scenario.outcome == "success" else "new_assignment",
+        follow_up_reason=(
+            "Advance to the authored follow-up stage."
+            if scenario.outcome == "success"
+            else "Collect another observation with a different format or context."
+        ),
         escalation_recommended=False,
     )
 

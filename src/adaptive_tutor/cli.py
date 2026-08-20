@@ -182,15 +182,14 @@ def status(
 ) -> None:
     """Show what to work on now and the evidence behind that choice."""
     settings, database = _runtime(ctx)
-    snapshot = StatusService(database).get_status(
-        settings.learner_id, settings.active_curriculum
-    )
+    snapshot = StatusService(database).get_status(settings.learner_id, settings.active_curriculum)
     if json_output:
         console.print_json(data=snapshot.model_dump(mode="json"))
         return
     active = snapshot.active_assignment
-    state = "PAUSED" if snapshot.paused else "READY"
-    state_style = "yellow" if snapshot.paused else "green"
+    publication_error = str((active or {}).get("publication_error") or "")
+    state = "PAUSED" if snapshot.paused else "ACTION REQUIRED" if publication_error else "READY"
+    state_style = "yellow" if snapshot.paused or publication_error else "green"
     console.print(f"[bold]Adaptive Tutor[/bold]  [{state_style}]{state}[/{state_style}]")
     console.print()
     if active:
@@ -202,6 +201,9 @@ def status(
         )
         if active.get("selection_reason"):
             console.print(f"[dim]Why now:[/dim] {active['selection_reason']}")
+        if publication_error:
+            console.print(f"[yellow]Publication paused:[/yellow] {publication_error}")
+            console.print("[yellow]Retry:[/yellow] adaptive-tutor next")
         location_label, location = _assignment_location(settings, database, active)
         console.print(f"[green]{location_label}:[/green] {location}")
     else:
@@ -350,6 +352,9 @@ def current(
     )
     if bundle.selection_reason:
         console.print(f"[dim]Why now:[/dim] {bundle.selection_reason}")
+    if public.get("publication_error"):
+        console.print(f"[yellow]Publication paused:[/yellow] {public['publication_error']}")
+        console.print("[yellow]Retry:[/yellow] adaptive-tutor next")
     location_label, location = _assignment_location(settings, database, public)
     console.print(f"[green]{location_label}:[/green] {location}")
     if verbose:
@@ -357,9 +362,7 @@ def current(
             f"[dim]Status:[/dim] {public['status']}  [dim]Stage:[/dim] "
             f"{public['current_stage']}  [dim]Branch:[/dim] {public['branch_name']}"
         )
-        files = [
-            item.path for item in bundle.files if item.role not in {"reference", "evaluator"}
-        ]
+        files = [item.path for item in bundle.files if item.role not in {"reference", "evaluator"}]
         console.print(f"[dim]Public files:[/dim] {', '.join(files)}")
 
 
@@ -370,9 +373,7 @@ def hint(ctx: typer.Context) -> None:
     active = AssignmentService(database).active(settings.learner_id)
     if active is None:
         _abort("No active assignment. Run 'adaptive-tutor next' first.")
-    level, content = AssignmentService(database).next_hint(
-        str(active["id"]), settings.learner_id
-    )
+    level, content = AssignmentService(database).next_hint(str(active["id"]), settings.learner_id)
     console.print(Panel(content, title=f"Hint {level}/5", border_style="yellow"))
 
 
@@ -739,9 +740,7 @@ def evaluate_command(
     ),
     assignment_id: str = typer.Option(..., help="Assignment identifier."),
     branch: str = typer.Option(..., help="Assignment branch bound to the trusted envelope."),
-    commit_sha: str = typer.Option(
-        ..., envvar="GITHUB_SHA", help="Evaluated commit SHA."
-    ),
+    commit_sha: str = typer.Option(..., envvar="GITHUB_SHA", help="Evaluated commit SHA."),
 ) -> None:
     """Run the trusted deterministic evaluator in an isolated runner."""
     try:
@@ -943,6 +942,8 @@ def _assignment_location(
     database: Database,
     assignment: dict[str, Any],
 ) -> tuple[str, str]:
+    if assignment.get("publication_error"):
+        return "State", "GitHub publication is paused"
     if assignment.get("pull_number") and settings.github.owner:
         return (
             "Open",
@@ -987,11 +988,7 @@ def _print_readiness(domains: list[Any], *, verbose: bool = False) -> None:
             readiness_value = float(item["readiness"])
             uncertainty = float(item["uncertainty"])
             color = (
-                "green"
-                if readiness_value >= 0.7
-                else "yellow"
-                if readiness_value >= 0.4
-                else "red"
+                "green" if readiness_value >= 0.7 else "yellow" if readiness_value >= 0.4 else "red"
             )
             confidence = "high" if uncertainty <= 0.3 else "medium" if uncertainty <= 0.6 else "low"
             table.add_row(

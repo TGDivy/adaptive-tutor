@@ -92,7 +92,8 @@ class EvaluationService:
     ) -> tuple[str, QualitativeEvaluation, list[str]]:
         automated_row = self.database.fetch_one(
             """
-            SELECT ae.evidence_json, at.assignment_id, at.commit_sha, a.bundle_json
+            SELECT ae.evidence_json, at.assignment_id, at.commit_sha, at.stage_number,
+                   a.title, a.exercise_type, a.difficulty, a.bundle_json
             FROM automated_evaluations ae
             JOIN attempts at ON at.id=ae.attempt_id
             JOIN assignments a ON a.id=at.assignment_id
@@ -103,16 +104,40 @@ class EvaluationService:
         if automated_row is None:
             raise ValueError("Automated evaluation does not belong to this attempt")
         automated = AutomatedEvaluation.model_validate_json(automated_row["evidence_json"])
+        bundle = AssignmentBundle.model_validate_json(automated_row["bundle_json"])
+        stage_number = int(automated_row["stage_number"] or 1)
+        stage = self.database.fetch_one(
+            """
+            SELECT stage_number, title, instructions, unlock_condition
+            FROM assignment_stages WHERE assignment_id=? AND stage_number=?
+            """,
+            (assignment_id, stage_number),
+        )
+        stage_count_row = self.database.fetch_one(
+            "SELECT COUNT(*) count FROM assignment_stages WHERE assignment_id=?",
+            (assignment_id,),
+        )
+        stage_count = int((stage_count_row or {"count": 0})["count"])
         prompt, injection_flags = build_review_prompt(
             trusted_instructions=trusted_instructions,
             rubric=rubric,
             trusted_references=references,
             ci_evidence=automated.model_dump(mode="json"),
             learner_submission=submission,
+            trusted_context={
+                "assignment_id": assignment_id,
+                "title": str(automated_row["title"]),
+                "exercise_type": str(automated_row["exercise_type"]),
+                "difficulty": int(automated_row["difficulty"]),
+                "target_concepts": bundle.concepts,
+                "reference_expectations": bundle.reference_expectations,
+                "stage": stage,
+                "stage_count": stage_count,
+                "has_next_stage": stage_number < stage_count,
+            },
             learner_context={"confidence": learner_confidence},
         )
         evaluation = self.grader.grade(prompt, prompt_version=prompt_version)
-        bundle = AssignmentBundle.model_validate_json(automated_row["bundle_json"])
         self._validate_qualitative(
             evaluation,
             bundle=bundle,
@@ -120,6 +145,8 @@ class EvaluationService:
             assignment_id=assignment_id,
             commit_sha=str(automated_row["commit_sha"]),
             injection_flags=injection_flags,
+            stage_number=stage_number,
+            stage_count=stage_count,
         )
         evaluation_id = str(uuid.uuid4())
         now = iso_now()
@@ -166,6 +193,8 @@ class EvaluationService:
         assignment_id: str,
         commit_sha: str,
         injection_flags: list[str],
+        stage_number: int,
+        stage_count: int,
     ) -> None:
         if automated.assignment_id != assignment_id or automated.commit_sha != commit_sha:
             raise ModelSchemaError("Deterministic evidence is outside the assignment attempt")
@@ -173,9 +202,7 @@ class EvaluationService:
         allowed = set(bundle.concepts)
         if len(concept_ids) != len(set(concept_ids)) or not set(concept_ids).issubset(allowed):
             raise ModelSchemaError("Qualitative evidence contains duplicate or unscoped concepts")
-        observed = [
-            item for item in evaluation.concept_evidence if item.outcome != "not_observed"
-        ]
+        observed = [item for item in evaluation.concept_evidence if item.outcome != "not_observed"]
         if not observed or not allowed.intersection(item.concept_id for item in observed):
             raise ModelSchemaError("Qualitative review contains no scoped concept evidence")
         if any(
@@ -204,12 +231,19 @@ class EvaluationService:
                 "Potential prompt injection was quarantined before learner-state mutation"
             )
         if not automated.learner_passed and (
-            evaluation.overall_score >= 70
-            or any(item.outcome == "success" for item in observed)
+            evaluation.overall_score >= 70 or any(item.outcome == "success" for item in observed)
         ):
-            raise ModelSchemaError(
-                "Qualitative success contradicts failing deterministic evidence"
-            )
+            raise ModelSchemaError("Qualitative success contradicts failing deterministic evidence")
+        has_next_stage = stage_number < stage_count
+        if evaluation.follow_up == "new_stage" and not has_next_stage:
+            raise ModelSchemaError("Qualitative review requested a stage that does not exist")
+        if (
+            automated.learner_passed
+            and evaluation.overall_score >= 70
+            and has_next_stage
+            and evaluation.follow_up not in {"new_stage", "human_review"}
+        ):
+            raise ModelSchemaError("Successful stage review must advance the authored assignment")
 
     def create_appeal(
         self, assignment_id: str, original_evaluation_id: str, learner_argument: str

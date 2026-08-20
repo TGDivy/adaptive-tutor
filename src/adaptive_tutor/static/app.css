@@ -123,6 +123,14 @@ h1, h2, h3 { line-height: 1.18; letter-spacing: 0; }
 }
 .session-main h2 { max-width: 720px; margin-bottom: 9px; font-size: 27px; }
 .selection-reason { max-width: 760px; margin-bottom: 17px; color: #4f5b56; }
+.action-required {
+  max-width: 760px;
+  margin: 0 0 17px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--amber);
+  color: #684710;
+  background: var(--amber-soft);
+}
 .assignment-meta { flex-wrap: wrap; gap: 8px 18px; color: var(--muted); font-size: 13px; text-transform: capitalize; }
 .assignment-meta span { white-space: nowrap; }
 .primary-action {
