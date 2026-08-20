@@ -69,8 +69,17 @@ class ConceptDefinition(StrictModel):
     exercise_types: list[ExerciseType] = Field(min_length=2)
     prerequisites: list[str] = Field(default_factory=list)
     reference_files: list[str] = Field(default_factory=list)
+    goal_terms: list[str] = Field(default_factory=list)
     generation_guidance: str = ""
     grading_guidance: str = ""
+
+    @field_validator("goal_terms")
+    @classmethod
+    def normalized_goal_terms(cls, value: list[str]) -> list[str]:
+        normalized = sorted({" ".join(item.lower().split()) for item in value})
+        if "" in normalized or any(len(item) > 100 for item in normalized):
+            raise ValueError("goal terms must contain 1 to 100 characters")
+        return normalized
 
 
 class ProfileDefinition(StrictModel):

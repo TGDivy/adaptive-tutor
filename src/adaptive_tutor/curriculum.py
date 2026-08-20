@@ -118,8 +118,8 @@ class CurriculumLoader:
                     INSERT INTO concepts(
                         id, curriculum_id, name, domain, description, importance,
                         base_difficulty, exercise_types_json, generation_guidance,
-                        grading_guidance
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        grading_guidance, goal_terms_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         curriculum_id=excluded.curriculum_id,
                         name=excluded.name,
@@ -129,7 +129,8 @@ class CurriculumLoader:
                         base_difficulty=excluded.base_difficulty,
                         exercise_types_json=excluded.exercise_types_json,
                         generation_guidance=excluded.generation_guidance,
-                        grading_guidance=excluded.grading_guidance
+                        grading_guidance=excluded.grading_guidance,
+                        goal_terms_json=excluded.goal_terms_json
                     """,
                     (
                         concept.id,
@@ -142,6 +143,7 @@ class CurriculumLoader:
                         json.dumps([item.value for item in concept.exercise_types]),
                         concept.generation_guidance,
                         concept.grading_guidance,
+                        json.dumps(concept.goal_terms),
                     ),
                 )
                 connection.execute(

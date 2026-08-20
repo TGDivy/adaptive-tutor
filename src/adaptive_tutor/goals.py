@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import UTC, date, datetime
 from enum import StrEnum
@@ -110,13 +111,23 @@ class GoalService:
             if profile is None:
                 raise ValueError(f"Unknown curriculum profile: {curriculum_id}/{profile_id}")
             concept_rows = connection.execute(
-                "SELECT id, domain FROM concepts WHERE curriculum_id=?",
+                """
+                SELECT id, domain, name, goal_terms_json
+                FROM concepts WHERE curriculum_id=?
+                """,
                 (curriculum_id,),
             ).fetchall()
             valid_concepts = {str(row["id"]) for row in concept_rows}
             valid_domains = {str(row["domain"]) for row in concept_rows}
             _validate_selectors(domains, valid_domains, "domain")
             _validate_selectors(concepts, valid_concepts, "concept")
+            if not domains and not concepts:
+                concepts = _infer_goal_concepts(statement_value, concept_rows)
+                if not concepts:
+                    raise ValueError(
+                        f"Learning goal does not match active curriculum '{curriculum_id}'. "
+                        "Load a compatible curriculum or specify a curriculum domain or concept."
+                    )
 
             active_row = connection.execute(
                 """
@@ -229,6 +240,35 @@ def _validate_selectors(values: list[str], valid: set[str], kind: str) -> None:
     unknown = sorted(set(values) - valid)
     if unknown:
         raise ValueError(f"Unknown curriculum {kind}: {', '.join(unknown)}")
+
+
+def _infer_goal_concepts(statement: str, rows: list[Any]) -> list[str]:
+    normalized_statement = _normalize_goal_text(statement)
+    padded_statement = f" {normalized_statement} "
+    matches: list[tuple[int, str]] = []
+    for row in rows:
+        candidates = {
+            str(row["name"]),
+            str(row["domain"]).replace("-", " "),
+            *json.loads(str(row["goal_terms_json"])),
+        }
+        matched_lengths = [
+            len(normalized.split())
+            for item in candidates
+            if (normalized := _normalize_goal_text(str(item)))
+            and f" {normalized} " in padded_statement
+        ]
+        if matched_lengths:
+            matches.append((max(matched_lengths), str(row["id"])))
+    if not matches:
+        return []
+    strongest = max(length for length, _ in matches)
+    threshold = max(1, strongest - 1)
+    return sorted(concept_id for length, concept_id in matches if length >= threshold)
+
+
+def _normalize_goal_text(value: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
 
 
 def _same_goal(

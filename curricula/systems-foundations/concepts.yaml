@@ -7,6 +7,7 @@ concepts:
     base_difficulty: 3
     exercise_types: [code_review, explain_the_code, refactoring]
     reference_files: [resource-lifetime.md]
+    goal_terms: [resource ownership, deterministic cleanup, memory safety]
     generation_guidance: Include early returns or exceptional paths.
     grading_guidance: Reward explicit ownership and deterministic cleanup.
   - id: programming.data-structures
@@ -17,6 +18,7 @@ concepts:
     base_difficulty: 4
     exercise_types: [implementation, refactoring, performance_investigation]
     reference_files: [measurement.md]
+    goal_terms: [data structures, algorithms, complexity]
   - id: programming.invariants
     name: Program invariants
     domain: programming
@@ -25,6 +27,7 @@ concepts:
     base_difficulty: 4
     exercise_types: [debugging, implementation, explain_the_code]
     reference_files: [resource-lifetime.md]
+    goal_terms: [program invariants, systems fundamentals, reliable programs]
   - id: operating-systems.processes
     name: Processes and isolation
     domain: operating-systems
@@ -33,6 +36,7 @@ concepts:
     base_difficulty: 3
     exercise_types: [written, system_design, explain_the_code]
     reference_files: [operating-systems.md]
+    goal_terms: [process isolation, operating systems, system calls]
   - id: operating-systems.virtual-memory
     name: Virtual memory
     domain: operating-systems
@@ -41,6 +45,7 @@ concepts:
     base_difficulty: 5
     exercise_types: [written, performance_investigation, mathematics, system_design]
     reference_files: [operating-systems.md, measurement.md]
+    goal_terms: [virtual memory, page faults, memory protection]
   - id: operating-systems.scheduling
     name: Scheduling and latency
     domain: operating-systems
@@ -49,6 +54,7 @@ concepts:
     base_difficulty: 5
     exercise_types: [written, performance_investigation, mathematics, quiz]
     reference_files: [operating-systems.md, measurement.md]
+    goal_terms: [cpu scheduling, scheduling latency, tail latency]
   - id: concurrency.synchronization
     name: Synchronization
     domain: concurrency
@@ -57,6 +63,7 @@ concepts:
     base_difficulty: 5
     exercise_types: [implementation, debugging, code_review, system_design]
     reference_files: [concurrency.md]
+    goal_terms: [concurrency fundamentals, synchronization, thread safety]
   - id: concurrency.condition-coordination
     name: Condition coordination
     domain: concurrency
@@ -65,6 +72,7 @@ concepts:
     base_difficulty: 5
     exercise_types: [implementation, debugging, code_review, explain_the_code]
     reference_files: [concurrency.md]
+    goal_terms: [condition variables, coordination, missed notifications]
   - id: concurrency.progress
     name: Progress and contention
     domain: concurrency
@@ -73,6 +81,7 @@ concepts:
     base_difficulty: 6
     exercise_types: [debugging, code_review, performance_investigation, written]
     reference_files: [concurrency.md, measurement.md]
+    goal_terms: [deadlock, contention, progress guarantees]
   - id: networking.transport
     name: Transport behavior
     domain: networking
@@ -81,6 +90,7 @@ concepts:
     base_difficulty: 4
     exercise_types: [written, debugging, system_design, quiz]
     reference_files: [networking.md]
+    goal_terms: [transport fundamentals, reliable network services, network services]
   - id: networking.protocol-framing
     name: Protocol framing
     domain: networking
@@ -89,6 +99,7 @@ concepts:
     base_difficulty: 5
     exercise_types: [implementation, debugging, code_review, explain_the_code]
     reference_files: [networking.md]
+    goal_terms: [protocol framing, network protocols, message boundaries]
   - id: networking.flow-control
     name: Flow control and buffering
     domain: networking
@@ -97,6 +108,7 @@ concepts:
     base_difficulty: 6
     exercise_types: [system_design, performance_investigation, written, code_review]
     reference_files: [networking.md, measurement.md]
+    goal_terms: [flow control, backpressure, bounded buffering, reliable network services]
   - id: performance.measurement
     name: Performance measurement
     domain: performance
@@ -105,6 +117,7 @@ concepts:
     base_difficulty: 4
     exercise_types: [performance_investigation, code_review, written, mathematics]
     reference_files: [measurement.md]
+    goal_terms: [performance measurement, benchmarking, performance investigation]
   - id: performance.locality
     name: Data locality
     domain: performance
@@ -113,6 +126,7 @@ concepts:
     base_difficulty: 6
     exercise_types: [performance_investigation, implementation, mathematics, written]
     reference_files: [measurement.md]
+    goal_terms: [data locality, cache performance, memory performance]
   - id: reasoning.communication
     name: Technical communication
     domain: reasoning
@@ -121,3 +135,4 @@ concepts:
     base_difficulty: 3
     exercise_types: [written, code_review, system_design, interviewer_follow_up]
     reference_files: [communication.md]
+    goal_terms: [technical communication, systems fundamentals, engineering reasoning]

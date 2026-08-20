@@ -33,6 +33,7 @@ def test_bundled_curriculum_is_complete_and_persisted(
     }
     assert {item["id"] for item in profiles} == {"generalist", "service-engineer"}
     assert len(relationships) >= 12
+    assert all(item["goal_terms_json"] != "[]" for item in concepts)
     assert curriculum_digest(bundled_curriculum_path()).startswith("sha256:")
 
 
@@ -55,4 +56,16 @@ def test_curriculum_rejects_reference_path_escape(tmp_path: Path) -> None:
     payload["concepts"][0]["reference_files"] = ["../outside.md"]
     path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     with pytest.raises(CurriculumError, match="Invalid reference path"):
+        CurriculumLoader().load(target)
+
+
+def test_curriculum_rejects_empty_goal_alias(tmp_path: Path) -> None:
+    target = tmp_path / "empty-goal-alias"
+    shutil.copytree(bundled_curriculum_path(), target)
+    path = target / "concepts.yaml"
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    payload["concepts"][0]["goal_terms"] = ["resource ownership", " "]
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(CurriculumError, match="goal terms"):
         CurriculumLoader().load(target)

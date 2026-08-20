@@ -152,6 +152,13 @@ def test_cli_goal_set_show_history_and_validation(
     assert invalid_date.exit_code == 1
     assert "YYYY-MM-DD" in invalid_date.output
 
+    incompatible = runner.invoke(
+        app,
+        [*prefix, "goal", "set", "Learn classical oil painting."],
+    )
+    assert incompatible.exit_code == 1
+    assert "does not match active curriculum" in incompatible.output
+
 
 def test_cli_fresh_install_empty_states_and_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

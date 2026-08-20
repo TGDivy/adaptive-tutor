@@ -341,15 +341,27 @@ class LiveSetupExecutor:
         return StepOutcome.complete("Secure configuration and SQLite migrations are present")
 
     def _learning_goal(self, run: SetupRun) -> StepOutcome:
-        goal = GoalService(self.database).set(
-            run.learner_id,
-            run.curriculum_id,
-            self.settings.active_profile,
-            run.goal_statement,
-        )
+        try:
+            goal = GoalService(self.database).set(
+                run.learner_id,
+                run.curriculum_id,
+                self.settings.active_profile,
+                run.goal_statement,
+            )
+        except ValueError as exc:
+            if "does not match active curriculum" not in str(exc):
+                raise
+            return StepOutcome.wait(
+                str(exc),
+                action=(
+                    "Load a curriculum package that declares matching goal terms, "
+                    "select it in config, then restart setup"
+                ),
+            )
         self.service.set_goal_id(run.id, goal.id)
         return StepOutcome.complete(
-            "Learning goal is durable and active", external_ids={"goal_revision": goal.revision}
+            "Learning goal is durable, compatible, and active",
+            external_ids={"goal_revision": goal.revision},
         )
 
     def _service_tls(self, run: SetupRun) -> StepOutcome:

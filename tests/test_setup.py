@@ -8,10 +8,17 @@ import pytest
 from typer.testing import CliRunner
 
 from adaptive_tutor.cli import app
+from adaptive_tutor.config import TutorSettings
 from adaptive_tutor.db import Database
 from adaptive_tutor.errors import ConfigurationError
 from adaptive_tutor.jobs import JobQueue
-from adaptive_tutor.setup import SETUP_STEPS, SetupRun, SetupService, StepOutcome
+from adaptive_tutor.setup import (
+    SETUP_STEPS,
+    LiveSetupExecutor,
+    SetupRun,
+    SetupService,
+    StepOutcome,
+)
 
 
 class RecordingExecutor:
@@ -158,3 +165,27 @@ def test_ready_setup_reopens_for_new_worker_health_step(
     assert resumed.status == "ready"
     assert resumed.steps[-1].name == "worker_health"
     assert resumed.steps[-1].status == "complete"
+
+
+def test_setup_stops_when_goal_does_not_match_active_curriculum(
+    initialized: tuple[Database, object], tmp_path: Path
+) -> None:
+    database, _ = initialized
+    service = SetupService(database)
+    run = service.begin(
+        public_url="https://tutor.example.test",
+        goal_statement="Learn classical oil painting.",
+        config_path=tmp_path / "config.yaml",
+        learner_id="learner",
+        curriculum_id="systems-foundations",
+    )
+    settings = TutorSettings(data_dir=tmp_path / "state", database_path=database.path)
+    outcome = LiveSetupExecutor(
+        settings,
+        database,
+        config_path=tmp_path / "config.yaml",
+    )._learning_goal(run)
+
+    assert outcome.status == "waiting_user"
+    assert "does not match active curriculum" in outcome.detail
+    assert "matching goal terms" in str(outcome.action)

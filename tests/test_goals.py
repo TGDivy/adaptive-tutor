@@ -141,3 +141,39 @@ def test_goal_rejects_unknown_curriculum_selectors_without_mutation(
 
     assert service.active("learner", "systems-foundations") == existing
     assert service.history("learner", "systems-foundations") == [existing]
+
+
+def test_free_form_goal_infers_curriculum_owned_focus(
+    initialized: tuple[Database, object],
+) -> None:
+    database, _ = initialized
+
+    goal = GoalService(database).set(
+        "learner",
+        "systems-foundations",
+        "generalist",
+        "Build reliable network services.",
+    )
+
+    assert goal.focus_domains == []
+    assert goal.focus_concepts == [
+        "networking.flow-control",
+        "networking.transport",
+    ]
+
+
+def test_incompatible_free_form_goal_is_rejected_without_mutation(
+    initialized: tuple[Database, object],
+) -> None:
+    database, _ = initialized
+    service = GoalService(database)
+
+    with pytest.raises(ValueError, match="does not match active curriculum"):
+        service.set(
+            "learner",
+            "systems-foundations",
+            "generalist",
+            "Learn classical oil painting.",
+        )
+
+    assert service.active("learner", "systems-foundations") is None
