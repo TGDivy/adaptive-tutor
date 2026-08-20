@@ -98,7 +98,7 @@
   "generator": "scripts/capture-screenshots",
   "playwright_version": "1.62.0",
   "schema_version": "1.0",
-  "source_digest": "sha256:f6afdc9b4125f7d9b5c1b1b9a160cecfce4e823d7940375feb70eb15ca14c54a",
+  "source_digest": "sha256:e36f177e7bc6a90389a89b00ad709893c1525c65f13f9c2e9acc1d8b4d044ca8",
   "source_files": [
     "src/adaptive_tutor/cli.py",
     "src/adaptive_tutor/dashboard.py",
