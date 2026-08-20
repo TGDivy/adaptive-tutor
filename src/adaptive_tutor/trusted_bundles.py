@@ -8,7 +8,6 @@ import json
 import os
 import re
 import stat
-import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -27,11 +26,8 @@ from .security import sha256_digest
 from .time import parse_time, utc_now
 
 MAX_ENVELOPE_BYTES = 6 * 1024 * 1024
-MAX_STAGE_TTL_SECONDS = 3600
-DEFAULT_STAGE_TTL_SECONDS = 1800
 _ASSIGNMENT_ID = re.compile(r"A-\d{4,12}")
 _BRANCH = re.compile(r"assignment/\d{4,12}-[a-z0-9][a-z0-9-]{2,100}")
-_COMMIT_SHA = re.compile(r"[0-9a-f]{40,64}")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _SIGNATURE = re.compile(r"ed25519:[0-9a-f]{128}")
 
@@ -91,31 +87,18 @@ class PublicEvaluatorManifest(StrictModel):
 
 
 class TrustedBundleEnvelope(StrictModel):
-    """Signed assignment binding retained in the spool or staged for one runner."""
+    """Signed private assignment bundle retained only on the tutor host."""
 
     schema_version: Literal["1.0"] = "1.0"
-    purpose: Literal["spool", "runner"]
+    purpose: Literal["spool"] = "spool"
     assignment_id: str = Field(pattern=_ASSIGNMENT_ID.pattern)
     branch: str = Field(pattern=_BRANCH.pattern)
-    commit_sha: str | None = Field(default=None, pattern=_COMMIT_SHA.pattern)
     issued_at: str = Field(min_length=20, max_length=40)
-    expires_at: str | None = Field(default=None, min_length=20, max_length=40)
     key_id: str = Field(pattern=r"[0-9a-f]{16}")
     bundle_digest: str = Field(pattern=_DIGEST.pattern)
     binding_digest: str = Field(pattern=_DIGEST.pattern)
     bundle: AssignmentBundle
     signature: str = Field(pattern=_SIGNATURE.pattern)
-
-    @model_validator(mode="after")
-    def purpose_fields_are_coherent(self) -> TrustedBundleEnvelope:
-        if self.purpose == "spool" and (self.commit_sha is not None or self.expires_at is not None):
-            raise ValueError("spool envelopes cannot be commit-bound or expiring")
-        if self.purpose == "runner" and (
-            self.commit_sha is None or self.expires_at is None
-        ):
-            raise ValueError("runner envelopes require a commit and expiration")
-        return self
-
 
 def assignment_bundle_digest(bundle: AssignmentBundle) -> str:
     return sha256_digest(_canonical_json(bundle.model_dump(mode="json")))
@@ -211,7 +194,6 @@ class TrustedBundleStore:
 
         envelope = _signed_envelope(
             private_key=private_key,
-            purpose="spool",
             assignment_id=assignment_id,
             branch=branch,
             bundle=bundle,
@@ -253,59 +235,8 @@ class TrustedBundleStore:
         self._prepare(create_key=False)
         _, public_key = self._key_pair(create=False)
         envelope = _read_envelope(self.path_for(assignment_id))
-        _verify_envelope(envelope, public_key, expected_purpose="spool")
+        _verify_envelope(envelope, public_key)
         return envelope
-
-    def stage(
-        self,
-        *,
-        assignment_id: str,
-        branch: str,
-        commit_sha: str,
-        destination: Path,
-        verification_key_destination: Path,
-        ttl_seconds: int = DEFAULT_STAGE_TTL_SECONDS,
-    ) -> TrustedBundleEnvelope:
-        """Verify the spool and issue one short-lived, commit-bound runner envelope."""
-        if _COMMIT_SHA.fullmatch(commit_sha) is None:
-            raise SecurityError("Invalid commit SHA for evaluator staging")
-        if not 1 <= ttl_seconds <= MAX_STAGE_TTL_SECONDS:
-            raise SecurityError("Evaluator staging TTL is outside the allowed range")
-        sealed = self.load(assignment_id)
-        if sealed.assignment_id != assignment_id or sealed.branch != branch:
-            raise SecurityError("Trusted evaluator envelope does not match assignment and branch")
-        private_key, public_key = self._key_pair(create=False)
-        now = utc_now()
-        staged = _signed_envelope(
-            private_key=private_key,
-            purpose="runner",
-            assignment_id=assignment_id,
-            branch=branch,
-            bundle=sealed.bundle,
-            commit_sha=commit_sha,
-            issued_at=now,
-            expires_at=now + timedelta(seconds=ttl_seconds),
-        )
-        envelope_path = _staging_path(destination, self.root, "Evaluator envelope")
-        public_key_path = _staging_path(
-            verification_key_destination,
-            self.root,
-            "Evaluator verification key",
-        )
-        if envelope_path == public_key_path:
-            raise SecurityError("Evaluator envelope and verification key need separate paths")
-        _ensure_private_directory(envelope_path.parent)
-        _ensure_private_directory(public_key_path.parent)
-        _replace_private(public_key_path, _public_key_bytes(public_key))
-        _replace_private(envelope_path, _serialized(staged))
-        verified = read_provisioned_envelope(
-            envelope_path,
-            verification_key_path=public_key_path,
-            now=now,
-        )
-        if verified != staged:
-            raise SecurityError("Staged evaluator envelope failed verification")
-        return verified
 
     def path_for(self, assignment_id: str) -> Path:
         _validate_assignment_id(assignment_id)
@@ -355,36 +286,6 @@ class TrustedBundleStore:
         return private_key, public_key
 
 
-def read_provisioned_envelope(
-    path: Path,
-    *,
-    verification_key_path: Path,
-    now: datetime | None = None,
-) -> TrustedBundleEnvelope:
-    """Authenticate a short-lived envelope provisioned for one runner job."""
-    envelope_path = path.expanduser().absolute()
-    public_key_path = verification_key_path.expanduser().absolute()
-    key_bytes = _read_private_bytes(
-        public_key_path,
-        "Trusted evaluator verification key",
-        maximum=32,
-    )
-    if len(key_bytes) != 32:
-        raise SecurityError("Trusted evaluator verification key has an invalid length")
-    try:
-        public_key = Ed25519PublicKey.from_public_bytes(key_bytes)
-    except ValueError as exc:  # pragma: no cover - length check is authoritative
-        raise SecurityError("Trusted evaluator verification key is invalid") from exc
-    envelope = _read_envelope(envelope_path)
-    _verify_envelope(
-        envelope,
-        public_key,
-        expected_purpose="runner",
-        now=now or utc_now(),
-    )
-    return envelope
-
-
 def _read_envelope(path: Path) -> TrustedBundleEnvelope:
     try:
         payload = _read_private_bytes(
@@ -400,12 +301,7 @@ def _read_envelope(path: Path) -> TrustedBundleEnvelope:
 def _verify_envelope(
     envelope: TrustedBundleEnvelope,
     public_key: Ed25519PublicKey,
-    *,
-    expected_purpose: Literal["spool", "runner"],
-    now: datetime | None = None,
 ) -> None:
-    if envelope.purpose != expected_purpose:
-        raise SecurityError("Trusted evaluator envelope has the wrong purpose")
     digest = assignment_bundle_digest(envelope.bundle)
     if not hmac.compare_digest(envelope.bundle_digest, digest):
         raise SecurityError("Trusted evaluator bundle digest verification failed")
@@ -424,44 +320,25 @@ def _verify_envelope(
     except (InvalidSignature, ValueError) as exc:
         raise SecurityError("Trusted evaluator envelope signature verification failed") from exc
     _validate_identity(envelope.assignment_id, envelope.branch, envelope.bundle)
-    if expected_purpose == "runner":
-        current = now or utc_now()
-        issued = parse_time(envelope.issued_at)
-        expires = parse_time(envelope.expires_at)
-        if issued is None or expires is None or expires <= issued:
-            raise SecurityError("Trusted evaluator envelope has invalid validity timestamps")
-        if issued > current + timedelta(minutes=5):
-            raise SecurityError("Trusted evaluator envelope was issued in the future")
-        if expires > issued + timedelta(seconds=MAX_STAGE_TTL_SECONDS):
-            raise SecurityError("Trusted evaluator envelope validity is too long")
-        if current > expires:
-            raise SecurityError("Trusted evaluator envelope has expired")
 
 
 def _signed_envelope(
     *,
     private_key: Ed25519PrivateKey,
-    purpose: Literal["spool", "runner"],
     assignment_id: str,
     branch: str,
     bundle: AssignmentBundle,
-    commit_sha: str | None = None,
     issued_at: datetime | None = None,
-    expires_at: datetime | None = None,
 ) -> TrustedBundleEnvelope:
     digest = assignment_bundle_digest(bundle)
     issued = issued_at or utc_now()
     public_key = private_key.public_key()
     unsigned: dict[str, Any] = {
         "schema_version": "1.0",
-        "purpose": purpose,
+        "purpose": "spool",
         "assignment_id": assignment_id,
         "branch": branch,
-        "commit_sha": commit_sha,
         "issued_at": issued.astimezone(UTC).isoformat(timespec="seconds"),
-        "expires_at": expires_at.astimezone(UTC).isoformat(timespec="seconds")
-        if expires_at is not None
-        else None,
         "key_id": hashlib.sha256(_public_key_bytes(public_key)).hexdigest()[:16],
         "bundle_digest": digest,
         "binding_digest": assignment_binding_digest(assignment_id, branch, digest),
@@ -592,18 +469,6 @@ def _canonical_json(value: Any) -> bytes:
     ).encode("utf-8")
 
 
-def _staging_path(path: Path, spool_root: Path, label: str) -> Path:
-    target = path.expanduser()
-    if not target.is_absolute():
-        target = Path.cwd() / target
-    target = target.absolute()
-    if _is_within(target, spool_root):
-        raise SecurityError(f"{label} staging destination must be outside the private spool")
-    if target.exists() or target.is_symlink():
-        _assert_private_regular_file(target, f"{label} staging destination")
-    return target
-
-
 def _ensure_private_directory(path: Path) -> None:
     if not path.exists() and not path.is_symlink():
         path.mkdir(parents=True, mode=0o700)
@@ -684,29 +549,3 @@ def _write_once_private(path: Path, payload: bytes) -> None:
         raise
     _assert_private_regular_file(path, "Private evaluator file")
 
-
-def _replace_private(path: Path, payload: bytes) -> None:
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=path.parent,
-            prefix=".adaptive-tutor-envelope-",
-            delete=False,
-        ) as temporary:
-            temporary_path = Path(temporary.name)
-            os.chmod(temporary.name, 0o600)
-            temporary.write(payload)
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        os.replace(temporary_path, path)
-        _assert_private_regular_file(path, "Evaluator staging destination")
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-
-
-def _is_within(path: Path, root: Path) -> bool:
-    resolved_path = path.resolve()
-    resolved_root = root.resolve()
-    return resolved_path == resolved_root or resolved_root in resolved_path.parents

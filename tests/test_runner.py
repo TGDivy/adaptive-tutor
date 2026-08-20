@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import secrets
 import shutil
 import time
@@ -18,14 +17,11 @@ from adaptive_tutor.models import (
     AssignmentBundle,
     AssignmentFile,
     AssignmentRequest,
+    AutomatedEvaluation,
     ExerciseType,
     LearnerContext,
 )
-from adaptive_tutor.runner import (
-    evaluate_public_workspace_to_file,
-    evaluate_workspace_to_file,
-    evaluator_kit_digest,
-)
+from adaptive_tutor.runner import evaluate_public_workspace_to_file, evaluator_kit_digest
 from adaptive_tutor.trusted_bundles import (
     TrustedBundleStore,
     public_manifest_digest,
@@ -86,46 +82,6 @@ def write_solved_workspace(bundle: AssignmentBundle, workspace: Path) -> None:
         target.write_text(content, encoding="utf-8")
 
 
-def provision_bundle(
-    bundle: AssignmentBundle,
-    root: Path,
-    workspace: Path,
-    *,
-    assignment_id: str = "A-0042",
-) -> tuple[Path, Path, str]:
-    branch = f"assignment/{assignment_id.removeprefix('A-')}-{bundle.slug}"
-    store = TrustedBundleStore(root / "state")
-    envelope = store.seal(
-        assignment_id=assignment_id,
-        branch=branch,
-        bundle=bundle,
-    )
-    bundle_path = root / "trusted" / "assignment-bundle.json"
-    key_path = root / "trusted" / "evaluator-signing.pub"
-    store.stage(
-        assignment_id=assignment_id,
-        branch=branch,
-        commit_sha="a" * 40,
-        destination=bundle_path,
-        verification_key_destination=key_path,
-    )
-    metadata = workspace / ".adaptive-tutor" / "assignment.json"
-    metadata.parent.mkdir(parents=True, exist_ok=True)
-    metadata.write_text(
-        json.dumps(
-            {
-                "schema_version": "1.0",
-                "id": assignment_id,
-                "branch": branch,
-                "evaluator_binding": envelope.binding_digest,
-                "evaluator_key_id": envelope.key_id,
-            }
-        ),
-        encoding="utf-8",
-    )
-    return bundle_path, key_path, branch
-
-
 def provision_public_manifest(
     bundle: AssignmentBundle,
     root: Path,
@@ -150,6 +106,31 @@ def provision_public_manifest(
     return key_path, branch, public_manifest_digest(manifest)
 
 
+def evaluate_public(
+    bundle: AssignmentBundle,
+    root: Path,
+    workspace: Path,
+    *,
+    output: Path | None = None,
+) -> AutomatedEvaluation:
+    key_path, branch, manifest_digest = provision_public_manifest(bundle, root, workspace)
+    return evaluate_public_workspace_to_file(
+        verification_key_path=key_path,
+        workspace=workspace,
+        output_path=output or root / "evidence.json",
+        assignment_id="A-0042",
+        branch=branch,
+        commit_sha="a" * 40,
+        dispatch_nonce="b" * 32,
+        expected_manifest_digest=manifest_digest,
+        expected_evaluator_kit_digest=evaluator_kit_digest(),
+        evaluator_ref="e" * 40,
+        workflow_digest="sha256:" + "c" * 64,
+        workflow_commit="d" * 40,
+        repository_id=12345,
+    )
+
+
 def solved_source(bundle: AssignmentBundle) -> tuple[str, str]:
     files = {item.path: item for item in bundle.files}
     replacements = bundle.hidden_evaluator["reference_replacements"]
@@ -165,50 +146,6 @@ def process_with_marker_exists(marker: str) -> bool:
         except (FileNotFoundError, PermissionError, ProcessLookupError):
             continue
     return False
-
-
-def test_hidden_cli_evaluator_writes_verified_credential_free_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bundle = executable_bundle()
-    workspace = tmp_path / "workspace"
-    evidence_path = tmp_path / "evidence" / "adaptive-tutor-evidence.json"
-    write_solved_workspace(bundle, workspace)
-    bundle_path, key_path, branch = provision_bundle(bundle, tmp_path, workspace)
-    monkeypatch.setenv("OPENAI_API_KEY", "must-not-enter-tests")
-
-    result = CliRunner().invoke(
-        app,
-        [
-            "evaluate",
-            "--bundle",
-            str(bundle_path),
-            "--verification-key",
-            str(key_path),
-            "--workspace",
-            str(workspace),
-            "--output",
-            str(evidence_path),
-            "--assignment-id",
-            "A-0042",
-            "--branch",
-            branch,
-            "--commit-sha",
-            "a" * 40,
-        ],
-    )
-
-    assert result.exit_code == 0, result.output
-    evidence = EvidenceNormalizer.parse(evidence_path.read_bytes())
-    assert evidence.assignment_id == "A-0042"
-    assert evidence.commit_sha == "a" * 40
-    assert evidence.learner_passed is True
-    assert evidence.evaluator_binding is not None
-    assert evidence.evaluator_key_id is not None
-    assert evidence.artifact_digest == evidence.computed_digest()
-    assert not bundle_path.exists()
-    assert not key_path.exists()
-    assert "passed" in result.output
 
 
 def test_public_cli_evaluator_writes_fully_bound_hosted_evidence(
@@ -295,101 +232,86 @@ def test_public_evaluator_rejects_modified_public_tests(tmp_path: Path) -> None:
         )
 
 
-def test_evaluator_requires_trusted_input_and_output_outside_workspace(
+def test_public_evaluator_requires_control_and_output_outside_workspace(
     tmp_path: Path,
 ) -> None:
     bundle = executable_bundle()
     workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    workspace.chmod(0o700)
-    store = TrustedBundleStore(tmp_path / "state")
-    branch = f"assignment/0042-{bundle.slug}"
-    store.seal(assignment_id="A-0042", branch=branch, bundle=bundle)
-    bundle_path = workspace / "assignment-bundle.json"
-    key_path = workspace / "evaluator-signing.pub"
-    store.stage(
-        assignment_id="A-0042",
-        branch=branch,
-        commit_sha="a" * 40,
-        destination=bundle_path,
-        verification_key_destination=key_path,
-    )
+    write_solved_workspace(bundle, workspace)
+    key_path, branch, manifest_digest = provision_public_manifest(bundle, tmp_path, workspace)
+    unsafe_key = workspace / "evaluator-signing.pub"
+    shutil.copyfile(key_path, unsafe_key)
+    arguments = {
+        "workspace": workspace,
+        "assignment_id": "A-0042",
+        "branch": branch,
+        "commit_sha": "a" * 40,
+        "dispatch_nonce": "b" * 32,
+        "expected_manifest_digest": manifest_digest,
+        "expected_evaluator_kit_digest": evaluator_kit_digest(),
+        "evaluator_ref": "e" * 40,
+        "workflow_digest": "sha256:" + "c" * 64,
+        "workflow_commit": "d" * 40,
+        "repository_id": 12345,
+    }
 
-    with pytest.raises(SecurityError, match="bundle must be outside"):
-        evaluate_workspace_to_file(
-            bundle_path=bundle_path,
-            verification_key_path=key_path,
-            workspace=workspace,
+    with pytest.raises(SecurityError, match="key must be outside"):
+        evaluate_public_workspace_to_file(
+            verification_key_path=unsafe_key,
             output_path=tmp_path / "evidence.json",
-            assignment_id="A-0042",
-            branch=branch,
-            commit_sha="a" * 40,
+            **arguments,  # type: ignore[arg-type]
         )
-
-    trusted = tmp_path / "trusted" / "assignment-bundle.json"
-    trusted_key = tmp_path / "trusted" / "evaluator-signing.pub"
-    store.stage(
-        assignment_id="A-0042",
-        branch=branch,
-        commit_sha="a" * 40,
-        destination=trusted,
-        verification_key_destination=trusted_key,
-    )
     with pytest.raises(SecurityError, match="output must be outside"):
-        evaluate_workspace_to_file(
-            bundle_path=trusted,
-            verification_key_path=trusted_key,
-            workspace=workspace,
-            output_path=workspace / "adaptive-tutor-evidence.json",
-            assignment_id="A-0042",
-            branch=branch,
-            commit_sha="a" * 40,
+        evaluate_public_workspace_to_file(
+            verification_key_path=key_path,
+            output_path=workspace / "evidence.json",
+            **arguments,  # type: ignore[arg-type]
         )
 
 
-def test_evaluator_rejects_wrong_branch_and_public_binding(tmp_path: Path) -> None:
+def test_public_evaluator_rejects_wrong_branch_and_manifest_digest(tmp_path: Path) -> None:
     bundle = executable_bundle()
     workspace = tmp_path / "workspace"
     write_solved_workspace(bundle, workspace)
-    bundle_path, key_path, branch = provision_bundle(bundle, tmp_path, workspace)
-
-    with pytest.raises(SecurityError, match="does not match assignment"):
-        evaluate_workspace_to_file(
-            bundle_path=bundle_path,
-            verification_key_path=key_path,
-            workspace=workspace,
-            output_path=tmp_path / "evidence.json",
-            assignment_id="A-0042",
+    key_path, branch, manifest_digest = provision_public_manifest(bundle, tmp_path, workspace)
+    common = {
+        "verification_key_path": key_path,
+        "workspace": workspace,
+        "output_path": tmp_path / "evidence.json",
+        "assignment_id": "A-0042",
+        "commit_sha": "a" * 40,
+        "dispatch_nonce": "b" * 32,
+        "expected_evaluator_kit_digest": evaluator_kit_digest(),
+        "evaluator_ref": "e" * 40,
+        "workflow_digest": "sha256:" + "c" * 64,
+        "workflow_commit": "d" * 40,
+        "repository_id": 12345,
+    }
+    with pytest.raises(SecurityError, match="branch does not match"):
+        evaluate_public_workspace_to_file(
             branch=f"assignment/0043-{bundle.slug}",
-            commit_sha="a" * 40,
+            expected_manifest_digest=manifest_digest,
+            **common,  # type: ignore[arg-type]
         )
-
-    metadata_path = workspace / ".adaptive-tutor" / "assignment.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["evaluator_binding"] = "sha256:" + "0" * 64
-    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-    with pytest.raises(SecurityError, match="metadata does not match"):
-        evaluate_workspace_to_file(
-            bundle_path=bundle_path,
-            verification_key_path=key_path,
-            workspace=workspace,
-            output_path=tmp_path / "evidence.json",
-            assignment_id="A-0042",
+    with pytest.raises(SecurityError, match="dispatched digest"):
+        evaluate_public_workspace_to_file(
             branch=branch,
-            commit_sha="a" * 40,
+            expected_manifest_digest="sha256:" + "0" * 64,
+            **common,  # type: ignore[arg-type]
         )
 
 
 @pytest.mark.parametrize("link_kind", ["file", "parent"])
-def test_evaluator_rejects_submission_symlinks(tmp_path: Path, link_kind: str) -> None:
+def test_public_evaluator_rejects_submission_symlinks(
+    tmp_path: Path, link_kind: str
+) -> None:
     bundle = executable_bundle()
     workspace = tmp_path / "workspace"
     write_solved_workspace(bundle, workspace)
-    bundle_path, key_path, branch = provision_bundle(bundle, tmp_path, workspace)
     candidate = next(
         item
         for item in bundle.files
-        if item.role in {"starter", "public_test"} and (link_kind == "file" or "/" in item.path)
+        if item.role == "starter" and (link_kind == "file" or "/" in item.path)
     )
     target = workspace / candidate.path
     if link_kind == "file":
@@ -405,15 +327,7 @@ def test_evaluator_rejects_submission_symlinks(tmp_path: Path, link_kind: str) -
         parent.symlink_to(outside_parent, target_is_directory=True)
 
     with pytest.raises(SecurityError, match="not safely readable"):
-        evaluate_workspace_to_file(
-            bundle_path=bundle_path,
-            verification_key_path=key_path,
-            workspace=workspace,
-            output_path=tmp_path / "evidence.json",
-            assignment_id="A-0042",
-            branch=branch,
-            commit_sha="a" * 40,
-        )
+        evaluate_public(bundle, tmp_path, workspace)
 
 
 def test_learner_zero_exit_cannot_forge_passing_completion(tmp_path: Path) -> None:
@@ -421,21 +335,9 @@ def test_learner_zero_exit_cannot_forge_passing_completion(tmp_path: Path) -> No
     workspace = tmp_path / "workspace"
     write_solved_workspace(bundle, workspace)
     source_path, _ = solved_source(bundle)
-    (workspace / source_path).write_text(
-        "import os\nos._exit(0)\n",
-        encoding="utf-8",
-    )
-    bundle_path, key_path, branch = provision_bundle(bundle, tmp_path, workspace)
+    (workspace / source_path).write_text("import os\nos._exit(0)\n", encoding="utf-8")
 
-    evidence = evaluate_workspace_to_file(
-        bundle_path=bundle_path,
-        verification_key_path=key_path,
-        workspace=workspace,
-        output_path=tmp_path / "evidence.json",
-        assignment_id="A-0042",
-        branch=branch,
-        commit_sha="a" * 40,
-    )
+    evidence = evaluate_public(bundle, tmp_path, workspace)
 
     assert evidence.learner_passed is False
     test_check = next(check for check in evidence.checks if check.category == "test")
@@ -459,91 +361,12 @@ def test_worker_cannot_forge_completion_through_inherited_descriptors(tmp_path: 
         "os._exit(0)\n",
         encoding="utf-8",
     )
-    bundle_path, key_path, branch = provision_bundle(bundle, tmp_path, workspace)
     output = tmp_path / "evidence.json"
 
-    evidence = evaluate_workspace_to_file(
-        bundle_path=bundle_path,
-        verification_key_path=key_path,
-        workspace=workspace,
-        output_path=output,
-        assignment_id="A-0042",
-        branch=branch,
-        commit_sha="a" * 40,
-    )
+    evidence = evaluate_public(bundle, tmp_path, workspace, output=output)
 
     assert evidence.learner_passed is False
     assert "forged" not in output.read_text(encoding="utf-8")
-
-
-def test_learner_changes_to_public_tests_are_not_trusted(tmp_path: Path) -> None:
-    bundle = executable_bundle()
-    workspace = tmp_path / "workspace"
-    write_solved_workspace(bundle, workspace)
-    public_test = next(item for item in bundle.files if item.role == "public_test")
-    (workspace / public_test.path).write_text("import os\nos._exit(0)\n", encoding="utf-8")
-    bundle_path, key_path, branch = provision_bundle(bundle, tmp_path, workspace)
-
-    evidence = evaluate_workspace_to_file(
-        bundle_path=bundle_path,
-        verification_key_path=key_path,
-        workspace=workspace,
-        output_path=tmp_path / "evidence.json",
-        assignment_id="A-0042",
-        branch=branch,
-        commit_sha="a" * 40,
-    )
-
-    assert evidence.learner_passed is True
-
-
-def test_hidden_output_and_evidence_destination_are_quarantined(tmp_path: Path) -> None:
-    marker = "PRIVATE-EVALUATOR-MARKER-7A9C"
-    bundle = executable_bundle()
-    bundle = bundle.model_copy(
-        update={
-            "files": [
-                item.model_copy(update={"content": f"# {marker}\n{item.content}"})
-                if item.role == "evaluator"
-                else item
-                for item in bundle.files
-            ]
-        }
-    )
-    workspace = tmp_path / "workspace"
-    write_solved_workspace(bundle, workspace)
-    source_path, reference = solved_source(bundle)
-    attack = (
-        "from pathlib import Path as _AttackPath\n"
-        "for _hidden in _AttackPath('/evaluation/trusted-tests/hidden').rglob('*'):\n"
-        "    if _hidden.is_file():\n"
-        "        print(_hidden.read_text(errors='replace'))\n"
-        "for _destination in ('/adaptive-tutor-evidence.json', "
-        "'/evaluation/adaptive-tutor-evidence.json'):\n"
-        "    try:\n"
-        "        _AttackPath(_destination).write_text('{\\\"forged\\\": true}')\n"
-        "    except OSError:\n"
-        "        pass\n"
-    )
-    (workspace / source_path).write_text(f"{attack}\n{reference}", encoding="utf-8")
-    bundle_path, key_path, branch = provision_bundle(bundle, tmp_path, workspace)
-    output = tmp_path / "evidence" / "adaptive-tutor-evidence.json"
-
-    evidence = evaluate_workspace_to_file(
-        bundle_path=bundle_path,
-        verification_key_path=key_path,
-        workspace=workspace,
-        output_path=output,
-        assignment_id="A-0042",
-        branch=branch,
-        commit_sha="a" * 40,
-    )
-
-    serialized = output.read_text(encoding="utf-8")
-    assert evidence.learner_passed is True
-    assert marker not in serialized
-    assert "forged" not in serialized
-    assert evidence.artifact_digest == evidence.computed_digest()
 
 
 def test_sandbox_reaps_learner_child_processes(tmp_path: Path) -> None:
@@ -563,17 +386,8 @@ def test_sandbox_reaps_learner_child_processes(tmp_path: Path) -> None:
         ")\n"
     )
     (workspace / source_path).write_text(f"{attack}\n{reference}", encoding="utf-8")
-    bundle_path, key_path, branch = provision_bundle(bundle, tmp_path, workspace)
 
-    evidence = evaluate_workspace_to_file(
-        bundle_path=bundle_path,
-        verification_key_path=key_path,
-        workspace=workspace,
-        output_path=tmp_path / "evidence.json",
-        assignment_id="A-0042",
-        branch=branch,
-        commit_sha="a" * 40,
-    )
+    evidence = evaluate_public(bundle, tmp_path, workspace)
 
     deadline = time.monotonic() + 2
     while process_with_marker_exists(marker) and time.monotonic() < deadline:
@@ -592,20 +406,38 @@ def test_learner_output_is_bounded_and_never_becomes_evidence(tmp_path: Path) ->
         f"import os as _attack_os\n_attack_os.write(1, b'{marker}' + b'x' * (3 * 1024 * 1024))\n"
     )
     (workspace / source_path).write_text(f"{attack}\n{reference}", encoding="utf-8")
-    bundle_path, key_path, branch = provision_bundle(bundle, tmp_path, workspace)
     output = tmp_path / "evidence.json"
 
-    evidence = evaluate_workspace_to_file(
-        bundle_path=bundle_path,
-        verification_key_path=key_path,
-        workspace=workspace,
-        output_path=output,
-        assignment_id="A-0042",
-        branch=branch,
-        commit_sha="a" * 40,
-    )
+    evidence = evaluate_public(bundle, tmp_path, workspace, output=output)
 
     serialized = output.read_text(encoding="utf-8")
     assert evidence.learner_passed is True
     assert len(serialized) < 16 * 1024
     assert marker not in serialized
+
+
+def test_written_submission_policy_requires_changed_nonempty_content(tmp_path: Path) -> None:
+    executable = executable_bundle()
+    written = executable.model_copy(
+        update={
+            "files": [item for item in executable.files if item.role != "public_test"],
+            "validation_command": [],
+        }
+    )
+    workspace = tmp_path / "workspace"
+    for item in written.files:
+        if item.role in {"instructions", "starter"}:
+            target = workspace / item.path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(item.content, encoding="utf-8")
+
+    unchanged = evaluate_public(written, tmp_path / "unchanged", workspace)
+    assert unchanged.learner_passed is False
+
+    starter = next(item for item in written.files if item.role == "starter")
+    (workspace / starter.path).write_text("A reasoned learner response.\n", encoding="utf-8")
+    changed = evaluate_public(written, tmp_path / "changed", workspace)
+    assert changed.learner_passed is True
+    assert next(check for check in changed.checks if check.name == "ephemeral sandbox").status == (
+        "skipped"
+    )

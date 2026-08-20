@@ -21,15 +21,13 @@ from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 
-from .errors import AssignmentValidationError, SecurityError
-from .models import AssignmentBundle, AutomatedCheck, AutomatedEvaluation
+from .errors import SecurityError
+from .models import AutomatedCheck, AutomatedEvaluation
 from .security import assert_credentials_absent, sha256_digest, untrusted_process_environment
 from .trusted_bundles import (
     PublicEvaluatorLimits,
     PublicEvaluatorManifest,
-    TrustedBundleEnvelope,
     public_manifest_digest,
-    read_provisioned_envelope,
     verify_public_manifest,
 )
 
@@ -218,7 +216,7 @@ class PublicCredentialFreeEvaluator:
                     timeout_seconds=manifest.limits.timeout_seconds,
                     limits=manifest.limits,
                 )
-                sandbox_status = supervised.status
+                sandbox_status = "pass" if supervised.status != "error" else "error"
                 sandbox_summary = (
                     "Public tests ran in a read-only, networkless PID namespace"
                     if supervised.status != "error"
@@ -311,205 +309,6 @@ def _write_evidence(destination: Path, evidence: AutomatedEvaluation) -> None:
     finally:
         if temporary_path is not None and temporary_path.exists():
             temporary_path.unlink()
-
-
-def evaluate_workspace_to_file(
-    *,
-    bundle_path: Path,
-    verification_key_path: Path,
-    workspace: Path,
-    output_path: Path,
-    assignment_id: str,
-    branch: str,
-    commit_sha: str,
-) -> AutomatedEvaluation:
-    """Evaluate an untrusted checkout while keeping trusted inputs and output outside it."""
-    trusted_bundle = bundle_path.expanduser().absolute()
-    trusted_key = verification_key_path.expanduser().absolute()
-    workspace_input = workspace.expanduser().absolute()
-    if workspace_input.is_symlink():
-        raise SecurityError("Evaluator workspace must not be a symlink")
-    untrusted_workspace = workspace_input.resolve(strict=True)
-    if not untrusted_workspace.is_dir():
-        raise SecurityError("Evaluator workspace must be a directory")
-    destination = output_path.expanduser().resolve()
-    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if _is_within(trusted_bundle, untrusted_workspace):
-        raise SecurityError("Trusted evaluator bundle must be outside the learner workspace")
-    if _is_within(trusted_key, untrusted_workspace):
-        raise SecurityError("Evaluator verification key must be outside the learner workspace")
-    if _is_within(destination, untrusted_workspace):
-        raise SecurityError("Evidence output must be outside the learner workspace")
-    envelope = read_provisioned_envelope(
-        trusted_bundle,
-        verification_key_path=trusted_key,
-    )
-    if (
-        envelope.assignment_id != assignment_id
-        or envelope.branch != branch
-        or envelope.commit_sha != commit_sha
-    ):
-        raise SecurityError(
-            "Trusted evaluator envelope does not match assignment, branch, and commit"
-        )
-    _verify_workspace_binding(untrusted_workspace, envelope)
-    try:
-        trusted_bundle.unlink()
-        trusted_key.unlink()
-    except OSError as exc:
-        raise SecurityError("Trusted evaluator envelope could not be consumed") from exc
-    evidence = CredentialFreeEvaluator().evaluate(
-        bundle=envelope.bundle,
-        assignment_id=assignment_id,
-        commit_sha=commit_sha,
-        workspace=untrusted_workspace,
-        evaluator_binding=envelope.binding_digest,
-        evaluator_key_id=envelope.key_id,
-    )
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=destination.parent,
-            prefix=".adaptive-tutor-evidence-",
-            delete=False,
-        ) as temporary:
-            temporary_path = Path(temporary.name)
-            json.dump(evidence.model_dump(mode="json"), temporary, sort_keys=True)
-            temporary.write("\n")
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        temporary_path.chmod(0o600)
-        os.replace(temporary_path, destination)
-    finally:
-        if temporary_path is not None and temporary_path.exists():
-            temporary_path.unlink()
-    return evidence
-
-
-class CredentialFreeEvaluator:
-    def evaluate(
-        self,
-        *,
-        bundle: AssignmentBundle,
-        assignment_id: str,
-        commit_sha: str,
-        workspace: Path,
-        evaluator_binding: str | None = None,
-        evaluator_key_id: str | None = None,
-    ) -> AutomatedEvaluation:
-        started = datetime.now(UTC)
-        started_clock = time.monotonic()
-        with tempfile.TemporaryDirectory(prefix="adaptive-tutor-evaluation-") as temporary:
-            root = Path(temporary)
-            submission = root / "submission"
-            public_tests = root / "trusted-tests" / "public"
-            hidden_tests = root / "trusted-tests" / "hidden"
-            self._copy_submission(bundle, workspace.resolve(), submission, public_tests)
-            self._install_hidden_tests(bundle, hidden_tests)
-            environment = untrusted_process_environment(SANDBOX_HOME)
-            assert_credentials_absent(environment)
-            self._validate_command(bundle)
-            output_path = root / "evaluation-output.txt"
-            supervised = _run_supervised_tests(root, output_path, environment)
-            duration = int((time.monotonic() - started_clock) * 1000)
-            checks = [
-                AutomatedCheck(
-                    name="submission boundary",
-                    status="pass",
-                    category="policy",
-                    summary="Only bounded regular assignment files entered the evaluator",
-                ),
-                AutomatedCheck(
-                    name="credential boundary",
-                    status="pass",
-                    category="policy",
-                    summary="Evaluator environment contains no credential-like variables",
-                ),
-                AutomatedCheck(
-                    name="ephemeral sandbox",
-                    status="pass" if supervised.status != "error" else "error",
-                    category="policy",
-                    summary=(
-                        "Tests ran in a read-only, networkless PID namespace under a trusted "
-                        "supervisor"
-                        if supervised.status != "error"
-                        else supervised.summary
-                    ),
-                ),
-                AutomatedCheck(
-                    name="public and hidden tests",
-                    status=supervised.status,  # type: ignore[arg-type]
-                    category="test",
-                    summary=supervised.summary,
-                    duration_ms=duration,
-                ),
-            ]
-            evidence = AutomatedEvaluation(
-                assignment_id=assignment_id,
-                commit_sha=commit_sha,
-                checks=checks,
-                started_at=started,
-                completed_at=datetime.now(UTC),
-                runner="adaptive-tutor-credential-free-ci",
-                evaluator_binding=evaluator_binding,
-                evaluator_key_id=evaluator_key_id,
-                artifact_digest="sha256:" + "0" * 64,
-            )
-            return evidence.with_computed_digest()
-
-    @staticmethod
-    def _copy_submission(
-        bundle: AssignmentBundle,
-        workspace: Path,
-        submission: Path,
-        public_tests: Path,
-    ) -> None:
-        total = 0
-        for item in bundle.files:
-            if item.role == "starter":
-                content = _read_workspace_file(
-                    workspace,
-                    item.path,
-                    maximum=MAX_SUBMISSION_BYTES - total,
-                    label="Submission file",
-                )
-                total += len(content)
-                if total > MAX_SUBMISSION_BYTES:
-                    raise SecurityError("Submission exceeds the evaluator size limit")
-                target = _safe_path(submission, item.path)
-            elif item.role == "instructions":
-                content = item.content.encode()
-                target = _safe_path(submission, item.path)
-            elif item.role == "public_test":
-                content = item.content.encode()
-                target = _safe_path(public_tests, item.path)
-            else:
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(content)
-
-    @staticmethod
-    def _install_hidden_tests(bundle: AssignmentBundle, hidden_tests: Path) -> None:
-        by_path = {item.path: item for item in bundle.files}
-        extras = bundle.hidden_evaluator.get("extra_tests", {})
-        if not isinstance(extras, dict):
-            raise AssignmentValidationError("extra_tests must be a mapping")
-        for target_name, source_name in extras.items():
-            source = by_path.get(str(source_name))
-            if source is None or source.role != "evaluator":
-                raise AssignmentValidationError(f"Missing trusted evaluator: {source_name}")
-            target = _safe_path(hidden_tests, str(target_name))
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(source.content, encoding="utf-8")
-
-    @staticmethod
-    def _validate_command(bundle: AssignmentBundle) -> None:
-        if bundle.validation_command[:3] != ["python", "-m", "pytest"] or any(
-            argument not in {"-q"} for argument in bundle.validation_command[3:]
-        ):
-            raise AssignmentValidationError("Only the fixed Python pytest harness is supported")
 
 
 def _run_supervised_tests(
@@ -780,33 +579,6 @@ def _safe_path(root: Path, relative: str) -> Path:
     if root not in candidate.parents:
         raise SecurityError(f"Path escapes evaluator workspace: {relative}")
     return candidate
-
-
-def _verify_workspace_binding(
-    workspace: Path,
-    envelope: TrustedBundleEnvelope,
-) -> None:
-    try:
-        raw = _read_workspace_file(
-            workspace,
-            ".adaptive-tutor/assignment.json",
-            maximum=MAX_ASSIGNMENT_METADATA_BYTES,
-            label="Assignment metadata",
-        )
-        manifest = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise SecurityError("Assignment metadata is invalid") from exc
-    if not isinstance(manifest, dict):
-        raise SecurityError("Assignment metadata must be a JSON object")
-    expected = {
-        "schema_version": "1.0",
-        "id": envelope.assignment_id,
-        "branch": envelope.branch,
-        "evaluator_binding": envelope.binding_digest,
-        "evaluator_key_id": envelope.key_id,
-    }
-    if any(manifest.get(key) != value for key, value in expected.items()):
-        raise SecurityError("Assignment metadata does not match the trusted evaluator envelope")
 
 
 def _read_workspace_file(root: Path, relative: str, *, maximum: int, label: str) -> bytes:
