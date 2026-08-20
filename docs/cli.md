@@ -17,7 +17,7 @@ adaptive-tutor COMMAND --help
 | `doctor` | Check configuration, permissions, database, tooling, Codex, GitHub, webhook, and service health. |
 | `status` | Summarize runtime state, active work, reviews, misconceptions, readiness, and model cost. |
 | `next` | Select and publish the next assignment; `--dry-run` only recommends. |
-| `current` | Show the active assignment without hidden evaluator or reference material. |
+| `current` | Show the active assignment without private evaluator or reference material. |
 | `hint` | Reveal and record the next of five progressive hint levels. |
 | `readiness` | Show weighted readiness and uncertainty by domain. |
 | `concepts` | Inspect mastery, uncertainty, evidence, spacing, calibration, and trend by concept. |
@@ -72,12 +72,12 @@ service or intentionally disabled Codex worker—into a nonzero exit status.
 | `restore PATH --yes` | Replace state from an integrity-checked backup while services are stopped. |
 | `curriculum-load PATH` | Validate and persist a curriculum package without core-code changes. |
 | `webhook-setup` | Create or reconcile the configured signed repository webhook. |
-| `stage-evaluator ID --run-id RUN --branch BRANCH --commit-sha SHA --output PATH --verification-key-output PATH` | Verify a protected run and issue one short-lived evaluator envelope. |
+| `evaluate-public` | Internal protected-workflow entry point that verifies a signed public manifest and writes normalized evidence. |
 
-`serve`, `worker`, `grader`, `evaluate`, and `stage-evaluator` are hidden from
-the concise interactive help because they are service or provisioner entry
-points, not everyday learning commands. Their behavior is covered in
-[Deployment and recovery](operations.md).
+`serve`, `worker`, `grader`, and `evaluate-public` are hidden from the concise
+interactive help because they are service or protected-workflow entry points,
+not everyday learning commands. Their behavior is covered in [Deployment and
+recovery](operations.md) and [Evaluation](evaluation.md).
 
 ## Exit behavior
 
@@ -85,5 +85,5 @@ points, not everyday learning commands. Their behavior is covered in
 - Configuration, validation, security, or integration errors return nonzero and
   print a bounded diagnostic.
 - JSON commands put machine-readable data on standard output.
-- Raw tokens, private keys, trusted solutions, and hidden evaluator material
+- Raw tokens, private keys, trusted solutions, and private evaluator material
   are never printed by normal status commands.

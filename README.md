@@ -56,8 +56,8 @@ uv run adaptive-tutor status
 
 The demo uses no credentials or network calls. It loads curriculum data,
 selects and validates assignments, executes product-owned passing and failing
-submissions against public and hidden tests in a scrubbed process, applies
-schema-valid fixture reviews transactionally, and generates a progress report.
+fixture submissions in a scrubbed process, applies schema-valid fixture reviews
+transactionally, and generates a progress report.
 See the [installation guide](https://tgdivy.github.io/adaptive-tutor/getting-started/)
 for isolated installs, dashboard startup, and remote integration.
 
@@ -66,7 +66,7 @@ for isolated installs, dashboard startup, and remote integration.
 ```text
 GitHub webhook ──► durable event/job queue ──► evaluator orchestration
                                                         │
-credential-free Actions ──► normalized evidence ────────┤
+GitHub-hosted Actions ──► normalized evidence ──────────┤
                                                         ▼
                                                 durable state worker
                                                         │ Unix socket
@@ -90,9 +90,11 @@ GitHub credentials; SQLite—not model history—is the system of record.
 - Duplicate deliveries are idempotent.
 - Untrusted code never receives model, repository-write, dashboard, or agent
   credentials.
-- Hidden evaluator bundles are signed, spooled before branch publication, and
-  bound to one assignment, branch, and commit before a trusted provisioner
-  stages them for a protected workflow dispatch.
+- Each learner branch carries an Ed25519-signed public evaluator manifest that
+  binds the assignment, branch, allowed files, visible test digests, fixed
+  command and limits, and exact evaluator-kit digest.
+- Private references, rubrics, and evaluator guidance remain in an owner-only
+  tutor-host bundle and never enter GitHub Actions.
 - Repository and learner text is delimited as untrusted data for model review.
 - The dashboard binds to loopback and requires authorization by default;
   exposed binds refuse to start without a token.
@@ -118,6 +120,10 @@ docker compose up -d tutor
 
 Follow the [operations guide](https://tgdivy.github.io/adaptive-tutor/operations/)
 rather than exposing the example service directly.
+
+The local runtime deployment paths are implemented. Automated bootstrap of the
+protected GitHub evaluator controls is not yet supported, so the remote GitHub
+learning loop is not install-ready in this construction build.
 
 ## Project status
 

@@ -95,7 +95,34 @@ branch and pull request when you run:
 adaptive-tutor next
 ```
 
-Do not delete the assignment row or its trusted evaluator spool while retrying.
+Do not delete the assignment row, signed public-manifest state, or owner-only
+tutor-host bundle while retrying.
+
+## Evaluator controls are not configured
+
+Remote assignment creation requires protected workflow/key state plus a matching
+`evaluator_control_planes` record. The current construction build does not
+provide a supported bootstrap or trust-anchor rotation command. Repository and
+webhook checks can therefore pass while assignment publication still stops at
+the evaluator-control check.
+
+Do not create the database row manually, substitute an unprotected workflow, or
+disable the check. Use the local demo until the authenticated bootstrap path is
+implemented.
+
+## GitHub-hosted evaluation fails
+
+Treat a manifest, key-ID, workflow, evaluator-kit, repository-ID, nonce, or
+commit mismatch as a security failure. Confirm that the run came from the
+protected default-branch workflow, that the workflow and
+`.adaptive-tutor/evaluator-signing.pub` were read at `github.workflow_sha`, and
+that the learner and public evaluator checkouts used the dispatched commits.
+Do not rerun learner code in a credentialed job as a workaround.
+
+If Bubblewrap installation or namespace setup fails, classify the run as
+infrastructure failure and leave learner state unchanged. Public-test edits are
+not accepted: restore the signed bytes in the learner branch and submit a new
+commit.
 
 ## Webhook is missing or rejected
 

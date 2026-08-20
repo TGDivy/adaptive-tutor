@@ -1,7 +1,7 @@
 # GitHub App and webhooks
 
 Remote learning uses two private repositories: a learner workspace and a
-separate curriculum/evaluator repository. Install a dedicated GitHub App only
+separate curriculum repository. Install a dedicated GitHub App only
 on those selected repositories; do not use an organization-wide personal token.
 
 ## Repository roles
@@ -9,7 +9,7 @@ on those selected repositories; do not use an organization-wide personal token.
 | Repository | Contains | Access |
 | --- | --- | --- |
 | Learning workspace | Assignment branches, learner commits, pull requests, CI evidence, reviews | Learner + tutor App |
-| Curriculum repository | Trusted references, hidden evaluator guidance, private package data | Tutor App/operators only |
+| Curriculum repository | Trusted references, private evaluator guidance, private package data | Tutor App/operators only |
 | Public product | Generic engine, neutral bundled curriculum, docs, deployment templates | Public |
 
 The public repository must never name or freeze private curriculum intent or
@@ -74,6 +74,9 @@ callback is active with required events, and the App key and webhook secret are
 present. `webhook-setup` is idempotent: it reconciles an existing matching hook
 or creates one.
 
+These commands configure repository access and webhook delivery only. They do
+not install or record the protected evaluator control plane described below.
+
 ## Webhook request path
 
 For every delivery, the service:
@@ -93,59 +96,64 @@ true` and does not create duplicate learner evidence.
 
 Protect the workspace default branch. Disallow force pushes and deletion,
 restrict changes to evaluator/workflow paths, and require the tutor App or an
-operator review for those protected files. Learner
-branches should change only assignment-visible paths. Apply a repository
-ruleset that blocks learner writes to `.github/workflows/**` on every branch;
-default-branch protection alone does not prevent a new branch workflow from
-requesting a self-hosted runner.
+operator review for those protected files. Learner branches should change only
+assignment-visible paths. Apply a repository ruleset that blocks learner writes
+to `.github/workflows/**` on every branch; default-branch protection alone does
+not prevent an assignment branch from introducing an executable workflow.
 
 The evaluator workflow is dispatched by the tutor on the protected default
 branch; assignment pushes never supply its executable definition. It uses a
-pinned action/toolchain, `persist-credentials: false`, read-only job token
+pinned action/toolchain, `persist-credentials: false`, read-only job-token
 permissions, and an isolated credential-free environment for learner code.
-Never use `pull_request_target`, or a `push` workflow loaded from an assignment
-branch, to execute learner content.
+Never use `pull_request_target`, or a workflow definition loaded from an
+assignment branch, to execute learner content.
 
-The repository includes a hardened workspace template at
-`deploy/workspace/adaptive-tutor-evaluate.yml`. Install it as
-`.github/workflows/adaptive-tutor-evaluate.yml` on the protected default branch.
-It runs only on dedicated, one-job runners carrying the
-`adaptive-tutor-ephemeral` label. The runner must be destroyed after the job; it
-must never be the tutor host or a machine holding GitHub-write, model, personal
-agent, or dashboard credentials.
+The repository includes the workflow contract at
+`deploy/workspace/adaptive-tutor-evaluate.yml`; its protected workspace path is
+`.github/workflows/adaptive-tutor-evaluate.yml`. The other protected control is
+the tutor signing key's public half at
+`.adaptive-tutor/evaluator-signing.pub`. The private half and complete assignment
+bundles remain on the tutor host.
 
-The tutor signs and writes an assignment-and-branch-bound envelope to its
-owner-only evaluator spool before it calls GitHub to create the branch or pull
-request. The signed push webhook then records the submission and dispatches the
-protected workflow with a typed assignment ID, branch, and commit. Its run title
-exposes those bounded identifiers to the runner autoscaler.
+> **Construction status:** the current public CLI does not install these files,
+> establish their branch protections, or populate the required
+> `evaluator_control_planes` state. Do not hand-edit SQLite to bypass that
+> check. Remote assignment publication is not supported end to end until an
+> authenticated bootstrap and trust-anchor rotation path lands.
 
-Before registering the ephemeral runner, the trusted provisioner runs
-`adaptive-tutor stage-evaluator` with the queued run ID and exact identity. The
-command verifies the workflow provenance before placing the
-short-lived envelope at `$RUNNER_TEMP/trusted/assignment-bundle.json` and its
-public key at `$RUNNER_TEMP/trusted/evaluator-signing.pub`, both mode `0600`.
-The private signing key remains on the tutor host. These files arrive out of
-band from protected tutor state, never from the learner branch or an Actions
-artifact.
+## Signed public evaluation
 
-The workflow checks both files and modes, checks out the exact input commit
-without retained credentials, verifies Bubblewrap is present, invokes the
-hidden `adaptive-tutor evaluate` command with an empty environment, writes
-evidence outside the checkout, and uploads exactly
-`adaptive-tutor-evidence.json`. The evaluator authenticates the signature and
-requires the envelope assignment, branch, commit, expiry, and digest to match
-the public assignment manifest before it consumes the staged files. Signed
-public and hidden tests then run under a separate trusted controller in a
-read-only, networkless namespace; raw output stays quarantined. A missing,
-substituted, replayed, symlinked, broadly readable, or incompletely supervised
-evaluation fails closed.
+For each assignment, the tutor keeps the complete bundle, including private
+references, rubric, and evaluator guidance, in owner-only host state. It
+publishes only safe assignment files plus
+`.adaptive-tutor/evaluator-manifest.json`. That Ed25519-signed public manifest
+binds the assignment and branch, allowed submission files, learner-visible
+public-test digests, fixed evaluator command and limits, evaluator-kit digest,
+and key ID. Public tests are visible by design; changing their bytes invalidates
+the signed contract.
 
-The tutor accepts a run only when its workflow ID and path, repository, head
-repository, `workflow_dispatch` event, typed run identity, default branch, and
-unchanged default-branch workflow digest all match. The normalized artifact's
-internal assignment ID, commit SHA, schema, and digest must then match before
-qualitative review starts.
+On a learner push, the tutor first verifies the protected workflow digest,
+public-key ID, immutable repository ID, and default-branch state against its
+provisioned control record. It stores a unique dispatch nonce and dispatches the
+workflow with the exact learner commit, manifest digest, public evaluator source
+commit, and evaluator-kit digest.
+
+The workflow runs on GitHub-hosted `ubuntu-24.04`. It checks out the protected
+workflow and verification key at `github.workflow_sha`, the public evaluator at
+the exact `evaluator_ref`, and the learner commit into three separate
+directories. It recomputes the evaluator-kit digest, installs the locked
+runtime and Bubblewrap, and starts `adaptive_tutor.public_evaluator` under
+`env -i`. Learner code runs in a read-only, networkless Bubblewrap namespace
+with bounded resources. No private bundle or tutor/model credential enters the
+job, and raw learner output remains quarantined.
+
+The job uploads only `adaptive-tutor-evidence.json`. The tutor accepts a run
+only when its workflow ID/path, repository and head repository,
+`workflow_dispatch` event, default branch, typed run title, workflow commit and
+digest, and repository ID match stored protected state. The artifact must also
+match the stored assignment, learner commit, dispatch nonce, manifest digest,
+workflow/evaluator commits and digests, evaluator key ID, and repository ID
+before qualitative review starts.
 
 ## Reconciliation and recovery
 

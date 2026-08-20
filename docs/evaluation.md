@@ -1,89 +1,82 @@
 # Evaluation
 
-Evaluation has two independent inputs: deterministic evidence from ephemeral CI
-and a schema-constrained qualitative review. Neither is allowed to smuggle
-untrusted text into trusted instructions.
+Evaluation has two independent inputs: deterministic evidence from a protected
+GitHub-hosted workflow and a schema-constrained qualitative review on the tutor
+host. Neither path lets untrusted repository text become trusted instructions.
 
 ## Deterministic evidence
 
-The normalized version-1 contract identifies the assignment and commit, runner,
-verified evaluator binding/key identity, start/end times, artifact digest, and a
-list of checks. The worker compares that evaluator identity with its signed
-spool before persisting evidence. Check categories include:
-
-- compile, test, integration, and stress;
-- sanitizer and static analysis;
-- benchmark, output, and allocation evidence; and
-- policy checks.
+The normalized version-1 contract identifies the assignment and learner commit,
+runner, evaluator key, dispatch nonce, manifest/workflow/evaluator-kit digests,
+workflow and evaluator commits, immutable repository ID, start/end times,
+artifact digest, and bounded checks. The current hosted evaluator emits policy
+checks plus either a public-test result or a non-executing submission-policy
+result.
 
 Each check has a bounded status, summary, duration, and typed metrics. A learner
 pass requires at least one non-skipped check and every relevant check to pass.
-Malformed JSON, an invalid commit, unknown status, or incorrect artifact digest
-is rejected before persistence.
+Malformed JSON, an invalid commit, unknown status, incorrect digest, or any
+provenance mismatch is rejected before persistence.
 
-## Trusted bundle provisioning
+## Private bundle and public manifest
 
-Assignment validation produces public files plus private references, hidden
-tests, and evaluator guidance. Before any branch or pull request is created, the
-worker seals the complete bundle in
-`DATA_DIR/trusted-evaluators/spool/A-NNNN.json`. The envelope binds the bundle to
-the assignment ID and exact branch, records canonical bundle and binding
-digests, and carries an Ed25519 signature. Its signing key, spool
-directory, and envelope files are owner-only (`0600` files inside `0700`
-directories).
+Assignment validation produces a complete `AssignmentBundle` containing public
+starter/test files and tutor-only references, rubric, and evaluator guidance.
+Before branch publication, the tutor seals that complete bundle into
+`DATA_DIR/trusted-evaluators/spool/A-NNNN.json`. The Ed25519-signed envelope is
+bound to the assignment and branch and remains in owner-only tutor state. It is
+also retained in SQLite for later qualitative grading. Neither copy is sent to
+GitHub Actions.
 
-An ephemeral-runner provisioner must stage the envelope before registering the
-one-job runner:
+The tutor separately derives a learner-visible `PublicEvaluatorManifest` and
+publishes it as `.adaptive-tutor/evaluator-manifest.json`. It contains only:
 
-```bash
-adaptive-tutor --config /etc/adaptive-tutor/config.yaml stage-evaluator A-0001 \
-  --run-id 123456789 \
-  --branch assignment/0001-bounded-work-queue \
-  --commit-sha 0123456789abcdef0123456789abcdef01234567 \
-  --output /runner/temp/trusted/assignment-bundle.json \
-  --verification-key-output /runner/temp/trusted/evaluator-signing.pub
-```
+- assignment and branch identity;
+- allowed submission paths and their original digests;
+- learner-visible public-test paths and signed content digests;
+- one fixed command identifier and bounded resource limits;
+- the exact public evaluator-kit digest; and
+- signing-key ID, issue time, and Ed25519 signature.
 
-`stage-evaluator` verifies that the run ID belongs to the protected
-default-branch workflow and its typed identity exactly matches canonical SQLite
-state. It creates the signed spool record when derived spool state is absent,
-verifies the signature and both digests against the database bundle, then
-issues a short-lived runner envelope bound to the exact commit. The
-envelope and Ed25519 public key are written atomically with mode `0600`; the
-private key never leaves tutor state. Transfer the staged files only through the
-trusted provisioner channel; do not upload them as repository or Actions
-artifacts.
+The manifest contains no private references, rubric, or evaluator guidance.
+Public tests are intentionally visible in the learner repository. Their signed
+digests make edits fail closed; visibility is not treated as secrecy. The
+matching public key lives at `.adaptive-tutor/evaluator-signing.pub` on the
+protected workspace default branch, while the private key remains on the tutor
+host.
 
-## Credential-free evaluator command
+## Protected GitHub-hosted workflow
 
-The workspace workflow invokes the same hidden command used by integration
-tests:
+Before publication and again before dispatch, the orchestrator requires a
+provisioned evaluator control-plane record. It verifies the private workspace's
+immutable repository ID, protected default-branch workflow digest, and public
+key ID against that record. A learner push then receives a unique dispatch
+nonce and is dispatched with the exact assignment, branch, learner commit,
+manifest digest, public evaluator source commit, and evaluator-kit digest.
 
-```bash
-env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
-  adaptive-tutor evaluate \
-  --bundle /runner/trusted/assignment-bundle.json \
-  --verification-key /runner/trusted/evaluator-signing.pub \
-  --workspace /runner/learner-checkout \
-  --output /runner/evidence/adaptive-tutor-evidence.json \
-  --assignment-id A-0001 \
-  --branch assignment/0001-bounded-work-queue \
-  --commit-sha 0123456789abcdef0123456789abcdef01234567
-```
+The protected `adaptive-tutor-evaluate.yml` job runs on GitHub-hosted
+`ubuntu-24.04` with read-only contents permission and SHA-pinned actions. It:
 
-The trusted envelope, verification key, and evidence destination must be
-outside the untrusted checkout. The evaluator requires owner-only, non-symlink
-files; authenticates the Ed25519 signature; enforces the short validity window;
-recomputes both digests; and matches the assignment, branch, commit, and public
-binding. It consumes the staged envelope and key before learner code starts.
+1. checks out the protected workflow and public key at `github.workflow_sha`;
+2. checks out the public evaluator source at the exact `evaluator_ref`;
+3. checks out the exact learner commit into a separate directory;
+4. recomputes the evaluator-kit digest before installing its locked runtime;
+5. installs Bubblewrap and invokes `adaptive_tutor.public_evaluator` under
+   `env -i`; and
+6. uploads only the normalized `adaptive-tutor-evidence.json` artifact.
 
-Only declared starter files enter the submission tree. Public tests are copied
-from the signed bundle rather than the learner checkout, and hidden tests come
-from the same authenticated bundle. A trusted xdist controller runs outside the
-learner test process and accepts success only after every collected test reports
-passing and a nonce-bound completion record arrives over a descriptor that test
-workers never inherit. `os._exit(0)`, a worker crash, missing tests, skipped
-tests, or a forged process code therefore cannot manufacture a pass.
+Every checkout uses `persist-credentials: false`. No tutor-host bundle, signing
+key, GitHub App key, model credential, or dashboard token enters the job.
+
+## Public evaluator isolation
+
+Only manifest-declared starter files enter the submission tree. Public tests
+are read from the learner checkout only after their bytes match the signed
+manifest; a missing, substituted, oversized, or symlinked file is rejected.
+A trusted supervisor accepts success only after every collected public test
+reports passing and a nonce-bound completion record arrives over a descriptor
+that test workers never inherit. `os._exit(0)`, a worker crash, missing tests,
+skipped tests, or a forged process code therefore cannot manufacture a pass.
 
 Bubblewrap gives the test group a read-only filesystem, private user/PID/IPC/UTS
 namespaces, no procfs, no network, a minimal device tree, and a private writable
@@ -93,6 +86,16 @@ process group after every outcome. Raw pytest and learner output remains in a
 bounded temporary file and never enters normalized evidence; the artifact
 contains only aggregate counts and fixed policy text. The artifact is written
 atomically outside the sandbox with mode `0600` and a canonical SHA-256 digest.
+
+## Provenance acceptance
+
+The tutor accepts a workflow run only when its workflow ID/path, repository and
+head repository, `workflow_dispatch` event, default branch, typed run title,
+workflow commit, workflow digest, and repository ID match protected state. It
+then compares the artifact's nonce, manifest/workflow/evaluator-kit digests,
+workflow/evaluator commits, repository ID, key ID, assignment, and learner
+commit with the stored attempt. Any mismatch fails before qualitative review or
+learner-state mutation.
 
 ## Trust-separated review prompt
 
@@ -142,7 +145,8 @@ or invalid schema records a model failure and cannot update learner state.
 
 Rendered review text contains the score, classification, confidence,
 dimensions, feedback, next action, and an evaluation digest. Trusted reference
-files and hidden evaluator details are not posted to the learner pull request.
+files, private rubric content, and tutor-only evaluator guidance are not posted
+to the learner pull request.
 
 ## Appeals
 

@@ -10,6 +10,7 @@ separation: untrusted execution never shares a credentialed process boundary.
 - learner submissions, history, misconceptions, and reports;
 - dashboard/personal-agent token and webhook secret;
 - GitHub App private key or development token;
+- evaluator-manifest signing key and protected verification-key trust anchor;
 - model API key or Codex account state; and
 - the integrity of grading and learner-state evidence.
 
@@ -19,8 +20,9 @@ separation: untrusted execution never shares a credentialed process boundary.
 | --- | --- | --- |
 | Curriculum package | Operator-trusted, schema-validated | Supply concepts, guidance, references, fixtures. |
 | Webhook request | Authenticated but untrusted payload | Persist and enqueue only after HMAC and repository scope checks. |
-| Learner repository/content | Untrusted | Execute only in credential-free ephemeral CI. |
-| Signed evaluator spool | Tutor-trusted, owner-only | Provision one assignment-and-branch-bound envelope. |
+| Learner repository/content | Untrusted | Execute only in credential-free GitHub-hosted CI. |
+| Private tutor-host bundle | Tutor-trusted, owner-only | Retain references, rubric, and evaluator guidance for qualitative grading; never enter CI. |
+| Public evaluator manifest | Learner-visible, signature-verified | Bind public files, command, limits, evaluator kit, assignment, and branch. |
 | CI artifact | Untrusted until contract/digest validation | Become deterministic evidence, never instructions. |
 | Codex output | Untrusted until schema validation | Become qualitative evidence only after validation. |
 | Tutor/worker | Trusted | GitHub orchestration and transactional state updates. |
@@ -29,17 +31,18 @@ separation: untrusted execution never shares a credentialed process boundary.
 ## Untrusted execution
 
 Never run a learner checkout, pull request script, build system, or arbitrary
-test command on the persistent tutor host. The private workspace workflow uses
-a one-job ephemeral runner and a credential-free Bubblewrap namespace with no
-network or host procfs, a read-only evaluation tree, private temporary storage,
-bounded resources, and process-tree cleanup.
+test command on the persistent tutor host. The private workspace workflow runs
+on GitHub-hosted `ubuntu-24.04`; learner code executes under `env -i` inside a
+Bubblewrap namespace with no network or host procfs, a read-only evaluation
+tree, private temporary storage, bounded resources, and process-tree cleanup.
 
-The signed public tests are authoritative; edits to test files in a learner
-checkout are ignored. Learner imports execute only in xdist workers, while a
-separate trusted controller requires a nonce-bound completion record and a
-complete set of passing test reports. Raw test output is quarantined and never
-copied into the evidence artifact, preventing hidden evaluator text or terminal
-control data from reaching later grading stages.
+Public tests are learner-visible. Their signed content digests are
+authoritative, so an edit, deletion, substitution, symlink, or oversized file
+fails before execution. Learner imports execute only in isolated test workers,
+while a separate trusted supervisor requires a nonce-bound completion record
+and a complete set of passing reports. Raw test output is quarantined and never
+copied into the evidence artifact, preventing terminal control data or
+repository text from reaching later grading stages.
 
 Checkout actions must not persist credentials. Job permissions must be
 read-only. Do not reference secrets in a job that later invokes learner code,
@@ -83,14 +86,25 @@ Configuration stores secret *references*. Put raw values only in owner-only
 environment/secret files. Never commit `.env`, private keys, SQLite, artifacts,
 screenshots with tokens, or generated private curricula.
 
-Hidden evaluator bundles are Ed25519-signed into an owner-only spool before
-GitHub publication. A trusted provisioner validates the spool record and issues
-a short-lived, commit-bound `0600` runner envelope outside the learner checkout.
-The credential-free runner receives only the public verification key; it
-authenticates the signature and verifies the exact assignment, branch, commit,
-expiry, canonical digests, and public-manifest binding. The spool is derived
-from complete bundles in SQLite and can be re-created on a clean restore. Never
-retain old envelopes without their matching key pair; they fail closed.
+Complete assignment bundles are Ed25519-signed into an owner-only tutor-host
+spool before GitHub publication. They contain private references, rubric, and
+evaluator guidance and never enter the learner repository, an Actions cache, or
+an artifact. A separate `PublicEvaluatorManifest` is published with only the
+assignment and branch, allowed submission/public-test paths and digests, fixed
+command and limits, evaluator-kit digest, key ID, issue time, and signature.
+
+The protected default branch supplies the matching public key and workflow.
+Before publication/dispatch, the tutor compares their key ID, workflow digest,
+and immutable repository ID with provisioned control state. The hosted job
+checks out controls at `github.workflow_sha`, evaluator source at an exact
+commit, and the learner commit separately, then recomputes the kit digest. On
+ingest, the tutor binds the run and artifact back to the stored nonce, manifest,
+workflow, evaluator source, repository, assignment, and learner commit.
+
+Back up `trusted-evaluators/signing.key` in encrypted owner-only storage with
+SQLite; it cannot be derived from the database. Loss requires an audited
+trust-anchor rotation. Silently generating a replacement does not authenticate
+already published manifests or match the protected workspace key.
 
 The public-boundary gate scans every tracked file for private subject material,
 organization infrastructure, key blocks, and token formats. It complements—

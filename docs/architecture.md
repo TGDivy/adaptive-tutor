@@ -8,7 +8,7 @@ center: versioned SQLite transactions and explicit JSON contracts.
                                  private GitHub workspace
                                ┌──────────────────────────┐
 learner/editor ── push/PR ─────► assignment branch + CI  │
-                               │ credential-free runner   │
+                               │ GitHub-hosted CI          │
                                └────────────┬─────────────┘
                                             │ normalized artifact
                                             ▼
@@ -46,13 +46,12 @@ does not generate assignments or call a model.
 ### Assignment service
 
 Generates a bounded bundle, validates information sufficiency and trusted
-reference behavior, records hidden and public roles separately, and publishes
-only safe files. Before publication, it writes a signed, owner-only evaluator
-envelope bound to the assignment and branch. A trusted provisioner verifies and
-stages a short-lived commit-bound envelope and public verification key for one
-ephemeral runner. The evaluator workflow is dispatched from the protected
-default branch; the learner branch contains only the corresponding non-secret
-binding digest.
+reference behavior, records public and tutor-only roles separately, and publishes
+only safe files. Before publication, it seals the complete bundle in owner-only
+tutor-host state for qualitative grading and derives a separate Ed25519-signed
+`PublicEvaluatorManifest`. The learner branch contains that non-secret manifest,
+visible public tests, and safe assignment files. Private references, rubric, and
+evaluator guidance never enter GitHub Actions.
 
 ### Event store and worker
 
@@ -62,7 +61,13 @@ renew through retries, and retain classified failure diagnostics.
 
 ### Evaluator
 
-Deterministic evidence and untrusted submission content stay separate from
+The protected default-branch workflow runs deterministic checks on
+GitHub-hosted `ubuntu-24.04`. It verifies the public manifest, protected key,
+workflow and evaluator-kit provenance, then executes only signed public paths in
+a credential-free Bubblewrap sandbox. The normalized artifact is accepted only
+after its dispatch and provenance fields match durable tutor state.
+
+Untrusted submission content and deterministic evidence stay separate from
 trusted instructions, rubric, and references. The stateful worker sends one
 bounded prompt to a Unix-socket grader that cannot see SQLite, configuration,
 GitHub credentials, or a learner checkout. Its ephemeral Codex process must
@@ -92,7 +97,7 @@ for a private self-hosted tutor.
   Unix-socket grader in separate container/systemd filesystem boundaries. The
   native grader has its own UID and root-owned configuration; only worker and
   grader receive the socket's connect group.
-- Learner code runs only in credential-free ephemeral CI.
+- Learner code runs only in credential-free GitHub-hosted CI.
 - GitHub-write credentials are available only to tutor/worker processes; model
   credentials are available only to the grader. Neither reaches learner code.
 - Public product source contains no private curriculum or learner repository.

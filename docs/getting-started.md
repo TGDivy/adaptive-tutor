@@ -62,14 +62,14 @@ The demo really executes:
 - curriculum loading and prerequisite validation;
 - adaptive concept, format, and difficulty selection;
 - assignment generation, consistency checks, and a trusted reference harness;
-- execution of product-owned passing and failing submissions against public and
-  hidden tests in a credential-free process;
+- execution of product-owned passing and failing submissions against bundled
+  fixture checks in a credential-free process;
 - schema-valid qualitative fixture review;
 - transactional mastery, uncertainty, spacing, and calibration updates; and
 - a weekly Markdown and structured-data report.
 
 The scripted submissions are bundled neutral product fixtures, not arbitrary
-local code. Live learner submissions use the isolated ephemeral evaluator
+local code. Live learner submissions use the isolated GitHub-hosted evaluator
 described in [Evaluation](evaluation.md).
 
 It deliberately makes no network call and reads no credential. Keep the

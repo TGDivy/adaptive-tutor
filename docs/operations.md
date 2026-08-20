@@ -3,8 +3,8 @@
 Adaptive Tutor supports a hardened Docker Compose deployment and native
 systemd services. Both paths keep SQLite on persistent storage and restart the
 webhook service, durable worker, and isolated grader after a crash or reboot.
-Learner code runs only on credential-free ephemeral evaluators, never on the
-tutor host.
+Learner code runs only in credential-free GitHub-hosted evaluation jobs, never
+on the tutor host.
 
 ## Docker Compose
 
@@ -62,7 +62,7 @@ Use an SSH tunnel or authenticated private reverse proxy for remote access.
 Keep the published Compose port loopback-bound. If TLS terminates at a proxy,
 allow only trusted users and preserve the service's security headers.
 
-### Enable GitHub and model grading
+### Configure GitHub credentials and model grading
 
 Edit `runtime/config/config.yaml` and set the GitHub owner, private workspace,
 GitHub App ID, installation ID, HTTPS webhook URL, and container path to the App
@@ -93,41 +93,31 @@ docker compose exec tutor adaptive-tutor webhook-setup
 docker compose ps
 ```
 
-### Provision ephemeral evaluators
+Those commands configure credentials and start services, but they do not make
+the remote assignment path ready in the current construction build.
 
-Assignment publication creates a signed envelope under
-`runtime/state/trusted-evaluators/spool` before writing the learner branch. The
-runner autoscaler or other trusted provisioner must derive the assignment ID
-and exact branch/commit from the bounded protected-workflow run title, then
-stage that identity before registering a one-job runner. For a protected runner
-staging directory:
+### GitHub-hosted evaluator controls
 
-```bash
-install -d -m 0700 runtime/runner-staging/trusted
-docker compose --profile remote run --rm --no-deps \
-  --volume "$(pwd)/runtime/runner-staging:/runner/temp" \
-  worker stage-evaluator A-0001 \
-  --run-id 123456789 \
-  --branch assignment/0001-bounded-work-queue \
-  --commit-sha 0123456789abcdef0123456789abcdef01234567 \
-  --output /runner/temp/trusted/assignment-bundle.json \
-  --verification-key-output /runner/temp/trusted/evaluator-signing.pub
-```
+Remote deterministic checks use the protected
+`.github/workflows/adaptive-tutor-evaluate.yml` workflow on GitHub-hosted
+`ubuntu-24.04`. The protected default branch must also contain
+`.adaptive-tutor/evaluator-signing.pub`. The tutor host retains the matching
+private key and complete private assignment bundles; neither enters Actions.
 
-The destination directory and files must belong to the eventual runner user
-with modes `0700` and `0600`. Transfer this protected directory through the
-provisioner's authenticated channel, register the runner only after staging
-succeeds, allow one job, and destroy the runner plus its temporary storage
-afterward. Never place either staged file in the workspace repository, runner
-image, cache, logs, or an Actions artifact.
+Before publishing or dispatching, the orchestrator requires an
+`evaluator_control_planes` record binding the immutable workspace repository
+ID, workflow path/digest, exact public evaluator commit and kit digest, and
+verification-key ID. The workflow verifies the signed learner-visible manifest
+and public-test digests, then runs learner code under
+`env -i` in a networkless Bubblewrap namespace. GitHub installs the isolation
+runtime in each hosted job; there is no evaluator machine to operate on the
+tutor server.
 
-The ephemeral runner image must provide Bubblewrap (`bwrap`) with user, PID,
-network, IPC, and UTS namespace support. Install the locked `adaptive-tutor`
-package, which includes pytest-xdist, before accepting work. The protected
-workflow runs `command -v bwrap` and `bwrap --version` before consuming the
-envelope; a missing isolation runtime is an infrastructure failure. Validate
-namespace support in the image build, keep unprivileged user namespaces enabled
-where Bubblewrap requires them, and never fall back to unsandboxed pytest.
+The current public build has no supported command to install and protect those
+GitHub files, attest them, or create the control-plane record. Do not insert the
+record manually or weaken the orchestrator check. Until authenticated bootstrap
+and rotation are implemented, use the local demo and treat remote assignment
+publication as unavailable.
 
 ### Lifecycle commands
 
@@ -271,11 +261,20 @@ mode `0600`. Copy them to encrypted off-host storage and test a restore at least
 monthly. A backup that exists only beside the primary database is not disaster
 recovery.
 
-SQLite contains each complete assignment bundle, so the signed evaluator spool
-is derived state. On a clean host, `stage-evaluator` creates a new owner-only key
-and re-seals the requested database bundle before provisioning the next runner.
-For an exact in-flight host snapshot, preserve `trusted-evaluators/` together;
-never restore its envelopes without the matching `signing.key`.
+An SQLite backup is not sufficient for a configured hosted evaluator. Back up
+the owner-only `trusted-evaluators/` directory with the database, especially
+`trusted-evaluators/signing.key`, and preserve its `0700`/`0600` permissions.
+The signing key is not derivable from SQLite. The private bundle envelopes can
+be reconstructed from SQLite only while the original key remains available;
+published manifests and the protected workspace public key are anchored to
+that key ID.
+
+Losing `signing.key` requires a coordinated trust-anchor rotation and new
+control-plane attestation, not silent key regeneration. That rotation is not
+automated in the current construction build. Keep GitHub App keys, webhook/API
+secrets, grader credentials, configuration, and the evaluator signing state in
+the same encrypted disaster-recovery inventory, with access separated by their
+trust domains.
 
 Restore is intentionally explicit. Stop both writers, retain a copy of the
 current database, and restore a verified snapshot:
@@ -373,8 +372,12 @@ after returning to a separated release.
   and leaves learner state unchanged. Restart the isolated grader; the durable
   job retries after its lease expires.
 - **Database corruption or host loss:** provision a clean host, install the same
-  release, restore the newest tested off-host snapshot, run `doctor --offline`,
-  then start the service and worker.
+  release, restore the newest tested off-host database and evaluator signing
+  state, run `doctor --offline`, then start the service and worker.
+- **Lost evaluator signing key:** stop remote publication and dispatch. Preserve
+  SQLite and the protected GitHub controls, then perform an audited trust-anchor
+  rotation when a supported rotation path is available; generating an unrelated
+  replacement key does not validate already published manifests.
 - **Lost webhook delivery:** run the reconciliation path after connectivity is
   restored; duplicate event deliveries are safe because delivery IDs and jobs
   are idempotent.
