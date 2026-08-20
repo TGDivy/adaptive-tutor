@@ -563,21 +563,26 @@ def test_webhook_status_reports_matching_hook_health() -> None:
 
 def test_github_app_webhook_status_uses_authenticated_app_metadata() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/app"
         assert request.headers["Authorization"] == "Bearer test-app-jwt"
-        return httpx.Response(
-            200,
-            json={
-                "id": 11,
-                "permissions": GITHUB_APP_PERMISSIONS,
-                "events": list(GITHUB_APP_EVENTS),
-                "hook_config": {
-                    "url": "https://tutor.example.test/webhooks/github",
-                    "active": True,
+        if request.url.path == "/app":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 11,
+                    "permissions": GITHUB_APP_PERMISSIONS,
+                    "events": list(GITHUB_APP_EVENTS),
                 },
-                "last_response": {"code": 200, "status": "active"},
-            },
-        )
+            )
+        if request.url.path == "/app/hook/config":
+            return httpx.Response(
+                200,
+                json={
+                    "url": "https://tutor.example.test/webhooks/github",
+                    "content_type": "json",
+                    "insecure_ssl": "0",
+                },
+            )
+        return httpx.Response(404)
 
     client = GitHubClient(
         GitHubSettings(owner="owner", app_id=11, installation_id=22),
@@ -592,7 +597,7 @@ def test_github_app_webhook_status_uses_authenticated_app_metadata() -> None:
             "id": 11,
             "active": True,
             "events": list(GITHUB_APP_EVENTS),
-            "last_response": {"code": 200, "status": "active"},
+            "last_response": {},
         }
         assert client.webhook_status("https://other.example.test/webhooks/github") is None
     finally:

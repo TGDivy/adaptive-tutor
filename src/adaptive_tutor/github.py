@@ -267,9 +267,13 @@ class GitHubClient:
 
     def verify_app_configuration(self, callback_url: str) -> dict[str, Any]:
         metadata = self._verified_app_metadata()
-        hook = metadata.get("hook_config") or {}
-        if hook.get("url") != callback_url or hook.get("active") is not True:
-            raise SecurityError("GitHub App webhook URL is not active or does not match setup")
+        hook = self._app_hook_config()
+        if (
+            hook.get("url") != callback_url
+            or hook.get("content_type") != "json"
+            or str(hook.get("insecure_ssl")) != "0"
+        ):
+            raise SecurityError("GitHub App webhook configuration does not match setup")
         return {
             "app_id": int(metadata["id"]),
             "permissions": dict(metadata["permissions"]),
@@ -295,6 +299,12 @@ class GitHubClient:
         payload["permissions"] = permissions
         payload["events"] = events
         return payload
+
+    def _app_hook_config(self) -> dict[str, Any]:
+        payload = self._app_request("GET", "/app/hook/config").json()
+        if not isinstance(payload, dict):
+            raise ExternalServiceError("GitHub App webhook configuration is invalid")
+        return dict(payload)
 
     def verify_assignment_pull_request(
         self,
@@ -364,14 +374,17 @@ class GitHubClient:
     def webhook_status(self, callback_url: str) -> dict[str, Any] | None:
         if self.auth.mode() == "github_app":
             metadata = self._verified_app_metadata()
-            hook = metadata.get("hook_config") or {}
+            hook = self._app_hook_config()
             if hook.get("url") != callback_url:
                 return None
             return {
                 "id": int(metadata["id"]),
-                "active": bool(hook.get("active")),
+                "active": (
+                    hook.get("content_type") == "json"
+                    and str(hook.get("insecure_ssl")) == "0"
+                ),
                 "events": list(metadata["events"]),
-                "last_response": dict(metadata.get("last_response") or {}),
+                "last_response": {},
             }
         hooks = self._request("GET", f"{self.repository_path}/hooks").json()
         for hook in hooks:
