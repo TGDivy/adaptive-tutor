@@ -675,19 +675,14 @@ class TutorOrchestrator:
     def _finish_or_follow_up(
         self, assignment: dict[str, Any], attempt: dict[str, Any], evaluation: Any
     ) -> None:
-        now = iso_now()
-        self.database.execute(
-            "UPDATE attempts SET outcome=? WHERE id=?",
-            ("success" if evaluation.overall_score >= 70 else "failure", attempt["id"]),
+        transition = self.assignments.apply_review_transition(
+            str(assignment["id"]),
+            str(attempt["id"]),
+            follow_up=str(evaluation.follow_up),
+            overall_score=float(evaluation.overall_score),
         )
         if evaluation.follow_up == "new_stage":
-            attempt_stage = int(attempt.get("stage_number") or 1)
-            current_stage = int(assignment["current_stage"])
-            next_stage = (
-                current_stage
-                if current_stage > attempt_stage
-                else self.assignments.unlock_follow_up(str(assignment["id"]))
-            )
+            next_stage = transition["next_stage"]
             if next_stage and assignment["pull_number"]:
                 stage = self.database.fetch_one(
                     """
@@ -703,21 +698,7 @@ class TutorOrchestrator:
                         f"{stage['instructions']}\n\n{marker}",
                         marker=marker,
                     )
-            if next_stage is None:
-                raise RuntimeError("Validated stage progression has no authored next stage")
             return
-        status = "reviewing" if evaluation.follow_up == "human_review" else "completed"
-        self.database.execute(
-            """
-            UPDATE assignments SET status=?, updated_at=?, completed_at=? WHERE id=?
-            """,
-            (
-                status,
-                now,
-                now if status == "completed" else None,
-                assignment["id"],
-            ),
-        )
 
     def _submission_files(self, bundle: AssignmentBundle, commit_sha: str) -> dict[str, str]:
         result: dict[str, str] = {}

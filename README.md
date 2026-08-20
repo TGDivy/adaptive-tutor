@@ -50,6 +50,7 @@ To keep private local state and inspect recommendations:
 ```bash
 uv run adaptive-tutor init
 uv run adaptive-tutor doctor --offline
+uv run adaptive-tutor goal set "Build reliable network services" --domain networking
 uv run adaptive-tutor next --dry-run --available-minutes 30
 uv run adaptive-tutor status
 ```
@@ -60,6 +61,10 @@ fixture submissions in a scrubbed process, applies schema-valid fixture reviews
 transactionally, and generates a progress report.
 See the [installation guide](https://tgdivy.github.io/adaptive-tutor/getting-started/)
 for isolated installs, dashboard startup, and remote integration.
+
+Learning goals are durable and revisioned. Optional `--domain`, `--concept`, and
+`--target-date` focus scheduling; completed feedback is available with
+`adaptive-tutor review` and through the authenticated dashboard/API.
 
 ## Architecture
 

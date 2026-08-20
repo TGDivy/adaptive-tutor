@@ -186,8 +186,8 @@ def run_demo(data_dir: Path | None = None) -> DemoResult:
             excluded_blueprints={"bounded-work-queue"},
         )
         transfer_id = str(transfer["id"])
-        journey.append(
-            _run_attempt(
+        journey.extend(
+            _run_progressive_attempt(
                 database,
                 package,
                 transfer_id,
@@ -253,8 +253,8 @@ def run_demo(data_dir: Path | None = None) -> DemoResult:
             reason="Collect transfer evidence in a different domain and review format.",
         )
         framing_id = str(framing["id"])
-        journey.append(
-            _run_attempt(
+        journey.extend(
+            _run_progressive_attempt(
                 database,
                 package,
                 framing_id,
@@ -500,7 +500,23 @@ def _run_attempt(
     attempt_id = str(uuid.uuid4())
     commit_sha = f"{attempt_number:040x}"
     observed = now - timedelta(days=scenario.age_days)
-    workspace = workspace_root / assignment_id / f"attempt-{attempt_number}"
+    assignment = database.fetch_one(
+        "SELECT current_stage, branch_name FROM assignments WHERE id=?",
+        (assignment_id,),
+    )
+    if assignment is None:
+        raise ValueError(f"Demo assignment {assignment_id} is missing")
+    stage_number = int(assignment["current_stage"])
+    stage_count = int(
+        (
+            database.fetch_one(
+                "SELECT COUNT(*) count FROM assignment_stages WHERE assignment_id=?",
+                (assignment_id,),
+            )
+            or {"count": 0}
+        )["count"]
+    )
+    workspace = workspace_root / assignment_id / "worktree"
     _write_demo_submission(
         bundle,
         workspace,
@@ -511,14 +527,15 @@ def _run_attempt(
     database.execute(
         """
         INSERT INTO attempts(
-            id, assignment_id, commit_sha, learner_confidence,
+            id, assignment_id, commit_sha, stage_number, learner_confidence,
             submission_source, submitted_at
-        ) VALUES (?, ?, ?, ?, 'local_demo', ?)
+        ) VALUES (?, ?, ?, ?, ?, 'local_demo', ?)
         """,
         (
             attempt_id,
             assignment_id,
             commit_sha,
+            stage_number,
             scenario.confidence,
             observed.isoformat(timespec="seconds"),
         ),
@@ -535,7 +552,11 @@ def _run_attempt(
     if automated.learner_passed != scenario.solved:
         expected = "pass" if scenario.solved else "fail"
         raise ValueError(f"Demo submission for {assignment_id} did not {expected} as designed")
-    qualitative_fixture = _qualitative_fixture(bundle, scenario)
+    qualitative_fixture = _qualitative_fixture(
+        bundle,
+        scenario,
+        has_next_stage=stage_number < stage_count,
+    )
     evaluator = EvaluationService(database, FixtureCodexRunner(qualitative_fixture))
     automated_id = evaluator.persist_automated(attempt_id, automated)
     _, qualitative, _ = evaluator.grade_attempt(
@@ -553,6 +574,13 @@ def _run_attempt(
         trusted_instructions=package.prompts["grading"],
         prompt_version=package.metadata.version,
         learner_confidence=scenario.confidence,
+    )
+    AssignmentService(database).apply_review_transition(
+        assignment_id,
+        attempt_id,
+        follow_up=qualitative.follow_up,
+        overall_score=qualitative.overall_score,
+        occurred_at=observed.isoformat(timespec="seconds"),
     )
     database.execute(
         """
@@ -597,11 +625,60 @@ def _run_attempt(
         "score": qualitative.overall_score,
         "confidence": scenario.confidence,
         "age_days": scenario.age_days,
+        "stage_number": stage_number,
+        "branch": str(assignment["branch_name"]),
         "workspace": str(workspace),
         "automated_passed": automated.learner_passed,
         "automated_evidence": automated.model_dump(mode="json"),
         "qualitative_evaluation": qualitative.model_dump(mode="json"),
     }
+
+
+def _run_progressive_attempt(
+    database: Database,
+    package: CurriculumPackage,
+    assignment_id: str,
+    bundle: AssignmentBundle,
+    workspace_root: Path,
+    now: datetime,
+    scenario: DemoAttempt,
+) -> list[dict[str, Any]]:
+    results = [
+        _run_attempt(
+            database,
+            package,
+            assignment_id,
+            bundle,
+            workspace_root,
+            now,
+            scenario,
+        )
+    ]
+    if results[0]["qualitative_evaluation"]["follow_up"] != "new_stage":
+        return results
+    follow_up_context = (
+        f"{scenario.transfer_context} under the authored follow-up constraints"
+        if scenario.transfer_context
+        else f"the authored follow-up stage for {bundle.slug}"
+    )
+    results.append(
+        _run_attempt(
+            database,
+            package,
+            assignment_id,
+            bundle,
+            workspace_root,
+            now,
+            DemoAttempt(
+                outcome="success",
+                confidence=scenario.confidence,
+                age_days=max(0, scenario.age_days - 1),
+                solved=True,
+                transfer_context=follow_up_context,
+            ),
+        )
+    )
+    return results
 
 
 def _execute_fixture_evaluation(
@@ -707,6 +784,8 @@ def _execute_fixture_evaluation(
 def _qualitative_fixture(
     bundle: AssignmentBundle,
     scenario: DemoAttempt,
+    *,
+    has_next_stage: bool,
 ) -> QualitativeEvaluation:
     scores = {
         "success": (92.0, 84.0, 82.0),
@@ -766,10 +845,12 @@ def _qualitative_fixture(
         feedback_summary=summary,
         feedback_details=details,
         classification=classifications[scenario.outcome],  # type: ignore[arg-type]
-        follow_up="new_stage" if scenario.outcome == "success" else "new_assignment",
+        follow_up=(
+            "new_stage" if scenario.outcome == "success" and has_next_stage else "new_assignment"
+        ),
         follow_up_reason=(
             "Advance to the authored follow-up stage."
-            if scenario.outcome == "success"
+            if scenario.outcome == "success" and has_next_stage
             else "Collect another observation with a different format or context."
         ),
         escalation_recommended=False,
@@ -790,6 +871,13 @@ def _complete_assignment(
         WHERE id=?
         """,
         (created_text, completed_text, completed_text, assignment_id),
+    )
+    database.execute(
+        """
+        UPDATE assignment_stages SET unlocked_at=?
+        WHERE assignment_id=? AND stage_number=1
+        """,
+        (created_text, assignment_id),
     )
     database.execute(
         """

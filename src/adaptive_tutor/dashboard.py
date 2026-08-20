@@ -111,6 +111,14 @@ def create_app(
     reports = ReportService(database)
     app.include_router(webhook_router(settings, EventStore(database, JobQueue(database))))
 
+    def review_projection(assignment_id: str | None = None) -> dict[str, Any] | None:
+        return status_service.review(
+            settings.learner_id,
+            assignment_id,
+            github_owner=settings.github.owner,
+            workspace_repo=settings.github.workspace_repo,
+        )
+
     @app.middleware("http")
     async def security_headers(request: Request, call_next: Any) -> Any:
         response = await call_next(request)
@@ -262,6 +270,25 @@ def create_app(
             },
         )
 
+    @app.get(
+        "/review/{assignment_id}",
+        response_class=HTMLResponse,
+        include_in_schema=False,
+    )
+    def review_detail(request: Request, assignment_id: str) -> Any:
+        try:
+            read_auth(request)
+        except HTTPException:
+            return RedirectResponse(url="/login", status_code=303)
+        projection = review_projection(assignment_id)
+        if projection is None:
+            raise HTTPException(status_code=404, detail="Completed review not found")
+        return templates.TemplateResponse(
+            request,
+            "review.html",
+            {"projection": projection},
+        )
+
     @app.get("/api/v1/get_status", dependencies=[Depends(read_auth)])
     def get_status() -> dict[str, Any]:
         return status_service.get_status(
@@ -279,6 +306,13 @@ def create_app(
             settings.learner_id, settings.active_curriculum
         ).active_assignment
         return {"assignment": active}
+
+    @app.get("/api/v1/get_review", dependencies=[Depends(read_auth)])
+    def get_review(assignment_id: str | None = None) -> dict[str, Any]:
+        projection = review_projection(assignment_id)
+        if projection is None:
+            raise HTTPException(status_code=404, detail="Completed review not found")
+        return projection
 
     @app.post("/api/v1/create_assignment", dependencies=[Depends(write_auth)])
     def create_assignment(context: LearnerContext) -> dict[str, Any]:

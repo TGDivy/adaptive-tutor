@@ -56,9 +56,7 @@ def test_cli_initialization_and_local_read_commands(
         [*prefix, "report", "--format", "json", "--output", str(output)],
     )
     assert report.exit_code == 0, report.output
-    assert json.loads(output.read_text(encoding="utf-8"))["study_activity"][
-        "assignments"
-    ] == 0
+    assert json.loads(output.read_text(encoding="utf-8"))["study_activity"]["assignments"] == 0
 
 
 def test_cli_help_lists_product_commands() -> None:
@@ -74,12 +72,85 @@ def test_cli_help_lists_product_commands() -> None:
         "readiness",
         "report",
         "history",
+        "review",
         "concepts",
         "pause",
         "resume",
         "demo",
+        "goal",
     ):
         assert command in result.output
+
+
+def test_cli_goal_set_show_history_and_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("ADAPTIVE_TUTOR_API_TOKEN", "ADAPTIVE_TUTOR_WEBHOOK_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    runner = CliRunner()
+    config_path = tmp_path / "config.yaml"
+    prefix = ["--config", str(config_path)]
+    initialized = runner.invoke(app, [*prefix, "init", "--data-dir", str(tmp_path / "state")])
+    assert initialized.exit_code == 0, initialized.output
+
+    empty = runner.invoke(app, [*prefix, "goal", "show"])
+    assert empty.exit_code == 0, empty.output
+    assert "No active learning goal" in empty.output
+    empty_json = runner.invoke(app, [*prefix, "goal", "show", "--json"])
+    assert empty_json.exit_code == 0, empty_json.output
+    assert json.loads(empty_json.output) is None
+
+    created = runner.invoke(
+        app,
+        [
+            *prefix,
+            "goal",
+            "set",
+            "Build reliable network services.",
+            "--target-date",
+            "2026-12-31",
+            "--domain",
+            "networking",
+            "--concept",
+            "networking.flow-control",
+            "--json",
+        ],
+    )
+    assert created.exit_code == 0, created.output
+    payload = json.loads(created.output)
+    assert payload["revision"] == 1
+    assert payload["target_date"] == "2026-12-31"
+    assert payload["focus_domains"] == ["networking"]
+    assert payload["focus_concepts"] == ["networking.flow-control"]
+
+    shown = runner.invoke(app, [*prefix, "goal", "show", "--json"])
+    assert shown.exit_code == 0, shown.output
+    assert json.loads(shown.output) == payload
+
+    revised = runner.invoke(
+        app,
+        [*prefix, "goal", "set", "Master flow control.", "--json"],
+    )
+    assert revised.exit_code == 0, revised.output
+    assert json.loads(revised.output)["revision"] == 2
+    history = runner.invoke(app, [*prefix, "goal", "history", "--json"])
+    assert history.exit_code == 0, history.output
+    revisions = json.loads(history.output)
+    assert [item["revision"] for item in revisions] == [2, 1]
+    assert [item["status"] for item in revisions] == ["active", "superseded"]
+
+    invalid = runner.invoke(
+        app,
+        [*prefix, "goal", "set", "Invalid focus.", "--domain", "unknown"],
+    )
+    assert invalid.exit_code == 1
+    assert "Unknown curriculum domain" in invalid.output
+    invalid_date = runner.invoke(
+        app,
+        [*prefix, "goal", "set", "Invalid date.", "--target-date", "12/31/2026"],
+    )
+    assert invalid_date.exit_code == 1
+    assert "YYYY-MM-DD" in invalid_date.output
 
 
 def test_cli_fresh_install_empty_states_and_errors(
@@ -88,9 +159,7 @@ def test_cli_fresh_install_empty_states_and_errors(
     for name in ("ADAPTIVE_TUTOR_API_TOKEN", "ADAPTIVE_TUTOR_WEBHOOK_SECRET"):
         monkeypatch.delenv(name, raising=False)
     runner = CliRunner()
-    missing = runner.invoke(
-        app, ["--config", str(tmp_path / "missing.yaml"), "status"]
-    )
+    missing = runner.invoke(app, ["--config", str(tmp_path / "missing.yaml"), "status"])
     assert missing.exit_code == 1
     assert "Adaptive Tutor error" in missing.output
 
@@ -125,6 +194,9 @@ def test_cli_fresh_install_empty_states_and_errors(
     no_hint = runner.invoke(app, [*prefix, "hint"])
     assert no_hint.exit_code == 1
     assert "No active assignment" in no_hint.output
+    no_review = runner.invoke(app, [*prefix, "review"])
+    assert no_review.exit_code == 1
+    assert "No completed review" in no_review.output
 
     report = runner.invoke(app, [*prefix, "report", "--verbose"])
     assert report.exit_code == 0, report.output
@@ -148,7 +220,7 @@ def test_cli_kept_demo_exercises_daily_and_operational_views(
     demo = runner.invoke(app, ["demo", "--keep", str(demo_root), "--json"])
     assert demo.exit_code == 0, demo.output
     payload = json.loads(demo.output)
-    assert len(payload["journey"]) == 7
+    assert len(payload["journey"]) == 9
     config_path = Path(payload["config_path"])
     prefix = ["--config", str(config_path)]
 
@@ -169,6 +241,25 @@ def test_cli_kept_demo_exercises_daily_and_operational_views(
         assert result.exit_code == 0, (arguments, result.output)
         assert expected in result.output
 
+    latest_review = runner.invoke(app, [*prefix, "review"])
+    assert latest_review.exit_code == 0, latest_review.output
+    for expected in ("REVIEW · A-0006", "Feedback", "Dimension", "Follow-up", "Attempts"):
+        assert expected in latest_review.output
+
+    selected_review = runner.invoke(app, [*prefix, "review", "A-0001", "--json"])
+    assert selected_review.exit_code == 0, selected_review.output
+    selected_payload = json.loads(selected_review.output)
+    assert selected_payload["assignment"]["id"] == "A-0001"
+    assert selected_payload["review"]["dimensions"]
+    assert selected_payload["review"]["feedback_details"]
+    assert selected_payload["review"]["follow_up"] == "new_assignment"
+    assert len(selected_payload["attempts"]) == 2
+    assert "pr_url" in selected_payload
+
+    missing_review = runner.invoke(app, [*prefix, "review", "A-9999"])
+    assert missing_review.exit_code == 1
+    assert "A-9999" in missing_review.output
+
     for arguments in (
         ["current", "--json"],
         ["readiness", "--json"],
@@ -187,15 +278,11 @@ def test_cli_kept_demo_exercises_daily_and_operational_views(
     assert backup_path.is_file()
     unconfirmed = runner.invoke(app, [*prefix, "restore", str(backup_path)])
     assert unconfirmed.exit_code == 1
-    restored = runner.invoke(
-        app, [*prefix, "restore", str(backup_path), "--yes"]
-    )
+    restored = runner.invoke(app, [*prefix, "restore", str(backup_path), "--yes"])
     assert restored.exit_code == 0, restored.output
     assert "integrity check passed" in restored.output
 
-    loaded = runner.invoke(
-        app, [*prefix, "curriculum-load", str(bundled_curriculum_path())]
-    )
+    loaded = runner.invoke(app, [*prefix, "curriculum-load", str(bundled_curriculum_path())])
     assert loaded.exit_code == 0, loaded.output
     assert "Systems Foundations" in loaded.output
 
@@ -229,9 +316,7 @@ def test_cli_remote_assignment_result_rendering(
     runner = CliRunner()
     config_path = tmp_path / "config.yaml"
     prefix = ["--config", str(config_path)]
-    initialized = runner.invoke(
-        app, [*prefix, "init", "--data-dir", str(tmp_path / "state")]
-    )
+    initialized = runner.invoke(app, [*prefix, "init", "--data-dir", str(tmp_path / "state")])
     assert initialized.exit_code == 0, initialized.output
 
     class StubOrchestrator:
@@ -249,9 +334,7 @@ def test_cli_remote_assignment_result_rendering(
             return self.result
 
     stub = StubOrchestrator()
-    monkeypatch.setattr(
-        "adaptive_tutor.cli._orchestrator", lambda settings, database: stub
-    )
+    monkeypatch.setattr("adaptive_tutor.cli._orchestrator", lambda settings, database: stub)
 
     created = runner.invoke(app, [*prefix, "next"])
     assert created.exit_code == 0, created.output

@@ -351,6 +351,14 @@ def test_controlled_end_to_end_assignment_evaluation_and_next_selection(
         "SELECT status, current_stage FROM assignments WHERE id='A-0001'"
     )
     assert assignment == {"status": "completed", "current_stage": 2}
+    stages = database.fetch_all(
+        """
+        SELECT stage_number, unlocked_at, completed_at FROM assignment_stages
+        WHERE assignment_id='A-0001' ORDER BY stage_number
+        """
+    )
+    assert [stage["stage_number"] for stage in stages] == [1, 2]
+    assert all(stage["unlocked_at"] and stage["completed_at"] for stage in stages)
     assert len(github.reviews) == 2
     orchestrator.process_ci_result(
         {

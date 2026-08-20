@@ -14,6 +14,7 @@ from adaptive_tutor.demo import run_demo
 from adaptive_tutor.generation import CurriculumAssignmentGenerator
 from adaptive_tutor.models import AssignmentRequest, LearnerContext
 from adaptive_tutor.reporting import ReportService
+from adaptive_tutor.state import StatusService
 from adaptive_tutor.time import iso_now, utc_now
 
 
@@ -23,14 +24,14 @@ def test_local_demo_covers_evaluation_state_and_reporting(tmp_path: Path) -> Non
     assert result.assignment["id"] == "A-0007"
     assert result.status["active_assignment"]["id"] == "A-0007"
     assert result.assignment["selection_reason"]
-    assert len(result.journey) == 7
+    assert len(result.journey) == 9
     assert {item["outcome"] for item in result.journey} == {
         "success",
         "partial",
         "failure",
     }
     assert len({item["exercise_type"] for item in result.journey}) >= 5
-    assert sum(bool(item["automated_passed"]) for item in result.journey) == 3
+    assert sum(bool(item["automated_passed"]) for item in result.journey) == 5
     assert len(result.automated_evidence["checks"]) == 4
     assert {check["name"] for check in result.automated_evidence["checks"]} >= {
         "fixture provenance",
@@ -43,10 +44,12 @@ def test_local_demo_covers_evaluation_state_and_reporting(tmp_path: Path) -> Non
     )
     assert result.qualitative_evaluation["overall_score"] > 0
     assert result.report.data["study_activity"]["assignments"] >= 3
-    assert result.report.data["study_activity"]["attempts"] == 3
+    assert result.report.data["study_activity"]["attempts"] == 4
     assert result.report.data["mastery_movement"]
-    assert result.report.data["retention"]["observations"] == 1
-    assert result.report.data["retention"]["due_reviews"] == 3
+    assert result.report.data["retention"]["observations"] == 2
+    assert result.report.data["retention"]["successes"] == 1
+    assert result.report.data["retention"]["failures"] == 1
+    assert result.report.data["retention"]["due_reviews"] == 2
     assert any(item["status"] == "recurred" for item in result.status["misconceptions"])
     assert Path(result.database_path).is_file()
     assert result.config_path is not None and Path(result.config_path).is_file()
@@ -55,12 +58,47 @@ def test_local_demo_covers_evaluation_state_and_reporting(tmp_path: Path) -> Non
         encoding="utf-8"
     )
     assert "Equal indices" not in active_response
-    transfer = next(item for item in result.journey if item["assignment_id"] == "A-0003")
-    assert transfer["title"] == "Harden a framed stream decoder"
+    transfer = [item for item in result.journey if item["assignment_id"] == "A-0003"]
+    assert [item["stage_number"] for item in transfer] == [1, 2]
+    assert len({item["workspace"] for item in transfer}) == 1
+    assert len({item["branch"] for item in transfer}) == 1
+    assert transfer[0]["title"] == "Harden a framed stream decoder"
     assert (
-        transfer["qualitative_evaluation"]["concept_evidence"][0]["transfer_context"]
+        transfer[0]["qualitative_evaluation"]["concept_evidence"][0]["transfer_context"]
         == "preserving incomplete buffered bytes across fragmented network reads"
     )
+    stages = Database(Path(result.database_path)).fetch_all(
+        """
+        SELECT stage_number, unlocked_at, completed_at FROM assignment_stages
+        WHERE assignment_id='A-0003' ORDER BY stage_number
+        """
+    )
+    assert [stage["stage_number"] for stage in stages] == [1, 2]
+    assert all(stage["unlocked_at"] and stage["completed_at"] for stage in stages)
+
+    database = Database(Path(result.database_path))
+    database.execute("UPDATE assignments SET pull_number=17 WHERE id='A-0001'")
+    reviews = StatusService(database)
+    latest = reviews.review("demo-learner")
+    assert latest is not None
+    assert latest["assignment"]["id"] == "A-0006"
+
+    selected = reviews.review(
+        "demo-learner",
+        "A-0001",
+        github_owner="example-owner",
+        workspace_repo="learning-workspace",
+    )
+    assert selected is not None
+    assert selected["pr_url"] == ("https://github.com/example-owner/learning-workspace/pull/17")
+    assert selected["review"]["dimensions"]
+    assert selected["review"]["feedback_summary"]
+    assert selected["review"]["feedback_details"]
+    assert selected["review"]["follow_up"] == "new_assignment"
+    assert len(selected["attempts"]) == 2
+    assert all(attempt["reviews"] for attempt in selected["attempts"])
+    assert reviews.review("demo-learner", "A-0007") is None
+    assert reviews.review("different-learner", "A-0001") is None
 
 
 def test_report_sums_equal_duration_assignments_without_deduplicating(

@@ -7,7 +7,7 @@ from typing import Any
 
 from .db import Database
 from .learner import LearnerModel
-from .models import ReadinessDomain, RuntimeStatus
+from .models import QualitativeEvaluation, ReadinessDomain, RuntimeStatus
 from .time import iso_now
 
 
@@ -167,6 +167,103 @@ class StatusService:
             """,
             (learner_id, limit),
         )
+
+    def review(
+        self,
+        learner_id: str,
+        assignment_id: str | None = None,
+        *,
+        github_owner: str = "",
+        workspace_repo: str = "",
+    ) -> dict[str, Any] | None:
+        selected = self.database.fetch_one(
+            """
+            SELECT q.id review_id, q.attempt_id, q.evaluation_json,
+                   q.overall_score, q.grader_confidence, q.review_kind,
+                   q.created_at review_created_at,
+                   at.commit_sha, at.stage_number, at.submitted_at,
+                   a.id assignment_id, a.title, a.exercise_type, a.difficulty,
+                   a.status, a.branch_name, a.pull_number, a.created_at,
+                   a.completed_at
+            FROM qualitative_evaluations q
+            JOIN attempts at ON at.id=q.attempt_id
+            JOIN assignments a ON a.id=at.assignment_id
+            WHERE a.learner_id=? AND (? IS NULL OR a.id=?)
+            ORDER BY q.created_at DESC, q.rowid DESC
+            LIMIT 1
+            """,
+            (learner_id, assignment_id, assignment_id),
+        )
+        if selected is None:
+            return None
+
+        evaluation = QualitativeEvaluation.model_validate_json(str(selected["evaluation_json"]))
+        attempts = self.database.fetch_all(
+            """
+            SELECT id, commit_sha, stage_number, learner_confidence,
+                   submission_source, submitted_at, outcome, failure_kind
+            FROM attempts
+            WHERE assignment_id=?
+            ORDER BY submitted_at DESC, rowid DESC
+            """,
+            (selected["assignment_id"],),
+        )
+        review_rows = self.database.fetch_all(
+            """
+            SELECT q.id, q.attempt_id, q.review_kind, q.overall_score,
+                   json_extract(q.evaluation_json, '$.classification') classification,
+                   q.created_at
+            FROM qualitative_evaluations q
+            JOIN attempts at ON at.id=q.attempt_id
+            WHERE at.assignment_id=?
+            ORDER BY q.created_at DESC, q.rowid DESC
+            """,
+            (selected["assignment_id"],),
+        )
+        reviews_by_attempt: dict[str, list[dict[str, Any]]] = {}
+        for item in review_rows:
+            attempt_reviews = reviews_by_attempt.setdefault(str(item.pop("attempt_id")), [])
+            attempt_reviews.append(item)
+        for attempt in attempts:
+            attempt["reviews"] = reviews_by_attempt.get(str(attempt["id"]), [])
+
+        pull_number = selected["pull_number"]
+        pr_url = None
+        if github_owner and workspace_repo and pull_number is not None:
+            pr_url = f"https://github.com/{github_owner}/{workspace_repo}/pull/{int(pull_number)}"
+        return {
+            "assignment": {
+                "id": selected["assignment_id"],
+                "title": selected["title"],
+                "exercise_type": selected["exercise_type"],
+                "difficulty": selected["difficulty"],
+                "status": selected["status"],
+                "branch_name": selected["branch_name"],
+                "pull_number": pull_number,
+                "created_at": selected["created_at"],
+                "completed_at": selected["completed_at"],
+            },
+            "review": {
+                "id": selected["review_id"],
+                "attempt_id": selected["attempt_id"],
+                "commit_sha": selected["commit_sha"],
+                "stage_number": selected["stage_number"],
+                "submitted_at": selected["submitted_at"],
+                "review_kind": selected["review_kind"],
+                "created_at": selected["review_created_at"],
+                "overall_score": selected["overall_score"],
+                "grader_confidence": selected["grader_confidence"],
+                "classification": evaluation.classification,
+                "dimensions": [item.model_dump(mode="json") for item in evaluation.dimensions],
+                "feedback_summary": evaluation.feedback_summary,
+                "feedback_details": evaluation.feedback_details,
+                "follow_up": evaluation.follow_up,
+                "follow_up_reason": evaluation.follow_up_reason,
+                "escalation_recommended": evaluation.escalation_recommended,
+            },
+            "attempts": attempts,
+            "pr_url": pr_url,
+        }
 
     def concepts(self, learner_id: str, curriculum_id: str) -> list[dict[str, Any]]:
         return self.database.fetch_all(

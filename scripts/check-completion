@@ -233,8 +233,8 @@ def check_cli_and_demo() -> bool:
     try:
         payload = json.loads(demo.stdout)
         valid_demo = (
-            len(payload.get("journey", [])) == 7
-            and payload.get("report", {}).get("study_activity", {}).get("attempts") == 3
+            len(payload.get("journey", [])) == 9
+            and payload.get("report", {}).get("study_activity", {}).get("attempts") == 4
             and payload.get("assignment", {}).get("id") == "A-0007"
         )
     except (AttributeError, json.JSONDecodeError):

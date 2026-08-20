@@ -140,7 +140,7 @@
           {% if status.recent_scores %}
             <div class="score-list">
               {% for item in status.recent_scores[:5] %}
-                <div><span class="score-value {{ 'strong' if item.overall_score >= 70 else 'partial' if item.overall_score >= 50 else 'weak' }}">{{ item.overall_score|round|int }}</span><p><strong>{{ item.title }}</strong><small>{{ item.created_at[:10] }} · {{ item.review_kind }}</small></p></div>
+                <div><span class="score-value {{ 'strong' if item.overall_score >= 70 else 'partial' if item.overall_score >= 50 else 'weak' }}">{{ item.overall_score|round|int }}</span><p><strong><a href="/review/{{ item.assignment_id }}">{{ item.title }}</a></strong><small>{{ item.created_at[:10] }} · {{ item.review_kind }}</small></p></div>
               {% endfor %}
             </div>
           {% else %}<p class="empty">Scores appear after evaluated submissions.</p>{% endif %}

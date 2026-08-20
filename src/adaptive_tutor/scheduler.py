@@ -11,12 +11,32 @@ from typing import Any
 
 from .curriculum import CurriculumLoader
 from .db import Database
+from .goals import GoalService
 from .models import ExerciseType, LearnerContext, SchedulerCandidate
 from .time import parse_time, utc_now
 
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def _transitive_prerequisites(
+    targets: set[str], relationships: list[dict[str, Any]]
+) -> set[str]:
+    prerequisites: dict[str, set[str]] = defaultdict(set)
+    for relationship in relationships:
+        prerequisites[str(relationship["concept_id"])].add(
+            str(relationship["prerequisite_id"])
+        )
+    closure: set[str] = set()
+    pending = sorted(targets, reverse=True)
+    while pending:
+        concept_id = pending.pop()
+        for prerequisite_id in sorted(prerequisites.get(concept_id, ())):
+            if prerequisite_id not in closure:
+                closure.add(prerequisite_id)
+                pending.append(prerequisite_id)
+    return closure - targets
 
 
 class AdaptiveScheduler:
@@ -50,6 +70,13 @@ class AdaptiveScheduler:
             raise ValueError(f"Unknown curriculum profile: {curriculum_id}/{profile_id}")
         domain_weights = json.loads(profile_row["domain_weights_json"])
         concept_weights = json.loads(profile_row["concept_weights_json"])
+        active_goal = GoalService(self.database).active(learner_id, curriculum_id)
+        days_until_goal = context.days_until_goal
+        if days_until_goal is None and active_goal and active_goal.target_date:
+            days_until_goal = max(
+                (active_goal.target_date - current.astimezone(UTC).date()).days,
+                0,
+            )
         rows = self.database.fetch_all(
             """
             SELECT c.*, m.mastery_estimate, m.uncertainty, m.evidence_count,
@@ -106,6 +133,12 @@ class AdaptiveScheduler:
             prerequisite_mastery[item["concept_id"]].append((item["prerequisite_id"], mastery))
             if mastery < 0.45:
                 blocked_dependents[item["prerequisite_id"]] += 1
+        goal_focus_concepts = set(active_goal.focus_concepts if active_goal else [])
+        goal_focus_domains = set(active_goal.focus_domains if active_goal else [])
+        goal_targets = goal_focus_concepts | {
+            str(row["id"]) for row in rows if str(row["domain"]) in goal_focus_domains
+        }
+        goal_prerequisites = _transitive_prerequisites(goal_targets, prerequisite_rows)
 
         candidates: list[SchedulerCandidate] = []
         for row in rows:
@@ -127,6 +160,19 @@ class AdaptiveScheduler:
             profile_factor = float(
                 concept_weights.get(concept_id, domain_weights.get(row["domain"], 1.0))
             )
+            goal_factor = 1.0
+            goal_reason = ""
+            if concept_id in goal_focus_concepts:
+                goal_factor = 1.35
+                goal_reason = "It is explicitly prioritized by the active learning goal."
+            elif str(row["domain"]) in goal_focus_domains:
+                goal_factor = 1.2
+                goal_reason = "Its domain is prioritized by the active learning goal."
+            elif concept_id in goal_prerequisites:
+                goal_factor = 1.1
+                goal_reason = "It supports a prerequisite path toward the active learning goal."
+            elif goal_targets:
+                goal_factor = 0.9
             repeated_concept = concept_recency[concept_id]
             diversity = _clamp(1.0 - repeated_concept * 0.16, 0.42, 1.0)
             confidence = self._confidence_factor(last_by_concept.get(concept_id))
@@ -137,8 +183,8 @@ class AdaptiveScheduler:
                 prerequisite = 0.62
             prerequisite *= 1.0 + min(blocked_dependents.get(concept_id, 0), 3) * 0.18
             urgency = 1.0
-            if context.days_until_goal is not None:
-                horizon = _clamp((30 - context.days_until_goal) / 30, 0, 1)
+            if days_until_goal is not None:
+                horizon = _clamp((30 - days_until_goal) / 30, 0, 1)
                 relevance = 0.6 * (importance / 2.0) + 0.4 * (weakness / 1.3)
                 urgency += 0.3 * horizon * relevance
             priority = math.prod(
@@ -149,6 +195,7 @@ class AdaptiveScheduler:
                     uncertainty,
                     misconception_factor,
                     profile_factor,
+                    goal_factor,
                     diversity,
                     confidence,
                     prerequisite,
@@ -178,6 +225,7 @@ class AdaptiveScheduler:
                 "uncertainty": round(uncertainty, 3),
                 "misconception": round(misconception_factor, 3),
                 "profile": round(profile_factor, 3),
+                "goal": round(goal_factor, 3),
                 "diversity": round(diversity, 3),
                 "confidence": round(confidence, 3),
                 "prerequisite": round(prerequisite, 3),
@@ -207,6 +255,8 @@ class AdaptiveScheduler:
                 reasons.append("A retrieval review is due.")
             elif misconception:
                 reasons.append("An unresolved misconception needs another test.")
+            if goal_reason:
+                reasons.append(goal_reason)
             if weakest_prerequisite < 0.45 and blocked_dependents.get(concept_id, 0):
                 reasons.append(
                     "Reinforcing its prerequisite will also unblock dependent concepts."

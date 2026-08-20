@@ -7,7 +7,7 @@ import os
 import socket as socket_module
 import stat
 import time
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal, NoReturn
 
@@ -38,6 +38,7 @@ from .doctor import Doctor
 from .errors import TutorError
 from .evaluation import EvaluationService
 from .github import GitHubClient
+from .goals import GoalService, LearningGoal
 from .grader import create_grader_app
 from .jobs import JobQueue, Worker
 from .learner import LearnerModel
@@ -57,6 +58,8 @@ app = typer.Typer(
     pretty_exceptions_enable=False,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
+goal_app = typer.Typer(help="Manage durable learning goals.", no_args_is_help=True)
+app.add_typer(goal_app, name="goal")
 console = Console()
 
 
@@ -240,6 +243,88 @@ def status(
             f"[dim]Model cost:[/dim] ${float(snapshot.model_usage['cost_usd']):.4f}"
         )
         _print_readiness(snapshot.readiness, verbose=True)
+
+
+@goal_app.command("show")
+def goal_show(
+    ctx: typer.Context,
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Show the active learning goal."""
+    settings, database = _runtime(ctx)
+    goal = GoalService(database).active(settings.learner_id, settings.active_curriculum)
+    if json_output:
+        console.print_json(data=goal.model_dump(mode="json") if goal else None)
+    elif goal is None:
+        console.print("No active learning goal is set.")
+    else:
+        _print_goal(goal)
+
+
+@goal_app.command("set")
+def goal_set(
+    ctx: typer.Context,
+    statement: str = typer.Argument(..., help="The learning outcome to pursue."),
+    target_date: str | None = typer.Option(
+        None, "--target-date", metavar="YYYY-MM-DD", help="Optional completion date."
+    ),
+    domains: list[str] | None = typer.Option(
+        None, "--domain", help="Curriculum domain to prioritize; repeatable."
+    ),
+    concepts: list[str] | None = typer.Option(
+        None, "--concept", help="Curriculum concept to prioritize; repeatable."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Set or revise the active learning goal."""
+    settings, database = _runtime(ctx)
+    parsed_target = _parse_goal_date(target_date)
+    try:
+        goal = GoalService(database).set(
+            settings.learner_id,
+            settings.active_curriculum,
+            settings.active_profile,
+            statement,
+            target_date=parsed_target,
+            focus_domains=domains,
+            focus_concepts=concepts,
+        )
+    except ValueError as exc:
+        _abort(str(exc))
+    if json_output:
+        console.print_json(data=goal.model_dump(mode="json"))
+    else:
+        _print_goal(goal)
+
+
+@goal_app.command("history")
+def goal_history(
+    ctx: typer.Context,
+    limit: int = typer.Option(20, min=1, max=100, help="Maximum revisions to show."),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Show learning goal revision history."""
+    settings, database = _runtime(ctx)
+    goals = GoalService(database).history(
+        settings.learner_id, settings.active_curriculum, limit=limit
+    )
+    if json_output:
+        console.print_json(data=[goal.model_dump(mode="json") for goal in goals])
+        return
+    if not goals:
+        console.print("No learning goal history is available.")
+        return
+    table = Table("Revision", "Status", "Goal", "Target", "Focus", box=box.SIMPLE)
+    for goal in goals:
+        focus = ", ".join([*goal.focus_domains, *goal.focus_concepts]) or "all concepts"
+        table.add_row(
+            str(goal.revision),
+            goal.status.value,
+            Text(goal.statement),
+            goal.target_date.isoformat() if goal.target_date else "none",
+            focus,
+        )
+    console.print(table)
 
 
 @app.command("next")
@@ -444,6 +529,31 @@ def history(
             f"{float(row['score']):.0f}" if row["score"] is not None else "—",
         )
     console.print(table)
+
+
+@app.command()
+def review(
+    ctx: typer.Context,
+    assignment_id: str | None = typer.Argument(
+        None, help="Assignment ID; defaults to the latest completed review."
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show complete feedback for the latest or selected assignment review."""
+    settings, database = _runtime(ctx)
+    projection = StatusService(database).review(
+        settings.learner_id,
+        assignment_id,
+        github_owner=settings.github.owner,
+        workspace_repo=settings.github.workspace_repo,
+    )
+    if projection is None:
+        target = f" for assignment '{assignment_id}'" if assignment_id else ""
+        _abort(f"No completed review is available{target}.")
+    if json_output:
+        console.print_json(data=projection)
+        return
+    _print_review(projection)
 
 
 @app.command()
@@ -876,6 +986,34 @@ def _orchestrator(settings: TutorSettings, database: Database) -> TutorOrchestra
     return TutorOrchestrator(settings, database, github, evaluator)
 
 
+def _parse_goal_date(value: str | None) -> date | None:
+    if value is None:
+        return None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        _abort("--target-date must use YYYY-MM-DD.")
+    if parsed.isoformat() != value:
+        _abort("--target-date must use YYYY-MM-DD.")
+    return parsed
+
+
+def _print_goal(goal: LearningGoal) -> None:
+    console.print(
+        Text(
+            f"LEARNING GOAL · revision {goal.revision} · {goal.status.value}",
+            style="bold green",
+        )
+    )
+    console.print(Text(goal.statement, style="bold"))
+    console.print(f"Target: {goal.target_date.isoformat() if goal.target_date else 'none'}")
+    console.print(f"Profile: {goal.profile_id}")
+    domains = ", ".join(goal.focus_domains) or "none"
+    concepts = ", ".join(goal.focus_concepts) or "none"
+    console.print(f"Focus domains: {domains}")
+    console.print(f"Focus concepts: {concepts}")
+
+
 def _concept_names(database: Database) -> dict[str, str]:
     return {
         str(item["id"]): str(item["name"])
@@ -954,6 +1092,63 @@ def _print_readiness(domains: list[Any], *, verbose: bool = False) -> None:
             "[dim]Confidence describes uncertainty in the learner estimate, "
             "not confidence reported by the learner.[/dim]"
         )
+
+
+def _print_review(projection: dict[str, Any]) -> None:
+    assignment = projection["assignment"]
+    result = projection["review"]
+    console.print(Text(f"REVIEW · {assignment['id']}", style="bold green"))
+    console.print(Text(str(assignment["title"]), style="bold"))
+    classification = str(result["classification"]).replace("_", " ")
+    console.print(
+        f"[bold]{float(result['overall_score']):.0f}/100[/bold] · {classification.title()} · "
+        f"{str(result['review_kind']).title()} review · "
+        f"grader confidence {float(result['grader_confidence']):.0%}"
+    )
+    console.print()
+    console.print("[bold]Feedback[/bold]")
+    console.print(Text(str(result["feedback_summary"])))
+    for detail in result["feedback_details"]:
+        console.print(Text(f"- {detail}"))
+
+    console.print()
+    dimensions = Table("Dimension", "Score", "Rationale", box=box.SIMPLE)
+    for dimension in result["dimensions"]:
+        dimensions.add_row(
+            str(dimension["dimension"]).replace("_", " ").title(),
+            f"{float(dimension['score']):.0f}",
+            Text(str(dimension["rationale"])),
+        )
+    console.print(dimensions)
+
+    console.print("[bold]Follow-up[/bold]")
+    console.print(
+        Text(f"{str(result['follow_up']).replace('_', ' ').title()}: {result['follow_up_reason']}")
+    )
+    console.print()
+    console.print("[bold]Attempts[/bold]")
+    attempts = Table("Stage", "Submitted", "Outcome", "Confidence", "Score", "Commit")
+    for attempt in projection["attempts"]:
+        attempt_reviews = attempt["reviews"]
+        score = f"{float(attempt_reviews[0]['overall_score']):.0f}" if attempt_reviews else "—"
+        confidence = (
+            f"{int(attempt['learner_confidence'])}%"
+            if attempt["learner_confidence"] is not None
+            else "—"
+        )
+        attempts.add_row(
+            str(attempt["stage_number"]),
+            str(attempt["submitted_at"])[:10],
+            str(attempt["outcome"] or "pending").title(),
+            confidence,
+            score,
+            str(attempt["commit_sha"])[:8],
+        )
+    console.print(attempts)
+    if projection["pr_url"]:
+        console.print(f"[green]Pull request:[/green] {projection['pr_url']}")
+    else:
+        console.print("[dim]Pull request: not available[/dim]")
 
 
 def _print_console_report(document: ReportDocument, *, verbose: bool) -> None:

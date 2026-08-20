@@ -17,6 +17,7 @@ def test_migrations_are_versioned_and_idempotent(tmp_path: Path) -> None:
         "007",
         "008",
         "009",
+        "010",
     ]
     assert database.migrate() == []
     assert database.migration_versions() == [
@@ -29,6 +30,7 @@ def test_migrations_are_versioned_and_idempotent(tmp_path: Path) -> None:
         "007",
         "008",
         "009",
+        "010",
     ]
     assert database.integrity_check() == (True, "ok")
 

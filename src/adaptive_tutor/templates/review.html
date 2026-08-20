@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ projection.assignment.id }} review · Adaptive Tutor</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/"><span class="brand-mark">AT</span><span>Adaptive Tutor</span></a>
+      <a class="quiet-link" href="/">Back to today</a>
+    </header>
+    <main class="assignment-shell">
+      <p class="eyebrow">{{ projection.assignment.id }} · {{ projection.review.review_kind|replace('_', ' ') }} review</p>
+      <h1>{{ projection.assignment.title }}</h1>
+      <p class="assignment-summary">{{ projection.review.feedback_summary }}</p>
+      <div class="assignment-meta">
+        <span>{{ projection.review.overall_score|round|int }}/100</span>
+        <span>{{ projection.review.classification|replace('_', ' ') }}</span>
+        <span>Stage {{ projection.review.stage_number }}</span>
+        <span>{{ projection.review.created_at[:10] }}</span>
+      </div>
+      {% if projection.pr_url %}<a class="primary-action" href="{{ projection.pr_url }}" target="_blank" rel="noreferrer">Open pull request <span aria-hidden="true">→</span></a>{% endif %}
+
+      <div class="assignment-layout">
+        <section class="assignment-brief">
+          <div class="assignment-copy">
+            <h2>Feedback</h2>
+            {% if projection.review.feedback_details %}
+              <ul>{% for detail in projection.review.feedback_details %}<li>{{ detail }}</li>{% endfor %}</ul>
+            {% else %}
+              <p>No additional feedback details were recorded.</p>
+            {% endif %}
+
+            <h2>Dimension scores</h2>
+            {% for dimension in projection.review.dimensions %}
+              <h3>{{ dimension.dimension|replace('_', ' ')|title }} · {{ dimension.score|round|int }}/100</h3>
+              <p>{{ dimension.rationale }}</p>
+            {% endfor %}
+          </div>
+        </section>
+
+        <aside class="assignment-sidebar">
+          <section>
+            <p class="eyebrow">Follow-up</p>
+            <strong>{{ projection.review.follow_up|replace('_', ' ')|title }}</strong>
+            <p>{{ projection.review.follow_up_reason }}</p>
+          </section>
+          <section>
+            <p class="eyebrow">Attempts</p>
+            <ol class="stage-list">
+              {% for attempt in projection.attempts %}
+                <li class="{{ 'current' if attempt.id == projection.review.attempt_id else '' }}">
+                  <span>{{ attempt.stage_number }}</span>
+                  <div>
+                    <strong>{{ (attempt.outcome or 'pending')|title }}{% if attempt.reviews %} · {{ attempt.reviews[0].overall_score|round|int }}/100{% endif %}</strong>
+                    <small>{{ attempt.submitted_at[:10] }} · confidence {{ attempt.learner_confidence ~ '%' if attempt.learner_confidence is not none else 'not reported' }} · {{ attempt.commit_sha[:8] }}</small>
+                  </div>
+                </li>
+              {% endfor %}
+            </ol>
+          </section>
+          <section>
+            <p class="eyebrow">Assignment</p>
+            <p>{{ projection.assignment.exercise_type|replace('_', ' ')|title }} · difficulty {{ projection.assignment.difficulty }}/10 · {{ projection.assignment.status|replace('_', ' ') }}</p>
+            {% if projection.assignment.branch_name %}<code>{{ projection.assignment.branch_name }}</code>{% endif %}
+          </section>
+        </aside>
+      </div>
+    </main>
+  </body>
+</html>

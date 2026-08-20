@@ -416,3 +416,91 @@ class AssignmentService:
                 (current + 1, now, assignment_id),
             )
             return current + 1
+
+    def apply_review_transition(
+        self,
+        assignment_id: str,
+        attempt_id: str,
+        *,
+        follow_up: str,
+        overall_score: float,
+        occurred_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply the durable assignment transition for one accepted review."""
+        now = occurred_at or iso_now()
+        with self.database.transaction() as connection:
+            attempt = connection.execute(
+                """
+                SELECT assignment_id, stage_number FROM attempts
+                WHERE id=? AND assignment_id=?
+                """,
+                (attempt_id, assignment_id),
+            ).fetchone()
+            assignment = connection.execute(
+                "SELECT status, current_stage FROM assignments WHERE id=?",
+                (assignment_id,),
+            ).fetchone()
+            if attempt is None or assignment is None:
+                raise ConfigurationError("Review transition does not match a stored attempt")
+
+            connection.execute(
+                "UPDATE attempts SET outcome=? WHERE id=?",
+                ("success" if overall_score >= 70 else "failure", attempt_id),
+            )
+            attempt_stage = int(attempt["stage_number"] or 1)
+            current_stage = int(assignment["current_stage"])
+            if follow_up == "new_stage":
+                if current_stage > attempt_stage:
+                    return {
+                        "status": str(assignment["status"]),
+                        "next_stage": current_stage,
+                    }
+                following = connection.execute(
+                    """
+                    SELECT stage_number FROM assignment_stages
+                    WHERE assignment_id=? AND stage_number=?
+                    """,
+                    (assignment_id, current_stage + 1),
+                ).fetchone()
+                if following is None:
+                    raise RuntimeError("Validated stage progression has no authored next stage")
+                connection.execute(
+                    """
+                    UPDATE assignment_stages SET completed_at=COALESCE(completed_at, ?)
+                    WHERE assignment_id=? AND stage_number=?
+                    """,
+                    (now, assignment_id, current_stage),
+                )
+                connection.execute(
+                    """
+                    UPDATE assignment_stages SET unlocked_at=COALESCE(unlocked_at, ?)
+                    WHERE assignment_id=? AND stage_number=?
+                    """,
+                    (now, assignment_id, current_stage + 1),
+                )
+                connection.execute(
+                    """
+                    UPDATE assignments SET current_stage=?, status='follow_up', updated_at=?
+                    WHERE id=?
+                    """,
+                    (current_stage + 1, now, assignment_id),
+                )
+                return {"status": "follow_up", "next_stage": current_stage + 1}
+
+            status = "reviewing" if follow_up == "human_review" else "completed"
+            completed_at = now if status == "completed" else None
+            connection.execute(
+                """
+                UPDATE assignments SET status=?, updated_at=?, completed_at=? WHERE id=?
+                """,
+                (status, now, completed_at, assignment_id),
+            )
+            if status == "completed":
+                connection.execute(
+                    """
+                    UPDATE assignment_stages SET completed_at=COALESCE(completed_at, ?)
+                    WHERE assignment_id=? AND stage_number=?
+                    """,
+                    (now, assignment_id, attempt_stage),
+                )
+            return {"status": status, "next_stage": None}

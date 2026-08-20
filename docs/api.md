@@ -27,6 +27,7 @@ schema is available at `/api/v1/openapi.json`.
 | `GET` | `/api/v1/get_status` | Full runtime status projection. |
 | `GET` | `/api/v1/get_readiness` | Curriculum ID and readiness domains. |
 | `GET` | `/api/v1/get_active_assignment` | Public active assignment metadata or `null`. |
+| `GET` | `/api/v1/get_review?assignment_id=A-0004` | Latest or selected completed review projection. |
 | `POST` | `/api/v1/create_assignment` | Context-aware assignment creation through GitHub. |
 | `POST` | `/api/v1/generate_report?period=weekly` | Weekly or monthly structured and Markdown report. |
 | `POST` | `/api/v1/pause` | Pause new assignment creation. |
@@ -47,6 +48,20 @@ The status contains paused state, active curriculum and assignment, readiness,
 weaknesses, active misconceptions, upcoming reviews, recent scores and
 activity, and model token/cost totals. Private tutor-host bundle material is
 excluded.
+
+## Read a completed review
+
+```bash
+curl --fail \
+  --header "Authorization: Bearer ${ADAPTIVE_TUTOR_API_TOKEN}" \
+  'http://127.0.0.1:8765/api/v1/get_review?assignment_id=A-0004'
+```
+
+Omit `assignment_id` for the latest review. The result contains the assignment,
+selected qualitative review, dimension scores and rationale, detailed feedback,
+follow-up decision, all attempts and their review scores, and the pull-request
+URL when available. Private references, rubric, and evaluator guidance are
+excluded. A missing review returns `404`.
 
 ## Create an assignment
 

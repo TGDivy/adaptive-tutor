@@ -22,6 +22,8 @@ adaptive-tutor COMMAND --help
 | `readiness` | Show weighted readiness and uncertainty by domain. |
 | `concepts` | Inspect mastery, uncertainty, evidence, spacing, calibration, and trend by concept. |
 | `history` | List assignment status, attempts, and structured review scores. |
+| `review [ASSIGNMENT_ID]` | Show the latest or selected complete review, dimensions, feedback, follow-up, attempts, and pull request. |
+| `goal show` / `goal set` / `goal history` | Manage the durable, revisioned learning goal and optional curriculum focus. |
 | `report` | Generate a weekly or monthly console, Markdown, or JSON report. |
 | `pause` / `resume` | Stop or resume new assignment creation without discarding evaluation jobs. |
 | `demo` | Execute the credential-free product flow with bundled neutral submissions. |
@@ -39,6 +41,32 @@ adaptive-tutor next \
 
 The response exposes the chosen concept, format, target difficulty, priority,
 factor values, and explanation. It never exposes trusted answer material.
+
+### Learning goals
+
+```bash
+adaptive-tutor goal set "Build reliable network services" \
+  --domain networking \
+  --concept networking.flow-control \
+  --target-date 2026-12-31
+adaptive-tutor goal show --json
+adaptive-tutor goal history
+```
+
+Goal revisions are retained. Explicit concept/domain focus contributes a
+bounded scheduling factor, including prerequisite paths; a saved target date
+supplies the default urgency horizon. Free-form text is retained as the
+operator's objective but is not interpreted as a curriculum package.
+
+### Completed reviews
+
+```bash
+adaptive-tutor review
+adaptive-tutor review A-0004 --json
+```
+
+The projection includes dimension rationale, feedback, follow-up, every attempt
+and score, and the pull-request URL when the assignment was published remotely.
 
 ### Reports
 

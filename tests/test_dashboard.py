@@ -8,7 +8,7 @@ from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
 from adaptive_tutor.assignments import AssignmentService, AssignmentValidator
-from adaptive_tutor.config import ServerSettings, TutorSettings, load_settings
+from adaptive_tutor.config import GitHubSettings, ServerSettings, TutorSettings, load_settings
 from adaptive_tutor.curriculum import CurriculumLoader, bundled_curriculum_path
 from adaptive_tutor.dashboard import DashboardAuth, create_app
 from adaptive_tutor.db import Database
@@ -39,8 +39,10 @@ def test_dashboard_and_api_require_authentication_and_secure_writes(
         schema = client.get("/api/v1/openapi.json")
         assert schema.status_code == 200
         assert "/api/v1/get_status" in schema.json()["paths"]
+        assert "/api/v1/get_review" in schema.json()["paths"]
         unauthorized = client.get("/api/v1/get_status")
         assert unauthorized.status_code == 401
+        assert client.get("/api/v1/get_review").status_code == 401
         assert unauthorized.headers["x-frame-options"] == "DENY"
         assert "default-src 'self'" in unauthorized.headers["content-security-policy"]
         anonymous_dashboard = client.get("/", follow_redirects=False)
@@ -165,6 +167,12 @@ def test_rich_dashboard_assignment_and_agent_api_flow(
     monkeypatch.setenv("ADAPTIVE_TUTOR_API_TOKEN", token)
     settings = load_settings(Path(result.config_path), require_file=True)
     database = Database(Path(result.database_path))
+    database.execute("UPDATE assignments SET pull_number=42 WHERE id='A-0006'")
+    settings = settings.model_copy(
+        update={
+            "github": GitHubSettings(owner="example-owner", workspace_repo="learning-workspace")
+        }
+    )
 
     class StubOrchestrator:
         def __init__(self) -> None:
@@ -201,6 +209,23 @@ def test_rich_dashboard_assignment_and_agent_api_flow(
         assert str(result.assignment["title"]) in dashboard.text
         assert "Recent change" in dashboard.text
         assert "Recent scores" in dashboard.text
+        assert 'href="/review/A-0006"' in dashboard.text
+
+        completed_review = client.get("/review/A-0006")
+        assert completed_review.status_code == 200
+        for expected in (
+            "Feedback",
+            "Dimension scores",
+            "Follow-up",
+            "Attempts",
+            "Open pull request",
+            "The decoder still treats transport reads as message boundaries.",
+        ):
+            assert expected in completed_review.text
+        assert (
+            "https://github.com/example-owner/learning-workspace/pull/42" in completed_review.text
+        )
+        assert client.get("/review/A-9999").status_code == 404
 
         detail = client.get(f"/assignment/{assignment_id}")
         assert detail.status_code == 200
@@ -212,6 +237,21 @@ def test_rich_dashboard_assignment_and_agent_api_flow(
         assert client.get("/api/v1/get_readiness").json()["domains"]
         active = client.get("/api/v1/get_active_assignment").json()["assignment"]
         assert active["id"] == assignment_id
+        latest_review = client.get("/api/v1/get_review")
+        assert latest_review.status_code == 200
+        latest_payload = latest_review.json()
+        assert latest_payload["assignment"]["id"] == "A-0006"
+        assert latest_payload["review"]["dimensions"]
+        assert latest_payload["review"]["feedback_details"]
+        assert latest_payload["review"]["follow_up"]
+        assert latest_payload["attempts"]
+        assert latest_payload["pr_url"].endswith("/pull/42")
+
+        selected_review = client.get("/api/v1/get_review?assignment_id=A-0001")
+        assert selected_review.status_code == 200
+        assert selected_review.json()["assignment"]["id"] == "A-0001"
+        assert len(selected_review.json()["attempts"]) == 2
+        assert client.get("/api/v1/get_review?assignment_id=A-9999").status_code == 404
 
         csrf = DashboardAuth(settings).csrf_value
         assert csrf is not None
