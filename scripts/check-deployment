@@ -39,8 +39,8 @@ def validate_compose(payload: dict[str, Any], failures: list[str]) -> None:
     if not isinstance(services, dict):
         return
     require(
-        {"tutor", "worker", "grader", "initializer"}.issubset(services),
-        "compose must define tutor, worker, grader, and initializer services",
+        {"tutor", "worker", "grader", "initializer", "proxy"}.issubset(services),
+        "compose must define tutor, worker, grader, initializer, and proxy services",
         failures,
     )
     for name in ("tutor", "worker", "grader", "initializer"):
@@ -64,6 +64,7 @@ def validate_compose(payload: dict[str, Any], failures: list[str]) -> None:
     )
     worker = services.get("worker", {})
     grader = services.get("grader", {})
+    proxy = services.get("proxy", {})
     require(
         isinstance(worker, dict) and "remote" in worker.get("profiles", []),
         "remote worker must be explicitly profile-gated",
@@ -125,6 +126,38 @@ def validate_compose(payload: dict[str, Any], failures: list[str]) -> None:
     require(
         all("codex" not in target for target in worker_targets),
         "worker can read model credentials",
+        failures,
+    )
+    runtime_revision = "${SOURCE_REVISION:?Run ./prepare-compose.sh from deploy first}"
+    for name in ("tutor", "worker"):
+        environment = services.get(name, {}).get("environment", {})
+        require(
+            environment.get("ADAPTIVE_TUTOR_SOURCE_REVISION") == runtime_revision,
+            f"{name} runtime is not pinned to the exact source revision",
+            failures,
+        )
+    require(
+        isinstance(proxy, dict) and proxy.get("profiles") == ["live"],
+        "TLS proxy must be explicitly live-profile gated",
+        failures,
+    )
+    require(
+        isinstance(proxy, dict)
+        and "@sha256:" in str(proxy.get("image", ""))
+        and proxy.get("read_only") is True,
+        "TLS proxy image must be digest-pinned with a read-only root",
+        failures,
+    )
+    require(
+        isinstance(proxy, dict)
+        and proxy.get("cap_drop") == ["ALL"]
+        and proxy.get("cap_add") == ["NET_BIND_SERVICE"],
+        "TLS proxy must retain only the bind-service capability",
+        failures,
+    )
+    require(
+        (ROOT / "deploy" / "Caddyfile").is_file(),
+        "automatic TLS proxy configuration is missing",
         failures,
     )
 
@@ -295,7 +328,8 @@ def validate_with_tools(failures: list[str]) -> None:
             env_file = root / "compose.env"
             runtime = root / "runtime"
             env_file.write_text(
-                f"TUTOR_RUNTIME_DIR={runtime}\nTUTOR_UID=1000\nTUTOR_GID=1000\n",
+                f"TUTOR_RUNTIME_DIR={runtime}\nTUTOR_UID=1000\nTUTOR_GID=1000\n"
+                f"SOURCE_REVISION={'a' * 40}\nTUTOR_DOMAIN=tutor.example.test\n",
                 encoding="utf-8",
             )
             compose = subprocess.run(  # noqa: S603 - resolved executable and fixed arguments

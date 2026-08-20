@@ -6,10 +6,11 @@ x-runtime: &runtime
     context: ..
     dockerfile: Dockerfile
     args:
-      SOURCE_REVISION: ${SOURCE_REVISION:-local}
+      SOURCE_REVISION: ${SOURCE_REVISION:?Run ./prepare-compose.sh from deploy first}
   user: "${TUTOR_UID:-1000}:${TUTOR_GID:-1000}"
   environment:
     ADAPTIVE_TUTOR_CONFIG: /etc/adaptive-tutor/config.yaml
+    ADAPTIVE_TUTOR_SOURCE_REVISION: ${SOURCE_REVISION:?Run ./prepare-compose.sh from deploy first}
     HOME: /var/lib/adaptive-tutor
     CODEX_HOME: /var/lib/adaptive-tutor-codex
   read_only: true
@@ -61,6 +62,7 @@ services:
     environment:
       ADAPTIVE_TUTOR_CONFIG: /etc/adaptive-tutor/config.yaml
       ADAPTIVE_TUTOR_GRADER_SOCKET: /run/adaptive-tutor-grader/grader.sock
+      ADAPTIVE_TUTOR_SOURCE_REVISION: ${SOURCE_REVISION:?Run ./prepare-compose.sh from deploy first}
       HOME: /var/lib/adaptive-tutor
     env_file:
       - path: ${TUTOR_RUNTIME_DIR:-./runtime}/worker.env
@@ -109,3 +111,46 @@ services:
     restart: "no"
     healthcheck:
       disable: true
+
+  proxy:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    profiles: ["live"]
+    environment:
+      TUTOR_DOMAIN: ${TUTOR_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+    pids_limit: 128
+    restart: unless-stopped
+    depends_on:
+      tutor:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  caddy-data:
+  caddy-config:

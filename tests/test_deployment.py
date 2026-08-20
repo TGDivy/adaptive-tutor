@@ -24,6 +24,7 @@ def test_compose_is_loopback_rootless_and_credential_separated() -> None:
     tutor = payload["services"]["tutor"]
     worker = payload["services"]["worker"]
     grader = payload["services"]["grader"]
+    proxy = payload["services"]["proxy"]
 
     assert tutor["ports"] == ["127.0.0.1:${TUTOR_PORT:-8765}:8765"]
     assert tutor["read_only"] is True
@@ -59,6 +60,18 @@ def test_compose_is_loopback_rootless_and_credential_separated() -> None:
     assert "codex" not in str(worker["volumes"])
     assert worker["profiles"] == ["remote"]
     assert grader["profiles"] == ["remote"]
+    assert tutor["environment"]["ADAPTIVE_TUTOR_SOURCE_REVISION"].startswith(
+        "${SOURCE_REVISION:?"
+    )
+    assert worker["environment"]["ADAPTIVE_TUTOR_SOURCE_REVISION"].startswith(
+        "${SOURCE_REVISION:?"
+    )
+    assert proxy["profiles"] == ["live"]
+    assert "@sha256:" in proxy["image"]
+    assert proxy["read_only"] is True
+    assert proxy["cap_drop"] == ["ALL"]
+    assert proxy["cap_add"] == ["NET_BIND_SERVICE"]
+    assert proxy["ports"] == ["80:80", "443:443", "443:443/udp"]
 
 
 def test_systemd_units_restart_and_harden_services() -> None:
