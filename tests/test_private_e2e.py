@@ -114,3 +114,47 @@ def test_private_proof_has_no_self_hosted_runner_handoff() -> None:
     assert "registration-token" not in source
     assert "stage-request" not in source
     assert "_run_ephemeral_runner" not in source
+
+
+def test_private_proof_bootstraps_an_empty_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class Response:
+        status_code = 404
+
+    class Client:
+        @staticmethod
+        def get(_path: str) -> Response:
+            return Response()
+
+    class API:
+        client = Client()
+
+        @staticmethod
+        def request(method: str, path: str, **_kwargs: object) -> object:
+            calls.append((method, path))
+
+            class Initialized:
+                @staticmethod
+                def json() -> dict[str, object]:
+                    return {"commit": {"sha": "a" * 40}}
+
+            return Initialized()
+
+    replace = _driver("_replace_default_tree")
+    monkeypatch.setitem(replace.__globals__, "_remove_protection", lambda *_: None)
+    monkeypatch.setitem(
+        replace.__globals__,
+        "_commit_tree",
+        lambda *_args, **kwargs: str(kwargs["parent"]),
+    )
+
+    commit = replace(API(), "owner", "workspace", {"README.md": b"ok"}, "message")
+
+    assert commit == "a" * 40
+    assert calls == [
+        ("PUT", "/repos/owner/workspace/contents/.adaptive-tutor-bootstrap"),
+        ("PATCH", "/repos/owner/workspace"),
+    ]

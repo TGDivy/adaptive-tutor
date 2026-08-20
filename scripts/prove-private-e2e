@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import hmac
 import json
@@ -309,7 +310,21 @@ def _replace_default_tree(
 ) -> str:
     _remove_protection(api, owner, repo)
     reference = api.client.get(f"/repos/{owner}/{repo}/git/ref/heads/main")
-    parent = str(reference.json()["object"]["sha"]) if reference.status_code == 200 else None
+    if reference.status_code == 404:
+        initialized = api.request(
+            "PUT",
+            f"/repos/{owner}/{repo}/contents/.adaptive-tutor-bootstrap",
+            expected=(201,),
+            json={
+                "message": "Initialize private Adaptive Tutor repository",
+                "content": base64.b64encode(b"initialized\n").decode(),
+            },
+        ).json()
+        parent = str(initialized["commit"]["sha"])
+    elif reference.status_code == 200:
+        parent = str(reference.json()["object"]["sha"])
+    else:
+        raise RuntimeError("could not inspect the private repository default branch")
     commit = _commit_tree(
         api,
         owner,
