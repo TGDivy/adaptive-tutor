@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -214,6 +215,104 @@ def write_initial_config(
     )
     secrets_path.chmod(0o600)
     return config_path, secrets_path
+
+
+def update_setup_config(
+    path: Path,
+    *,
+    public_url: str,
+    github_owner: str | None = None,
+    workspace_repo: str | None = None,
+    app_id: int | None = None,
+    installation_id: int | None = None,
+    private_key_path: Path | None = None,
+    codex_enabled: bool | None = None,
+) -> TutorSettings:
+    """Atomically update non-secret setup fields in an existing private config."""
+    config_path = path.expanduser().resolve()
+    if not config_path.is_file() or config_path.is_symlink():
+        raise ConfigurationError(f"Configuration not found at {config_path}")
+    try:
+        payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConfigurationError(f"Invalid configuration at {config_path}: {exc}") from exc
+    github = payload.setdefault("github", {})
+    github["webhook_url"] = public_url.rstrip("/")
+    if github_owner is not None:
+        github["owner"] = github_owner
+    if workspace_repo is not None:
+        github["workspace_repo"] = workspace_repo
+    if app_id is not None:
+        github["app_id"] = app_id
+    if installation_id is not None:
+        github["installation_id"] = installation_id
+    if private_key_path is not None:
+        github["private_key_path"] = str(private_key_path.expanduser().resolve())
+    if codex_enabled is not None:
+        payload.setdefault("codex", {})["enabled"] = codex_enabled
+    settings = TutorSettings.model_validate(payload)
+    serialized = yaml.safe_dump(payload, sort_keys=False)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=config_path.parent,
+        prefix=config_path.name + ".",
+        delete=False,
+    ) as temporary:
+        temporary.write(serialized)
+        temporary.flush()
+        os.fsync(temporary.fileno())
+        temporary_path = Path(temporary.name)
+    temporary_path.chmod(0o600)
+    temporary_path.replace(config_path)
+    config_path.chmod(0o600)
+    settings.ensure_runtime_dirs()
+    if settings.secrets_file and settings.secrets_file.is_file():
+        _load_secrets_file(settings.secrets_file)
+    return _apply_runtime_overrides(settings)
+
+
+def upsert_secret(path: Path, name: str, value: str) -> None:
+    """Atomically store one Adaptive Tutor secret in the owner-only env file."""
+    if not name.startswith("ADAPTIVE_TUTOR_") or not name.replace("_", "").isalnum():
+        raise ConfigurationError("Invalid Adaptive Tutor secret name")
+    if not value or "\n" in value or "\r" in value:
+        raise ConfigurationError("Secret value must be one non-empty line")
+    target = path.expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target.parent.chmod(0o700)
+    existing: list[str] = []
+    if target.exists():
+        if target.is_symlink():
+            raise ConfigurationError("Secrets file cannot be a symlink")
+        existing = target.read_text(encoding="utf-8").splitlines()
+    replacement = f"{name}={value}"
+    output: list[str] = []
+    replaced = False
+    for line in existing:
+        if line.split("=", 1)[0].strip() == name:
+            if not replaced:
+                output.append(replacement)
+                replaced = True
+        else:
+            output.append(line)
+    if not replaced:
+        output.append(replacement)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=target.parent,
+        prefix=target.name + ".",
+        delete=False,
+    ) as temporary:
+        temporary.write("\n".join(output).rstrip("\n") + "\n")
+        temporary.flush()
+        os.fsync(temporary.fileno())
+        temporary_path = Path(temporary.name)
+    temporary_path.chmod(0o600)
+    temporary_path.replace(target)
+    target.chmod(0o600)
+    os.environ[name] = value
 
 
 def _load_secrets_file(path: Path) -> None:

@@ -28,6 +28,7 @@ from .config import (
     CodexSettings,
     TutorSettings,
     load_settings,
+    update_setup_config,
     write_initial_config,
 )
 from .curriculum import CurriculumLoader, bundled_curriculum_path
@@ -47,6 +48,7 @@ from .orchestrator import TutorOrchestrator
 from .reporting import ReportDocument, ReportService
 from .runner import evaluate_public_workspace_to_file
 from .scheduler import AdaptiveScheduler
+from .setup import LiveSetupExecutor, SetupRun, SetupService
 from .state import StatusService
 
 app = typer.Typer(
@@ -60,6 +62,12 @@ app = typer.Typer(
 )
 goal_app = typer.Typer(help="Manage durable learning goals.", no_args_is_help=True)
 app.add_typer(goal_app, name="goal")
+setup_app = typer.Typer(
+    help="Provision and verify a live Adaptive Tutor server.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
+app.add_typer(setup_app, name="setup")
 console = Console()
 
 
@@ -143,6 +151,101 @@ def init_command(
             "[yellow]GitHub owner saved; configure a GitHub App before remote assignments.[/yellow]"
         )
     console.print("Next: [bold]adaptive-tutor doctor[/bold], then [bold]adaptive-tutor demo[/bold]")
+
+
+@setup_app.callback()
+def setup_command(
+    ctx: typer.Context,
+    public_url: str | None = typer.Option(
+        None, "--public-url", help="Public HTTPS base URL for dashboard and webhooks."
+    ),
+    goal: str | None = typer.Option(None, "--goal", help="Initial private learning objective."),
+    data_dir: Path | None = typer.Option(
+        None, help="Private state directory when setup creates configuration."
+    ),
+    github_owner: str | None = typer.Option(
+        None, help="github.com owner; defaults to the configured value."
+    ),
+    workspace_repo: str | None = typer.Option(
+        None, help="Private learner repository; defaults to learning-workspace."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Start guided setup when no setup subcommand is supplied."""
+    if ctx.invoked_subcommand is not None:
+        return
+    if not public_url or not goal:
+        _abort("Starting setup requires --public-url HTTPS_URL and --goal TEXT.")
+    context = _context(ctx)
+    config_path = (context.config_path or DEFAULT_CONFIG_PATH).expanduser().resolve()
+    try:
+        if config_path.exists():
+            current = load_settings(config_path, require_file=True)
+            settings = update_setup_config(
+                config_path,
+                public_url=public_url,
+                github_owner=github_owner,
+                workspace_repo=workspace_repo,
+            )
+            if data_dir is not None and data_dir.expanduser().resolve() != current.data_dir:
+                raise ValueError("--data-dir cannot change an existing setup's private state")
+        else:
+            write_initial_config(
+                config_path,
+                data_dir=data_dir,
+                github_owner=github_owner or "",
+                workspace_repo=workspace_repo or "learning-workspace",
+                webhook_url=public_url,
+            )
+            settings = load_settings(config_path, require_file=True)
+        database = _bootstrap(settings, force_load=True)
+        service = SetupService(database)
+        service.begin(
+            public_url=public_url,
+            goal_statement=goal,
+            config_path=config_path,
+            learner_id=settings.learner_id,
+            curriculum_id=settings.active_curriculum,
+        )
+        run = service.resume(LiveSetupExecutor(settings, database, config_path=config_path))
+    except (TutorError, ValueError, OSError) as exc:
+        _abort(str(exc))
+    _print_setup(run, json_output=json_output)
+    if run.status != "ready":
+        raise typer.Exit(2)
+
+
+@setup_app.command("status")
+def setup_status(
+    ctx: typer.Context,
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Show durable setup progress and the next required action."""
+    _, database = _runtime(ctx)
+    run = SetupService(database).current()
+    if run is None:
+        _abort("No setup exists; run adaptive-tutor setup --public-url ... --goal ...")
+    _print_setup(run, json_output=json_output)
+
+
+@setup_app.command("resume")
+def setup_resume(
+    ctx: typer.Context,
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Resume at the first incomplete setup step."""
+    context = _context(ctx)
+    config_path = (context.config_path or DEFAULT_CONFIG_PATH).expanduser().resolve()
+    settings, database = _runtime(ctx)
+    try:
+        run = SetupService(database).resume(
+            LiveSetupExecutor(settings, database, config_path=config_path)
+        )
+    except (TutorError, ValueError, OSError) as exc:
+        _abort(str(exc))
+    _print_setup(run, json_output=json_output)
+    if run.status != "ready":
+        raise typer.Exit(2)
 
 
 @app.command()
@@ -942,7 +1045,7 @@ def webhook_setup(ctx: typer.Context) -> None:
 
 
 def _context(ctx: typer.Context) -> CLIContext:
-    value = ctx.obj
+    value = ctx.find_root().obj
     if not isinstance(value, CLIContext):
         return CLIContext(None)
     return value
@@ -1012,6 +1115,47 @@ def _print_goal(goal: LearningGoal) -> None:
     concepts = ", ".join(goal.focus_concepts) or "none"
     console.print(f"Focus domains: {domains}")
     console.print(f"Focus concepts: {concepts}")
+
+
+def _print_setup(run: SetupRun, *, json_output: bool) -> None:
+    if json_output:
+        console.print_json(data=run.model_dump(mode="json"))
+        return
+    state_style = {
+        "provisioning": "cyan",
+        "action_required": "yellow",
+        "failed": "red",
+        "ready": "green",
+    }[run.status]
+    console.print(
+        f"[bold]Adaptive Tutor setup[/bold]  "
+        f"[{state_style}]{run.status.replace('_', ' ').upper()}[/{state_style}]"
+    )
+    console.print(f"[dim]Public URL:[/dim] {run.public_url}")
+    console.print(f"[dim]Goal:[/dim] {run.goal_statement}")
+    table = Table("Step", "State", "Detail", box=box.SIMPLE, expand=True)
+    for step in run.steps:
+        style = {
+            "complete": "green",
+            "running": "cyan",
+            "waiting_user": "yellow",
+            "failed_retryable": "red",
+            "failed_terminal": "red",
+            "pending": "dim",
+        }[step.status]
+        detail = step.detail
+        if step.action:
+            detail += ("\n" if detail else "") + f"Next: {step.action}"
+        table.add_row(
+            step.name.replace("_", " ").title(),
+            Text(step.status.replace("_", " "), style=style),
+            Text(detail or "Pending"),
+        )
+    console.print(table)
+    if run.status == "ready":
+        console.print("[green bold]Strict live setup verification passed.[/green bold]")
+    else:
+        console.print("Resume with [bold]adaptive-tutor setup resume[/bold].")
 
 
 def _concept_names(database: Database) -> dict[str, str]:

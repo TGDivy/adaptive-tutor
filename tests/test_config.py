@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from adaptive_tutor.config import load_settings, write_initial_config
+from adaptive_tutor.config import (
+    load_settings,
+    update_setup_config,
+    upsert_secret,
+    write_initial_config,
+)
 from adaptive_tutor.errors import ConfigurationError
 
 
@@ -87,3 +92,32 @@ def test_initial_config_validates_before_writing(tmp_path: Path) -> None:
 
     assert not config_path.exists()
     assert not (data_dir / "secrets.env").exists()
+
+
+def test_setup_config_and_secret_updates_are_atomic_and_private(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "config.yaml"
+    data_dir = tmp_path / "state"
+    _, secrets_path = write_initial_config(config_path, data_dir=data_dir)
+
+    settings = update_setup_config(
+        config_path,
+        public_url="https://tutor.example.test/",
+        github_owner="example-owner",
+        workspace_repo="learning-workspace",
+        app_id=123,
+        installation_id=456,
+        private_key_path=data_dir / "github-app.pem",
+        codex_enabled=True,
+    )
+    upsert_secret(secrets_path, "ADAPTIVE_TUTOR_WEBHOOK_SECRET", "rotated-webhook-value")
+
+    assert settings.github.webhook_url == "https://tutor.example.test"
+    assert settings.github.owner == "example-owner"
+    assert settings.github.app_id == 123
+    assert settings.github.installation_id == 456
+    assert settings.codex.enabled is True
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(secrets_path.stat().st_mode) == 0o600
+    assert secrets_path.read_text(encoding="utf-8").count("ADAPTIVE_TUTOR_WEBHOOK_SECRET=") == 1
+    assert "rotated-webhook-value" in secrets_path.read_text(encoding="utf-8")
+    assert "rotated-webhook-value" not in config_path.read_text(encoding="utf-8")
